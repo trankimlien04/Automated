@@ -30,6 +30,7 @@ const publisherRoutes = require('./routes/publisherRoutes');
 const reviewRoutes = require('./routes/reviewRoutes');
 const historyRoutes = require('./routes/historyRoutes');
 const activityRoutes = require('./routes/activityRoutes');
+const searchRoutes = require('./routes/searchRoutes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/books', bookRoutes);
@@ -47,10 +48,13 @@ app.use('/api/publishers', publisherRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/history', historyRoutes);
 app.use('/api/activity-logs', activityRoutes);
+app.use('/api/search', searchRoutes);
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`Server is running on port ${PORT}`);
+    const initDb = require('./config/initDb');
+    await initDb();
     const initCronJobs = require('./services/cronJobs');
     initCronJobs();
 });

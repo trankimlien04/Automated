@@ -72,22 +72,23 @@ Dự án đã được tích hợp sẵn script chạy tự động cho Windows:
 
 ## 🔐 Thông tin tài khoản mặc định (Dữ liệu mẫu)
 
-Hệ thống cung cấp sẵn các tài khoản với các vai trò khác nhau để phục vụ quá trình phát triển và kiểm thử:
+Hệ thống cung cấp sẵn 4 tài khoản chuẩn hóa đại diện cho 4 vai trò để phục vụ phát triển, kiểm thử và demo:
 
-| Vai trò | Tên người dùng | Email | Mật khẩu |
-| :--- | :--- | :--- | :--- |
-| **Quản trị viên (Admin)** | Administrator | `admin@library.com` | `admin123` |
-| **Thủ thư (Librarian)** | Trần Thủ Thư | `librarian@library.com` | `123456` |
-| **Thủ thư (Librarian)** | Lê Thi Phương | `phuong.thuthu@library.com` | `123456` |
-| **Độc giả (Reader)** | Nguyễn Minh Anh | `reader@library.com` | `123456` |
+| Vai trò | Tên người dùng | Email | Mật khẩu | Mã thẻ |
+| :--- | :--- | :--- | :--- | :--- |
+| **Quản trị viên (Admin)** | Administrator | `admin@library.com` | `admin123` | `LIB-AD-000001` |
+| **Thủ thư (Librarian)** | Trần Thủ Thư | `librarian@library.com` | `123456` | `LIB-LB-000001` |
+| **Độc giả (Reader)** | Nguyễn Minh A | `reader@library.com` | `123456` | `LIB-RD-100001` |
+| **Chủ thư viện (Owner)** | Trần Văn Chủ | `owner@library.com` | `123456` | `LIB-OW-000001` |
 
-*(Mật khẩu của tất cả các tài khoản độc giả và thủ thư khác trong hệ thống mặc định đều là `123456`).*
+*(Mật khẩu của tài khoản Admin là `admin123`, các tài khoản còn lại mặc định là `123456`).*
 
 ---
 
 ## 🌟 Chức năng chính
 
-1. **Quản lý hệ thống & Phân quyền:** Phân quyền theo Admin, Thủ thư và Độc giả. Quản lý tài khoản và cấu hình hệ thống.
+1. **Quản lý hệ thống & Phân quyền RBAC 4 vai trò:** Quản trị viên (Admin), Thủ thư (Librarian), Độc giả (Reader), Chủ thư viện / Giám đốc (Owner).
+2. **Cơ chế Đề xuất & Phê duyệt 2 cấp (Maker - Checker):** Admin gửi đề xuất thay đổi chính sách vận hành (phí phạt, hạn mượn, giới hạn sách) và Chủ thư viện độc quyền phê duyệt/bác bỏ.
 2. **Quản lý Kho tài liệu:** Quản lý Sách, Bản sao sách (Book Copies), Thể loại (Categories), Tác giả (Authors), Nhà xuất bản (Publishers). Hỗ trợ QR Code cho từng bản sao sách.
 3. **Quản lý Mượn/Trả sách:** Giao diện tối ưu cho mượn/trả sách; quét mã QR Thẻ độc giả và Mã QR sách để tự động điền thông tin.
 4. **Quản lý Đặt trước (Reservations):** Độc giả có thể đặt trước các cuốn sách đang được mượn.
