@@ -2,7 +2,7 @@ const db = require('./config/db');
 const bcrypt = require('bcrypt');
 
 async function seed() {
-    console.log('🚀 Bắt đầu seeding dữ liệu toàn diện cho Smart Library...');
+    console.log('🚀 Bắt đầu seeding dữ liệu chuẩn hóa cho Smart Library...');
 
     try {
         // 1. Clear existing data safely
@@ -21,22 +21,30 @@ async function seed() {
         await db.execute('TRUNCATE TABLE authors');
         await db.execute('TRUNCATE TABLE publishers');
         await db.execute('TRUNCATE TABLE users');
+        await db.execute('CREATE TABLE IF NOT EXISTS config_change_requests (id INT AUTO_INCREMENT PRIMARY KEY, key_name VARCHAR(100) NOT NULL, current_value TEXT, proposed_value TEXT NOT NULL, reason TEXT, requested_by INT NOT NULL, status ENUM("pending", "approved", "rejected") DEFAULT "pending", reviewed_by INT NULL, reviewed_at DATETIME NULL, review_note TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE CASCADE, FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL)');
+        await db.execute('TRUNCATE TABLE config_change_requests');
+        await db.execute('TRUNCATE TABLE system_configs');
         await db.execute('SET FOREIGN_KEY_CHECKS = 1');
 
-        // 2. Seed Users
-        console.log('👤 Seeding danh sách người dùng...');
+        // 2. System Configs
+        console.log('⚙️ Seeding cấu hình hệ thống...');
+        await db.execute(`
+            INSERT INTO system_configs (key_name, value, description) VALUES
+            ('max_borrow_days', '14', 'Số ngày mượn tối đa cho mỗi sách'),
+            ('fine_per_day', '5000', 'Số tiền phạt mỗi ngày trễ hạn (VNĐ)'),
+            ('max_books_per_user', '5', 'Số lượng sách tối đa một độc giả được mượn (chưa trả)')
+        `);
+
+        // 3. Seed Users (4 Vai trò chuẩn: Admin, Librarian, Reader, Owner)
+        console.log('👤 Seeding danh sách 4 người dùng chuẩn hóa...');
         const adminHash = await bcrypt.hash('admin123', 10);
         const standardHash = await bcrypt.hash('123456', 10);
 
         const usersData = [
             [1, 'Administrator', 'admin@library.com', adminHash, 'admin', '0901111222', 'LIB-AD-000001', '2030-12-31', 'active'],
             [2, 'Trần Thủ Thư', 'librarian@library.com', standardHash, 'librarian', '0902222333', 'LIB-LB-000001', '2028-12-31', 'active'],
-            [3, 'Lê Thi Phương', 'phuong.thuthu@library.com', standardHash, 'librarian', '0903333444', 'LIB-LB-000002', '2028-12-31', 'active'],
-            [4, 'Nguyễn Minh Anh', 'reader@library.com', standardHash, 'reader', '0904444555', 'LIB-RD-100001', '2027-06-30', 'active'],
-            [5, 'Phạm Hoàng Nam', 'hoang.nam@gmail.com', standardHash, 'reader', '0905555666', 'LIB-RD-100002', '2027-06-30', 'active'],
-            [6, 'Vũ Thu Trang', 'thu.trang@gmail.com', standardHash, 'reader', '0906666777', 'LIB-RD-100003', '2027-06-30', 'active'],
-            [7, 'Đỗ Đức Hiếu', 'duc.hieu@gmail.com', standardHash, 'reader', '0907777888', 'LIB-RD-100004', '2027-06-30', 'active'],
-            [8, 'Bùi Lan Hương', 'lan.huong@gmail.com', standardHash, 'reader', '0908888999', 'LIB-RD-100005', '2027-06-30', 'pending']
+            [3, 'Nguyễn Minh A', 'reader@library.com', standardHash, 'reader', '0904444555', 'LIB-RD-100001', '2027-06-30', 'active'],
+            [4, 'Trần Văn Chủ', 'owner@library.com', standardHash, 'owner', '0909999000', 'LIB-OW-000001', '2030-12-31', 'active']
         ];
 
         for (const u of usersData) {
@@ -47,7 +55,15 @@ async function seed() {
             );
         }
 
-        // 3. Seed Categories
+        // 4. Seed Config Change Requests
+        console.log('📝 Seeding đề xuất cấu hình mẫu (Maker - Checker)...');
+        await db.execute(
+            `INSERT INTO config_change_requests (id, key_name, current_value, proposed_value, reason, requested_by, status) 
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+            [1, 'fine_per_day', '5000', '10000', 'Đề xuất tăng phí phạt theo quý mới nhằm giảm tỷ lệ trả sách trễ hạn', 1, 'pending']
+        );
+
+        // 5. Seed Categories
         console.log('🏷️ Seeding thể loại sách...');
         const categoriesData = [
             [1, 'Văn học', null, 'Tiểu thuyết, truyện ngắn, thơ ca Việt Nam và thế giới'],
@@ -62,7 +78,7 @@ async function seed() {
             await db.execute('INSERT INTO categories (id, name, parent_id, description) VALUES (?, ?, ?, ?)', c);
         }
 
-        // 4. Seed Authors
+        // 6. Seed Authors
         console.log('✍️ Seeding tác giả...');
         const authorsData = [
             [1, 'Nguyễn Nhật Ánh', 'Nhà văn gạo cội của văn học thanh thiếu niên Việt Nam với hàng loạt tác phẩm kinh điển.', 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=200'],
@@ -78,7 +94,7 @@ async function seed() {
             await db.execute('INSERT INTO authors (id, name, bio, image_url) VALUES (?, ?, ?, ?)', a);
         }
 
-        // 5. Seed Publishers
+        // 7. Seed Publishers
         console.log('🏢 Seeding nhà xuất bản...');
         const publishersData = [
             [1, 'NXB Trẻ', '161B Lý Chính Thắng, Q.3, TP. Hồ Chí Minh', 'contact@nxbtre.com.vn'],
@@ -92,118 +108,75 @@ async function seed() {
             await db.execute('INSERT INTO publishers (id, name, address, contact_email) VALUES (?, ?, ?, ?)', p);
         }
 
-        // 6. Seed Books
+        // 8. Seed Books
         console.log('📚 Seeding đầu sách...');
         const booksData = [
-            { id: 1, title: 'Mắt Biếc', author_id: 1, publisher_id: 1, category_id: 1, isbn: '978-604-1-15234-8', published_year: 2019, description: 'Tác phẩm lãng mạn kinh điển về tình yêu tuổi học trò giữa Ngạn và Hà Lan.', cover_image: 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400', total: 5 },
-            { id: 2, title: 'Lược Sử Thời Gian', author_id: 2, publisher_id: 1, category_id: 2, isbn: '978-604-1-08912-5', published_year: 2018, description: 'Hành trình khám phá không gian, thời gian, hố đen và nguồn gốc của vũ trụ.', cover_image: 'https://images.unsplash.com/photo-1532012197267-da84d127e765?w=400', total: 4 },
-            { id: 3, title: 'Đắc Nhân Tâm', author_id: 3, publisher_id: 2, category_id: 4, isbn: '978-604-53-4821-3', published_year: 2020, description: 'Nghệ thuật ứng xử, thu phục lòng người và xây dựng mối quan hệ bền vững.', cover_image: 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=400', total: 6 },
-            { id: 4, title: 'Lập trình Node.js & React Thực Chiến', author_id: 5, publisher_id: 4, category_id: 2, isbn: '978-604-89-1234-0', published_year: 2024, description: 'Hướng dẫn từ cơ bản đến nâng cao xây dựng ứng dụng web hiện đại fullstack.', cover_image: 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=400', total: 4 },
-            { id: 5, title: 'Rừng Na Uy', author_id: 4, publisher_id: 2, category_id: 1, isbn: '978-604-964-112-9', published_year: 2021, description: 'Tiểu thuyết lừng danh về ký ức, tình yêu và những hoài niệm tuổi trẻ ở Tokyo.', cover_image: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?w=400', total: 3 },
-            { id: 6, title: 'Atomic Habits - Thói Quen Nguyên Tử', author_id: 7, publisher_id: 5, category_id: 4, isbn: '978-604-77-8910-1', published_year: 2022, description: 'Phương pháp thay đổi 1% mỗi ngày để tạo nên những kết quả phi thường.', cover_image: 'https://images.unsplash.com/photo-1589829085413-56de8ae18c73?w=400', total: 5 },
-            { id: 7, title: 'Steve Jobs', author_id: 5, publisher_id: 4, category_id: 3, isbn: '978-604-98-3344-9', published_year: 2021, description: 'Cuốn tiểu sở độc quyền về cuộc đời vị sáng lập tài ba của Apple.', cover_image: 'https://images.unsplash.com/photo-1516979187457-637abb4f9353?w=400', total: 3 },
-            { id: 8, title: 'Truyện Kiều', author_id: 6, publisher_id: 2, category_id: 1, isbn: '978-604-56-1122-1', published_year: 2017, description: 'Kiệt tác thơ Nôm tài hoa của Đại thi hào Nguyễn Du.', cover_image: 'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?w=400', total: 4 },
-            { id: 9, title: 'Kính Vạn Hoa', author_id: 1, publisher_id: 3, category_id: 6, isbn: '978-604-2-23112-8', published_year: 2023, description: 'Bộ truyện học trò hồn nhiên, hài hước và giàu tình bạn của bộ ba Quý rố, Hạnh, Tiểu Long.', cover_image: 'https://images.unsplash.com/photo-1495446815901-a7297e633e8d?w=400', total: 5 }
+            [1, 'Mắt Biếc', 1, 1, 1, '978-604-1-15234-8', 2019, 'Tác phẩm lãng mạn kinh điển về tình yêu tuổi học trò giữa Ngạn và Hà Lan.', 'https://images.unsplash.com/photo-1544716278-ca5e3f4abd8c?w=400', 5, 4, 5.00],
+            [2, 'Lược Sử Thời Gian', 2, 1, 2, '978-604-1-08912-5', 2018, 'Hành trình khám phá không gian, thời gian, hố đen và nguồn gốc của vũ trụ.', 'https://images.unsplash.com/photo-1532012197267-da84d127e765?w=400', 4, 3, 5.00],
+            [3, 'Đắc Nhân Tâm', 3, 2, 4, '978-604-53-4821-3', 2020, 'Nghệ thuật ứng xử, thu phục lòng người và xây dựng mối quan hệ bền vững.', 'https://images.unsplash.com/photo-1543002588-bfa74002ed7e?w=400', 6, 6, 4.00],
+            [4, 'Lập trình Node.js & React Thực Chiến', 5, 4, 2, '978-604-89-1234-0', 2024, 'Hướng dẫn từ cơ bản đến nâng cao xây dựng ứng dụng web hiện đại fullstack.', 'https://images.unsplash.com/photo-1555066931-4365d14bab8c?w=400', 4, 3, 5.00],
+            [5, 'Rừng Na Uy', 4, 2, 1, '978-604-964-112-9', 2021, 'Tiểu thuyết lừng danh về ký ức, tình yêu và những hoài niệm tuổi trẻ ở Tokyo.', 'https://images.unsplash.com/photo-1512820790803-83ca734da794?w=400', 3, 2, 0.00],
+            [6, 'Atomic Habits - Thói Quen Nguyên Tử', 7, 5, 4, '978-604-77-8910-1', 2022, 'Phương pháp thay đổi 1% mỗi ngày để tạo nên những kết quả phi thường.', 'https://images.unsplash.com/photo-1589829085413-56de8ae18c73?w=400', 5, 5, 5.00],
+            [7, 'Steve Jobs', 5, 4, 3, '978-604-98-3344-9', 2021, 'Cuốn tiểu sử độc quyền về cuộc đời vị sáng lập tài ba của Apple.', 'https://images.unsplash.com/photo-1516979187457-637abb4f9353?w=400', 3, 3, 0.00],
+            [8, 'Truyện Kiều', 6, 2, 1, '978-604-56-1122-1', 2017, 'Kiệt tác thơ Nôm tài hoa của Đại thi hào Nguyễn Du.', 'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?w=400', 4, 4, 0.00],
+            [9, 'Kính Vạn Hoa', 1, 3, 6, '978-604-2-23112-8', 2023, 'Bộ truyện học trò hồn nhiên, hài hước và giàu tình bạn.', 'https://images.unsplash.com/photo-1495446815901-a7297e633e8d?w=400', 5, 4, 0.00]
         ];
 
-        // Insert books and create book copies
-        const copyMap = {}; // store inserted copy IDs for later referencing in borrow_records
         for (const b of booksData) {
             await db.execute(
-                `INSERT INTO books (id, title, author_id, publisher_id, category_id, isbn, published_year, description, cover_image, total_copies, available_copies) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                [b.id, b.title, b.author_id, b.publisher_id, b.category_id, b.isbn, b.published_year, b.description, b.cover_image, b.total, b.total]
+                `INSERT INTO books (id, title, author_id, publisher_id, category_id, isbn, published_year, description, cover_image, total_copies, available_copies, avg_rating) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                b
             );
+        }
 
-            copyMap[b.id] = [];
-            for (let i = 1; i <= b.total; i++) {
-                const qrCode = `QR-BK-${b.id}-${i}`;
-                const [res] = await db.execute(
-                    'INSERT INTO book_copies (book_id, qr_code, status) VALUES (?, ?, "available")',
-                    [b.id, qrCode]
+        // 9. Seed Book Copies
+        console.log('🏷️ Seeding bản sao sách (mã QR)...');
+        let copyId = 1;
+        for (const b of booksData) {
+            const count = b[9];
+            for (let i = 1; i <= count; i++) {
+                const qr = `QR-BK-${b[0]}-${i}`;
+                await db.execute(
+                    'INSERT INTO book_copies (id, book_id, qr_code, status) VALUES (?, ?, ?, "available")',
+                    [copyId++, b[0], qr]
                 );
-                copyMap[b.id].push({ copyId: res.insertId, qrCode });
             }
         }
 
-        // 7. Seed Borrow Records & update copy statuses
-        console.log('📖 Seeding phiếu mượn trả sách...');
+        // Đánh dấu một số bản sao đang mượn và hỏng
+        await db.execute('UPDATE book_copies SET status = "borrowed" WHERE id IN (1, 6, 16, 20)');
+        await db.execute('UPDATE book_copies SET status = "damaged", condition_note = "Sách bị rách trang bìa sau" WHERE id = 39');
+
+        // 10. Seed Borrow Records (Gắn vào user_id = 3 - Nguyễn Minh A, processed_by = 2 - Thủ thư)
+        console.log('📖 Seeding phiếu mượn trả...');
         const now = new Date();
-        const daysAgo = (days) => new Date(now.getTime() - days * 86400000).toISOString().slice(0, 19).replace('T', ' ');
-        const daysAhead = (days) => new Date(now.getTime() + days * 86400000).toISOString().slice(0, 10);
+        const daysAgo = (d) => new Date(now.getTime() - d * 24 * 60 * 60 * 1000);
+        const daysLater = (d) => new Date(now.getTime() + d * 24 * 60 * 60 * 1000);
 
-        // Record 1: Reader 4 borrows Book 1 Copy 1 (Active borrow)
-        const copy1_1 = copyMap[1][0].copyId;
-        await db.execute(
-            `INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, status, processed_by) 
-             VALUES (1, 4, ?, ?, ?, 'borrowing', 2)`,
-            [copy1_1, daysAgo(10), daysAhead(4)]
-        );
-        await db.execute('UPDATE book_copies SET status = "borrowed" WHERE id = ?', [copy1_1]);
+        const borrowData = [
+            [1, 3, 1, daysAgo(10), daysLater(4), null, 'borrowing', 2],
+            [2, 3, 6, daysAgo(20), daysAgo(6), null, 'borrowing', 2],
+            [3, 3, 10, daysAgo(30), daysAgo(16), daysAgo(2), 'returned', 2],
+            [4, 3, 16, daysAgo(5), daysLater(9), null, 'borrowing', 2],
+            [5, 3, 20, daysAgo(18), daysAgo(4), null, 'borrowing', 2],
+            [6, 3, 23, daysAgo(40), daysAgo(26), daysAgo(20), 'returned', 2]
+        ];
 
-        // Record 2: Reader 5 borrows Book 2 Copy 1 (Overdue borrow)
-        const copy2_1 = copyMap[2][0].copyId;
-        await db.execute(
-            `INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, status, processed_by) 
-             VALUES (2, 5, ?, ?, ?, 'borrowing', 2)`,
-            [copy2_1, daysAgo(20), daysAhead(-6)] // due 6 days ago
-        );
-        await db.execute('UPDATE book_copies SET status = "borrowed" WHERE id = ?', [copy2_1]);
-
-        // Record 3: Reader 6 borrows Book 3 Copy 1 (Returned)
-        const copy3_1 = copyMap[3][0].copyId;
-        await db.execute(
-            `INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, return_date, status, processed_by) 
-             VALUES (3, 6, ?, ?, ?, ?, 'returned', 3)`,
-            [copy3_1, daysAgo(30), daysAhead(-16), daysAgo(2)]
-        );
-
-        // Record 4: Reader 7 borrows Book 4 Copy 1 (Active borrow)
-        const copy4_1 = copyMap[4][0].copyId;
-        await db.execute(
-            `INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, status, processed_by) 
-             VALUES (4, 7, ?, ?, ?, 'borrowing', 2)`,
-            [copy4_1, daysAgo(5), daysAhead(9)]
-        );
-        await db.execute('UPDATE book_copies SET status = "borrowed" WHERE id = ?', [copy4_1]);
-
-        // Record 5: Reader 4 borrows Book 5 Copy 1 (Overdue borrow)
-        const copy5_1 = copyMap[5][0].copyId;
-        await db.execute(
-            `INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, status, processed_by) 
-             VALUES (5, 4, ?, ?, ?, 'borrowing', 3)`,
-            [copy5_1, daysAgo(18), daysAhead(-4)]
-        );
-        await db.execute('UPDATE book_copies SET status = "borrowed" WHERE id = ?', [copy5_1]);
-
-        // Record 6: Reader 5 borrows Book 6 Copy 1 (Returned with past fine)
-        const copy6_1 = copyMap[6][0].copyId;
-        await db.execute(
-            `INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, return_date, status, processed_by) 
-             VALUES (6, 5, ?, ?, ?, ?, 'returned', 2)`,
-            [copy6_1, daysAgo(40), daysAhead(-26), daysAgo(20)]
-        );
-
-        // Record 7: Damaged copy setup (Book 9 Copy 5)
-        const copy9_5 = copyMap[9][4].copyId;
-        await db.execute('UPDATE book_copies SET status = "damaged", condition_note = "Sách bị rách trang bìa sau" WHERE id = ?', [copy9_5]);
-
-        // Recalculate available_copies for each book
-        for (const b of booksData) {
+        for (const br of borrowData) {
             await db.execute(
-                `UPDATE books SET available_copies = (
-                    SELECT COUNT(*) FROM book_copies WHERE book_id = ? AND status = 'available'
-                ) WHERE id = ?`,
-                [b.id, b.id]
+                `INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, return_date, status, processed_by) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                br
             );
         }
 
-        // 8. Seed Fines
+        // 11. Seed Fines (Gắn vào user_id = 3)
         console.log('💸 Seeding danh sách phạt...');
         const finesData = [
-            [1, 2, 5, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Lược Sử Thời Gian)', 'unpaid', daysAgo(6), null],
-            [2, 5, 4, 20000.00, 'Quá hạn trả sách 4 ngày (Sách: Rừng Na Uy)', 'unpaid', daysAgo(4), null],
-            [3, 6, 5, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Atomic Habits)', 'paid', daysAgo(20), daysAgo(20)]
+            [1, 2, 3, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Lược Sử Thời Gian)', 'unpaid', daysAgo(6), null],
+            [2, 5, 3, 20000.00, 'Quá hạn trả sách 4 ngày (Sách: Rừng Na Uy)', 'unpaid', daysAgo(4), null],
+            [3, 6, 3, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Atomic Habits)', 'paid', daysAgo(20), daysAgo(20)]
         ];
 
         for (const f of finesData) {
@@ -214,13 +187,13 @@ async function seed() {
             );
         }
 
-        // 9. Seed Reservations
-        console.log('📌 Seeding yêu cầu đặt trước sách...');
+        // 12. Seed Reservations (Gắn vào user_id = 3)
+        console.log('📌 Seeding đặt trước sách...');
         const reservationsData = [
-            [1, 4, 2, daysAgo(3), 'pending'],
-            [2, 5, 5, daysAgo(5), 'ready'],
-            [3, 6, 6, daysAgo(10), 'fulfilled'],
-            [4, 7, 1, daysAgo(1), 'pending']
+            [1, 3, 2, daysAgo(3), 'pending'],
+            [2, 3, 5, daysAgo(5), 'ready'],
+            [3, 3, 6, daysAgo(10), 'fulfilled'],
+            [4, 3, 1, daysAgo(1), 'pending']
         ];
 
         for (const r of reservationsData) {
@@ -230,14 +203,14 @@ async function seed() {
             );
         }
 
-        // 10. Seed Reviews & Update avg_rating
+        // 13. Seed Reviews (Gắn vào user_id = 3)
         console.log('⭐ Seeding đánh giá sách...');
         const reviewsData = [
-            [1, 4, 1, 5, 'Một cuốn sách tuyệt vời gắn liền với tuổi thơ, kết thúc gợi nhiều suy ngẫm.', daysAgo(8)],
-            [2, 5, 2, 5, 'Kiến thức vũ trụ rất sâu sắc nhưng tác giả diễn đạt khá dễ hiểu cho người mới bắt đầu.', daysAgo(15)],
-            [3, 6, 3, 4, 'Tác phẩm kinh điển về kỹ năng ứng xử và thấu hiểu con người.', daysAgo(25)],
-            [4, 7, 4, 5, 'Tài liệu thực hành lập trình Node.js và React rất rõ ràng, thực tế.', daysAgo(3)],
-            [5, 4, 6, 5, 'Thói quen nhỏ mang lại sự thay đổi lớn, cuốn sách thực sự thay đổi tư duy làm việc của tôi.', daysAgo(12)]
+            [1, 3, 1, 5, 'Một cuốn sách tuyệt vời gắn liền với tuổi thơ, kết thúc gợi nhiều suy ngẫm.', daysAgo(8)],
+            [2, 3, 2, 5, 'Kiến thức vũ trụ rất sâu sắc nhưng tác giả diễn đạt khá dễ hiểu cho người mới bắt đầu.', daysAgo(15)],
+            [3, 3, 3, 4, 'Tác phẩm kinh điển về kỹ năng ứng xử và thấu hiểu con người.', daysAgo(25)],
+            [4, 3, 4, 5, 'Tài liệu thực hành lập trình Node.js và React rất rõ ràng, thực tế.', daysAgo(3)],
+            [5, 3, 6, 5, 'Thói quen nhỏ mang lại sự thay đổi lớn, cuốn sách thực sự thay đổi tư duy làm việc của tôi.', daysAgo(12)]
         ];
 
         for (const rev of reviewsData) {
@@ -247,23 +220,30 @@ async function seed() {
             );
         }
 
-        // Update avg_rating in books table
-        for (const b of booksData) {
-            await db.execute(
-                `UPDATE books SET avg_rating = COALESCE((
-                    SELECT AVG(rating) FROM reviews WHERE book_id = ?
-                ), 0.00) WHERE id = ?`,
-                [b.id, b.id]
-            );
-        }
-
-        // 11. Seed Notifications
-        console.log('🔔 Seeding thông báo...');
+        // 14. Seed Notifications (Đầy đủ cho mọi Actor: Admin, Thủ thư, Độc giả, Chủ thư viện)
+        console.log('🔔 Seeding thông báo cho tất cả các Actor...');
         const notificationsData = [
-            [1, 4, 'Chào mừng đến với Smart Library!', 'Chúc mừng bạn đã kích hoạt thẻ thư viện trực tuyến thành công. Thẻ của bạn: LIB-RD-100001.', 'info', 1, daysAgo(10)],
-            [2, 4, 'Cảnh báo quá hạn mượn sách', 'Sách "Rừng Na Uy" của bạn đã quá hạn 4 ngày. Vui lòng làm thủ tục trả sách hoặc gia hạn.', 'warning', 0, daysAgo(4)],
-            [3, 5, 'Thông báo phạt trễ hạn', 'Bạn có khoản phí phạt 30,000đ cho cuốn "Lược Sử Thời Gian". Vui lòng thanh toán tại quầy.', 'warning', 0, daysAgo(6)],
-            [4, 5, 'Sách đặt trước đã sẵn sàng', 'Cuốn sách "Rừng Na Uy" bạn đặt trước đã có mặt tại quầy. Vui lòng đến nhận trong 48 giờ.', 'reminder', 0, daysAgo(2)]
+            // Admin (user_id = 1)
+            [1, 1, 'Hệ thống Smart Library đã sẵn sàng', 'Chào mừng Quản trị viên. Toàn bộ các dịch vụ mượn trả, tra cứu và Maker-Checker đang hoạt động bình thường.', 'info', 1, daysAgo(10)],
+            [2, 1, 'Cảnh báo sách quá hạn định kỳ', 'Hệ thống ghi nhận có độc giả mượn sách quá hạn cần đôn đốc thu hồi và nộp phạt.', 'warning', 0, daysAgo(2)],
+            [3, 1, 'Đề xuất cấu hình gửi tới Giám đốc', 'Đề xuất thay đổi tham số mức phí phạt trễ hạn đã được gửi tới Giám đốc / Chủ thư viện.', 'info', 0, daysAgo(1)],
+            
+            // Librarian (user_id = 2)
+            [4, 2, 'Ca làm việc thủ thư kích hoạt', 'Chào mừng Thủ thư. Bạn có thể sử dụng tính năng quét mã QR để xuất nhập mượn trả sách nhanh chóng.', 'info', 1, daysAgo(10)],
+            [5, 2, 'Độc giả mượn sách tại quầy', 'Độc giả Trần Kim Liên (LIB-RD-000005) vừa mượn cuốn "Lập trình Node.js & React Thực Chiến" (Mã bản sao: QR-BK-4-1). Hạn trả sách: 14 ngày.', 'info', 0, daysAgo(2)],
+            [6, 2, 'Độc giả đặt trước sách mới', 'Độc giả vừa tạo phiếu đặt trước cuốn sách "Mắt Biếc". Vui lòng kiểm tra và chuẩn bị sách tại quầy.', 'reminder', 0, daysAgo(2)],
+            [7, 2, 'Ghi nhận hoàn tất trả sách', 'Độc giả đã hoàn tất trả sách "Đắc Nhân Tâm" vào kho thư viện.', 'info', 0, daysAgo(1)],
+
+            // Reader (user_id = 3)
+            [7, 3, 'Chào mừng đến với Smart Library!', 'Chúc mừng bạn đã kích hoạt thẻ thư viện trực tuyến thành công. Thẻ của bạn: LIB-RD-100001.', 'info', 1, daysAgo(10)],
+            [8, 3, 'Cảnh báo quá hạn mượn sách', 'Sách "Rừng Na Uy" của bạn đã quá hạn 4 ngày. Vui lòng làm thủ tục trả sách hoặc gia hạn.', 'warning', 0, daysAgo(4)],
+            [9, 3, 'Thông báo phạt trễ hạn', 'Bạn có khoản phí phạt 30,000đ cho cuốn "Lược Sử Thời Gian". Vui lòng thanh toán tại quầy.', 'warning', 0, daysAgo(6)],
+            [10, 3, 'Sách đặt trước đã sẵn sàng', 'Cuốn sách "Rừng Na Uy" bạn đặt trước đã có mặt tại quầy. Vui lòng đến nhận trong 48 giờ.', 'reminder', 0, daysAgo(2)],
+
+            // Owner (user_id = 4)
+            [11, 4, 'Quyền Giám đốc / Chủ thư viện', 'Chào mừng Chủ thư viện. Bạn có toàn quyền giám sát toàn bộ hoạt động lưu thông, tài chính và phê duyệt Maker-Checker.', 'info', 1, daysAgo(10)],
+            [12, 4, 'Đề xuất thay đổi quy chế mới (Maker-Checker)', 'Admin vừa đề xuất điều chỉnh tham số phí phạt trễ hạn "fine_per_day". Vui lòng vào mục Quản lý hệ thống để phê duyệt.', 'reminder', 0, daysAgo(1)],
+            [13, 4, 'Báo cáo doanh thu & lưu thông định kỳ', 'Tổng lượt mượn sách và doanh thu thu phạt đã được cập nhật tại mục Thống kê & Báo cáo.', 'info', 0, daysAgo(0)]
         ];
 
         for (const n of notificationsData) {
@@ -274,15 +254,14 @@ async function seed() {
             );
         }
 
-        // 12. Seed Activity Logs
+        // 15. Seed Activity Logs
         console.log('📋 Seeding nhật ký hoạt động...');
         const activityLogsData = [
-            [1, 1, 'SYSTEM_INIT', 'system', 0, 'Khởi tạo thành công cơ sở dữ liệu Smart Library.', daysAgo(30)],
-            [2, 2, 'BORROW', 'borrow_records', 1, 'Cho độc giả Nguyễn Minh Anh mượn sách "Mắt Biếc".', daysAgo(10)],
-            [3, 2, 'BORROW', 'borrow_records', 2, 'Cho độc giả Phạm Hoàng Nam mượn sách "Lược Sử Thời Gian".', daysAgo(20)],
-            [4, 3, 'RETURN', 'borrow_records', 3, 'Xác nhận trả sách "Đắc Nhân Tâm" cho độc giả Vũ Thu Trang.', daysAgo(2)],
-            [5, 4, 'RESERVE', 'reservations', 1, 'Độc giả Nguyễn Minh Anh đăng ký đặt trước cuốn "Lược Sử Thời Gian".', daysAgo(3)],
-            [6, 2, 'CREATE_BOOK', 'books', 4, 'Thêm mới đầu sách "Lập trình Node.js & React Thực Chiến".', daysAgo(15)]
+            [1, 1, 'SYSTEM_INIT', 'system', null, 'Khởi tạo thành công cơ sở dữ liệu Smart Library.', daysAgo(30)],
+            [2, 2, 'BORROW', 'borrow_records', 1, 'Cho độc giả Nguyễn Minh A mượn sách "Mắt Biếc".', daysAgo(10)],
+            [3, 2, 'RETURN', 'borrow_records', 3, 'Thủ thư nhận trả sách "Đắc Nhân Tâm" cho độc giả Nguyễn Minh A.', daysAgo(2)],
+            [4, 1, 'PROPOSE_CONFIG', 'config_change_requests', 1, 'Admin gửi đề xuất tăng fine_per_day lên 10.000đ', daysAgo(1)],
+            [5, 4, 'SYSTEM_LOGIN', 'users', 4, 'Chủ thư viện Trần Văn Chủ đăng nhập kiểm toán hệ thống.', daysAgo(0)]
         ];
 
         for (const log of activityLogsData) {
@@ -293,18 +272,13 @@ async function seed() {
             );
         }
 
-        // 13. System configs check & update
-        await db.execute('UPDATE system_configs SET description = "Số ngày mượn tối đa cho mỗi sách" WHERE key_name = "max_borrow_days"');
-
         console.log('\n==================================================');
-        console.log('✅ HỆ THỐNG ĐÃ SEED DỮ LIỆU MẪU THÀNH CÔNG!');
+        console.log('✅ HỆ THỐNG ĐÃ SEED DỮ LIỆU MẪU CHUẨN HÓA THÀNH CÔNG!');
         console.log('==================================================');
-        console.log('📌 Danh sách tài khoản đăng nhập mẫu:');
-        console.log('1. Admin:      email: admin@library.com     | password: admin123');
-        console.log('2. Thủ thư 1:  email: librarian@library.com | password: 123456');
-        console.log('3. Thủ thư 2:  email: phuong.thuthu@library.com | password: 123456');
-        console.log('4. Độc giả 1:  email: reader@library.com    | password: 123456');
-        console.log('5. Độc giả 2:  email: hoang.nam@gmail.com   | password: 123456');
+        console.log('1. Admin:         admin@library.com     | admin123');
+        console.log('2. Thủ thư:       librarian@library.com | 123456');
+        console.log('3. Độc giả:       reader@library.com    | 123456');
+        console.log('4. Chủ thư viện:  owner@library.com     | 123456');
         console.log('==================================================\n');
 
         process.exit(0);

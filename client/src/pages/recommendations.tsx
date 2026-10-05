@@ -7,6 +7,7 @@ import { Sparkles, BookOpen, TrendingUp } from "lucide-react";
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { useConfirm } from "@/hooks/use-confirm";
 
 interface Book {
   id: number;
@@ -24,6 +25,7 @@ export default function RecommendationsPage() {
   const [recs, setRecs] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
   const { user } = useAuth();
+  const { confirm, ConfirmDialogComponent } = useConfirm();
 
   const fetchRecommendations = async () => {
     setLoading(true);
@@ -42,14 +44,22 @@ export default function RecommendationsPage() {
     fetchRecommendations();
   }, []);
 
-  const handleReserve = async (bookId: number) => {
-    try {
-      const response = await api.post("/reservations", { bookId });
-      toast.success(response.data.message || "Đã tạo phiếu mượn/đặt trước thành công!");
-    } catch (error: any) {
-      console.error("Lỗi khi đặt trước:", error);
-      toast.error(error.response?.data?.message || "Không thể thực hiện mượn/đặt trước");
-    }
+  const handleReserve = (book: Book) => {
+    confirm({
+      title: "Xác nhận đăng ký giữ sách",
+      description: `Bạn có đồng ý tạo phiếu đăng ký giữ cuốn sách "${book.title}" (Tác giả: ${book.author_name || "Nhiều tác giả"}) do AI gợi ý không?`,
+      confirmText: "Xác nhận đăng ký",
+      cancelText: "Hủy bỏ",
+      onConfirm: async () => {
+        try {
+          const response = await api.post("/reservations", { bookId: book.id });
+          toast.success(response.data.message || "Đã tạo phiếu đăng ký thành công! Vui lòng đến thư viện đưa mã QR phiếu để nhận sách.");
+        } catch (error: any) {
+          console.error("Lỗi khi đặt trước:", error);
+          toast.error(error.response?.data?.message || "Không thể thực hiện đăng ký sách");
+        }
+      }
+    });
   };
 
   return (
@@ -102,7 +112,7 @@ export default function RecommendationsPage() {
                   <span className="text-muted-foreground">Vì sao đề xuất:</span> <span className="font-medium text-foreground">Bạn có xu hướng yêu thích chủ đề {r.category_name || "khoa học"}.</span>
                 </div>
                 <div className="mt-3 flex gap-2">
-                  <Button size="sm" className="flex-1 gap-1" onClick={() => handleReserve(r.id)}>
+                  <Button size="sm" className="flex-1 gap-1" onClick={() => handleReserve(r)}>
                     <BookOpen className="h-3 w-3" /> Mượn / Đặt
                   </Button>
                 </div>
@@ -134,6 +144,7 @@ export default function RecommendationsPage() {
           </div>
         </CardContent>
       </Card>
+      {ConfirmDialogComponent}
     </div>
   );
 }

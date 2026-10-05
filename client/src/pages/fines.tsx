@@ -64,8 +64,12 @@ export default function FinesPage() {
     });
   };
 
-  const totalUnpaid = finesList.filter((f) => f.status === "unpaid").reduce((s, f) => s + f.amount, 0);
-  const totalPaid = finesList.filter((f) => f.status === "paid").reduce((s, f) => s + f.amount, 0);
+  const totalUnpaid = finesList
+    .filter((f) => f.status === "unpaid")
+    .reduce((s, f) => s + (Number(f.amount) || 0), 0);
+  const totalPaid = finesList
+    .filter((f) => f.status === "paid")
+    .reduce((s, f) => s + (Number(f.amount) || 0), 0);
   
   const canManage = user?.role === "admin" || user?.role === "librarian";
 
@@ -129,7 +133,7 @@ export default function FinesPage() {
                     </TableCell>
                     <TableCell className="text-xs truncate max-w-[180px]">{f.book_title || "Thẻ phạt hệ thống"}</TableCell>
                     <TableCell className="text-[11px] text-muted-foreground max-w-[200px] truncate">{f.reason}</TableCell>
-                    <TableCell className="font-semibold text-xs text-primary">{f.amount.toLocaleString("vi-VN")}đ</TableCell>
+                    <TableCell className="font-semibold text-xs text-primary">{(Number(f.amount) || 0).toLocaleString("vi-VN")}đ</TableCell>
                     <TableCell>
                       {f.status === "paid" ? (
                         <Badge className="bg-success/15 text-success border-success/20 text-[10px]" variant="outline">

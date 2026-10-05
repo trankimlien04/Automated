@@ -32,6 +32,7 @@ const statusMap: Record<string, { label: string; cls: string }> = {
 };
 
 const roleMap: Record<string, string> = {
+  owner: "Chủ thư viện",
   admin: "Quản trị viên",
   librarian: "Thủ thư",
   reader: "Độc giả",
@@ -174,9 +175,10 @@ export default function AccountsPage() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="all">Tất cả vai trò</SelectItem>
-                  <SelectItem value="admin">Quản trị viên</SelectItem>
-                  <SelectItem value="librarian">Thủ thư</SelectItem>
-                  <SelectItem value="reader">Độc giả</SelectItem>
+                  <SelectItem value="owner">Chủ thư viện (Owner)</SelectItem>
+                  <SelectItem value="admin">Quản trị viên (Admin)</SelectItem>
+                  <SelectItem value="librarian">Thủ thư (Librarian)</SelectItem>
+                  <SelectItem value="reader">Độc giả (Reader)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -207,6 +209,7 @@ export default function AccountsPage() {
                         <SelectValue placeholder="Chọn vai trò" />
                       </SelectTrigger>
                       <SelectContent>
+                        <SelectItem value="owner">Chủ thư viện / Giám đốc (Owner)</SelectItem>
                         <SelectItem value="librarian">Thủ thư (Librarian)</SelectItem>
                         <SelectItem value="reader">Độc giả (Reader)</SelectItem>
                         <SelectItem value="admin">Quản trị viên (Admin)</SelectItem>

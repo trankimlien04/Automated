@@ -16,9 +16,9 @@ import {
   Tag,
   PenTool,
   Building2,
-  Activity
+  Activity,
+  User
 } from "lucide-react";
-
 
 import {
   Sidebar,
@@ -39,6 +39,7 @@ const roleMap: Record<string, string> = {
   admin: "Quản trị viên",
   librarian: "Thủ thư",
   reader: "Độc giả",
+  owner: "Chủ thư viện / Giám đốc",
 };
 
 export function AppSidebar() {
@@ -50,30 +51,38 @@ export function AppSidebar() {
 
   // Dynamic items based on role grouped logically
   const overview = [
-    { title: "Tổng quan", url: "/", icon: LayoutDashboard, roles: ["admin", "librarian", "reader"] },
-    { title: "Thống kê & Báo cáo", url: "/reports", icon: BarChart3, roles: ["admin", "librarian"] },
-    { title: "Gợi ý sách (AI)", url: "/recommendations", icon: Sparkles, roles: ["admin", "librarian", "reader"] },
+    { title: "Tổng quan", url: "/", icon: LayoutDashboard, roles: ["admin", "librarian", "reader", "owner"] },
+    { title: "Hồ sơ & Thẻ cá nhân", url: "/profile", icon: User, roles: ["admin", "librarian", "reader", "owner"] },
+    { title: "Thống kê & Báo cáo", url: "/reports", icon: BarChart3, roles: ["admin", "librarian", "owner"] },
+    { title: "Gợi ý sách (AI)", url: "/recommendations", icon: Sparkles, roles: ["admin", "librarian", "reader", "owner"] },
   ].filter(item => item.roles.includes(user?.role || ""));
 
+  const isReader = user?.role === "reader";
+
   const catalog = [
-    { title: "Quản lý sách", url: "/books", icon: BookOpen, roles: ["admin", "librarian", "reader"] },
-    { title: "Thể loại sách", url: "/categories", icon: Tag, roles: ["admin", "librarian"] },
-    { title: "Tác giả", url: "/authors", icon: PenTool, roles: ["admin", "librarian"] },
-    { title: "Nhà xuất bản", url: "/publishers", icon: Building2, roles: ["admin", "librarian"] },
+    { 
+      title: isReader ? "Danh mục Sách & Tra cứu" : "Danh mục Sách & Bản sao (QR)", 
+      url: "/books", 
+      icon: BookOpen, 
+      roles: ["admin", "librarian", "reader", "owner"] 
+    },
+    { title: "Thể loại & Phân loại", url: "/categories", icon: Tag, roles: ["admin", "librarian", "owner"] },
+    { title: "Tác giả", url: "/authors", icon: PenTool, roles: ["admin", "librarian", "owner"] },
+    { title: "Nhà xuất bản", url: "/publishers", icon: Building2, roles: ["admin", "librarian", "owner"] },
   ].filter(item => item.roles.includes(user?.role || ""));
 
   const operations = [
     { title: "Mượn / Trả (QR)", url: "/borrow", icon: QrCode, roles: ["admin", "librarian", "reader"] },
-    { title: "Đặt trước sách", url: "/reservations", icon: CalendarClock, roles: ["admin", "librarian", "reader"] },
-    { title: "Phí phạt", url: "/fines", icon: Wallet, roles: ["admin", "librarian", "reader"] },
-    { title: "Thông báo", url: "/notifications", icon: Bell, roles: ["admin", "librarian", "reader"] },
+    { title: "Đặt trước sách", url: "/reservations", icon: CalendarClock, roles: ["admin", "librarian", "reader", "owner"] },
+    { title: "Phí phạt", url: "/fines", icon: Wallet, roles: ["admin", "librarian", "reader", "owner"] },
+    { title: "Thông báo", url: "/notifications", icon: Bell, roles: ["admin", "librarian", "reader", "owner"] },
   ].filter(item => item.roles.includes(user?.role || ""));
 
   const adminSystem = [
-    { title: "Quản lý độc giả", url: "/readers", icon: Users, roles: ["admin", "librarian"] },
-    { title: "Quản lý tài khoản", url: "/accounts", icon: ShieldCheck, roles: ["admin"] },
-    { title: "Nhật ký hoạt động", url: "/activity-logs", icon: Activity, roles: ["admin"] },
-    { title: "Cài đặt hệ thống", url: "/settings", icon: Settings, roles: ["admin"] },
+    { title: "Quản lý độc giả", url: "/readers", icon: Users, roles: ["admin", "librarian", "owner"] },
+    { title: "Quản lý tài khoản", url: "/accounts", icon: ShieldCheck, roles: ["admin", "owner"] },
+    { title: "Nhật ký hoạt động", url: "/activity-logs", icon: Activity, roles: ["admin", "owner"] },
+    { title: "Phê duyệt & Cài đặt", url: "/settings", icon: Settings, roles: ["admin", "owner"] },
   ].filter(item => item.roles.includes(user?.role || ""));
 
   const renderItems = (items: any[]) => (
@@ -114,7 +123,7 @@ export function AppSidebar() {
         )}
         {catalog.length > 0 && (
           <SidebarGroup>
-            <SidebarGroupLabel>Quản lý Kho sách</SidebarGroupLabel>
+            <SidebarGroupLabel>{isReader ? "Tài nguyên Tri thức" : "Quản lý Tài nguyên"}</SidebarGroupLabel>
             <SidebarGroupContent>{renderItems(catalog)}</SidebarGroupContent>
           </SidebarGroup>
         )}
@@ -134,15 +143,15 @@ export function AppSidebar() {
 
       <SidebarFooter>
         <div className="m-2 rounded-lg border border-border bg-card p-3 group-data-[collapsible=icon]:hidden">
-          <div className="flex items-center gap-2 mb-2">
-            <div className="h-8 w-8 rounded-full bg-gradient-to-br from-primary to-success text-primary-foreground grid place-items-center text-xs font-semibold">
+          <Link to="/profile" className="flex items-center gap-2 mb-2 hover:bg-muted/50 p-1 rounded-md transition-colors group">
+            <div className="h-8 w-8 rounded-full bg-gradient-to-br from-primary to-success text-primary-foreground grid place-items-center text-xs font-semibold shadow-sm">
               {user?.fullName?.split(" ").slice(-1)[0][0] || "U"}
             </div>
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">{user?.fullName || "Người dùng"}</p>
+              <p className="text-sm font-medium truncate group-hover:text-primary transition-colors">{user?.fullName || "Người dùng"}</p>
               <p className="text-xs text-muted-foreground truncate">{roleMap[user?.role || ""] || "Độc giả"}</p>
             </div>
-          </div>
+          </Link>
           <Button 
             variant="ghost" 
             size="sm" 

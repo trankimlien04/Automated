@@ -24,25 +24,27 @@ import CategoriesPage from "./pages/categories";
 import AuthorsPage from "./pages/authors";
 import PublishersPage from "./pages/publishers";
 import ActivityLogsPage from "./pages/activity-logs";
+import ProfilePage from "./pages/profile";
 
 const queryClient = new QueryClient();
 
 const ROUTE_META: Record<string, { title: string; subtitle: string }> = {
   "/": { title: "Tổng quan", subtitle: "Bức tranh hoạt động thư viện hôm nay" },
-  "/books": { title: "Quản lý sách", subtitle: "Kho sách, mã QR, tồn kho" },
+  "/profile": { title: "Thông tin cá nhân & Thẻ định danh", subtitle: "Hồ sơ tài khoản, mã thẻ QR và bảo mật" },
+  "/books": { title: "Danh mục Sách & Bản sao (QR)", subtitle: "Biên mục tài liệu, định danh mã QR và trạng thái lưu thông" },
   "/readers": { title: "Quản lý độc giả", subtitle: "Thẻ thư viện và hồ sơ cá nhân" },
   "/accounts": { title: "Quản lý tài khoản", subtitle: "Phân quyền và tài khoản mặc định hệ thống" },
-  "/borrow": { title: "Mượn / Trả qua QR", subtitle: "Giao dịch chỉ trong 30 giây" },
+  "/borrow": { title: "Mượn / Trả qua QR", subtitle: "Giao dịch lưu thông tự động qua mã thẻ & mã sách" },
   "/reservations": { title: "Đặt trước sách", subtitle: "Hàng đợi và thông báo tự động" },
   "/fines": { title: "Phí phạt", subtitle: "Quản lý vi phạm và thanh toán" },
   "/notifications": { title: "Trung tâm thông báo", subtitle: "Email & in-app realtime" },
   "/recommendations": { title: "Gợi ý sách AI", subtitle: "Content-based + Collaborative Filtering" },
   "/reports": { title: "Thống kê & Báo cáo", subtitle: "Phân tích hành vi đọc" },
-  "/settings": { title: "Cài đặt hệ thống", subtitle: "Cấu hình, người dùng, sao lưu" },
-  "/categories": { title: "Quản lý Thể loại", subtitle: "Phân loại sách trong thư viện" },
-  "/authors": { title: "Quản lý Tác giả", subtitle: "Hồ sơ và thông tin tác giả" },
-  "/publishers": { title: "Quản lý NXB", subtitle: "Thông tin nhà xuất bản sách" },
-  "/activity-logs": { title: "Nhật ký hoạt động", subtitle: "Lịch sử thao tác hệ thống" },
+  "/settings": { title: "Phê duyệt & Cài đặt", subtitle: "Quy chế vận hành, phê duyệt hai cấp Maker-Checker" },
+  "/categories": { title: "Thể loại & Phân loại", subtitle: "Cấu trúc phân loại tài nguyên tri thức trong thư viện" },
+  "/authors": { title: "Tác giả", subtitle: "Hồ sơ và tác phẩm của tác giả" },
+  "/publishers": { title: "Nhà xuất bản", subtitle: "Thông tin các đơn vị xuất bản ấn phẩm" },
+  "/activity-logs": { title: "Nhật ký hoạt động (Audit Trail)", subtitle: "Lịch sử thao tác và kiểm toán hệ thống" },
 };
 
 function Layout({ children }: { children: React.ReactNode }) {
@@ -106,6 +108,7 @@ function App() {
 
               {/* Protected routes with Role-based protection */}
               <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+              <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
               <Route path="/books" element={<ProtectedRoute><BooksPage /></ProtectedRoute>} />
               <Route path="/borrow" element={<ProtectedRoute><BorrowPage /></ProtectedRoute>} />
               <Route path="/reservations" element={<ProtectedRoute><ReservationsPage /></ProtectedRoute>} />
@@ -113,54 +116,54 @@ function App() {
               <Route path="/notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
               <Route path="/recommendations" element={<ProtectedRoute><RecommendationsPage /></ProtectedRoute>} />
               
-              {/* Readers Page - Only Librarians and Admins */}
+              {/* Readers Page - Librarians, Admins and Owner */}
               <Route path="/readers" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian"]}>
+                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
                   <ReadersPage />
                 </ProtectedRoute>
               } />
 
               <Route path="/categories" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian"]}>
+                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
                   <CategoriesPage />
                 </ProtectedRoute>
               } />
 
               <Route path="/authors" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian"]}>
+                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
                   <AuthorsPage />
                 </ProtectedRoute>
               } />
 
               <Route path="/publishers" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian"]}>
+                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
                   <PublishersPage />
                 </ProtectedRoute>
               } />
 
               <Route path="/activity-logs" element={
-                <ProtectedRoute allowedRoles={["admin"]}>
+                <ProtectedRoute allowedRoles={["admin", "owner"]}>
                   <ActivityLogsPage />
                 </ProtectedRoute>
               } />
               
-              {/* Accounts Page - Only Admins */}
+              {/* Accounts Page - Admins and Owner */}
               <Route path="/accounts" element={
-                <ProtectedRoute allowedRoles={["admin"]}>
+                <ProtectedRoute allowedRoles={["admin", "owner"]}>
                   <AccountsPage />
                 </ProtectedRoute>
               } />
               
-              {/* Reports Page - Only Librarians and Admins */}
+              {/* Reports Page - Librarians, Admins and Owner */}
               <Route path="/reports" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian"]}>
+                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
                   <ReportsPage />
                 </ProtectedRoute>
               } />
               
-              {/* Settings Page - Only Admins */}
+              {/* Settings Page - Admins and Owner */}
               <Route path="/settings" element={
-                <ProtectedRoute allowedRoles={["admin"]}>
+                <ProtectedRoute allowedRoles={["admin", "owner"]}>
                   <SettingsPage />
                 </ProtectedRoute>
               } />

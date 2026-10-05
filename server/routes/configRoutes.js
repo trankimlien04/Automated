@@ -6,7 +6,16 @@ const { authenticateToken, requireRole } = require('../middlewares/authMiddlewar
 // Get all system configs (Any authenticated user)
 router.get('/', authenticateToken, configController.getConfigs);
 
-// Update system configs (Only Admin)
-router.put('/', authenticateToken, requireRole(['admin']), configController.updateConfigs);
+// Get all config change requests (Admin & Owner)
+router.get('/requests', authenticateToken, requireRole(['admin', 'owner']), configController.getConfigRequests);
+
+// Propose config change (Admin only - Maker)
+router.post('/propose', authenticateToken, requireRole(['admin']), configController.proposeConfigChange);
+
+// Review (Approve/Reject) config request (Owner only - Checker)
+router.patch('/requests/:id/review', authenticateToken, requireRole(['owner']), configController.reviewConfigRequest);
+
+// Direct update fallback (Admin & Owner)
+router.put('/', authenticateToken, requireRole(['admin', 'owner']), configController.updateConfigs);
 
 module.exports = router;

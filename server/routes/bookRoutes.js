@@ -7,7 +7,8 @@ const { authenticateToken, requireRole } = require('../middlewares/authMiddlewar
 router.get('/', authenticateToken, bookController.getAllBooks);
 router.get('/:id', authenticateToken, bookController.getBookById);
 
-// Create, Update, Delete - Only Admin and Librarian
+// Create, Update, Delete, Batch Import - Only Admin and Librarian
+router.post('/import-batch', authenticateToken, requireRole(['admin', 'librarian']), bookController.importBooksBatch);
 router.post('/', authenticateToken, requireRole(['admin', 'librarian']), bookController.createBook);
 router.put('/:id', authenticateToken, requireRole(['admin', 'librarian']), bookController.updateBook);
 router.delete('/:id', authenticateToken, requireRole(['admin', 'librarian']), bookController.deleteBook);

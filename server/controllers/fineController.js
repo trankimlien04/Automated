@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
 
 exports.getFines = async (req, res) => {
     const { role, id } = req.user;
@@ -24,7 +25,11 @@ exports.getFines = async (req, res) => {
         query += ' ORDER BY f.created_at DESC';
 
         const [results] = await db.execute(query, params);
-        res.status(200).json(results);
+        const formatted = results.map(r => ({
+            ...r,
+            amount: Number(r.amount) || 0
+        }));
+        res.status(200).json(formatted);
     } catch (error) {
         console.error('Lỗi khi lấy danh sách phí phạt:', error);
         res.status(500).json({ message: 'Lỗi server' });
@@ -36,7 +41,13 @@ exports.payFine = async (req, res) => {
     const processedBy = req.user.id;
 
     try {
-        const [fines] = await db.execute('SELECT * FROM fines WHERE id = ?', [id]);
+        const [fines] = await db.execute(`
+            SELECT f.*, u.full_name as reader_name, u.card_number
+            FROM fines f
+            JOIN users u ON f.user_id = u.id
+            WHERE f.id = ?
+        `, [id]);
+
         if (fines.length === 0) {
             return res.status(404).json({ message: 'Không tìm thấy hóa đơn phí phạt' });
         }
@@ -55,6 +66,24 @@ exports.payFine = async (req, res) => {
         await db.execute(
             'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?)',
             [processedBy, 'PAY_FINE', 'fines', id, `Thanh toán phí phạt: ${fine.amount}đ cho hóa đơn #${id}`]
+        );
+
+        // Notify user
+        await db.execute(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
+            [
+                fine.user_id,
+                'Xác nhận thanh toán phí phạt',
+                `Khoản phí phạt ${Number(fine.amount).toLocaleString('vi-VN')}đ (Lý do: ${fine.reason || 'Trễ hạn trả sách'}) đã được xác nhận thanh toán thành công.`
+            ]
+        );
+
+        // Notify all staff
+        await notifyAllStaff(
+            'Đã thu phí phạt độc giả',
+            `Độc giả ${fine.reader_name} (${fine.card_number}) đã thanh toán khoản phạt ${Number(fine.amount).toLocaleString('vi-VN')}đ.`,
+            'info',
+            processedBy
         );
 
         res.status(200).json({ message: 'Đã xác nhận thanh toán phí phạt thành công' });

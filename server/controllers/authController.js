@@ -1,6 +1,7 @@
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
+const { notifyRoles } = require('../services/notificationService');
 
 exports.register = async (req, res) => {
     const { fullName, email, password, phone } = req.body;
@@ -17,9 +18,17 @@ exports.register = async (req, res) => {
 
         const hashedPassword = await bcrypt.hash(password, 10);
         
-        await db.execute(
+        const [result] = await db.execute(
             'INSERT INTO users (full_name, email, password_hash, phone, role, status) VALUES (?, ?, ?, ?, ?, ?)',
             [fullName, email, hashedPassword, phone || null, 'reader', 'pending']
+        );
+
+        // Notify Admin & Librarian
+        await notifyRoles(
+            ['admin', 'librarian'],
+            'Độc giả mới đăng ký tài khoản',
+            `Người dùng ${fullName} (${email}) vừa đăng ký tài khoản độc giả mới. Vui lòng vào mục Quản lý độc giả để kiểm tra và phê duyệt.`,
+            'info'
         );
 
         res.status(201).json({ message: 'Đăng ký thành công, vui lòng chờ Admin phê duyệt' });

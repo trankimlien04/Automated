@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
   BookOpen, Users, ArrowRightLeft, AlertTriangle, TrendingUp, Sparkles,
-  ArrowUpRight, ArrowDownRight, QrCode, Clock, BookMarked, Wallet, Award
+  ArrowUpRight, ArrowDownRight, QrCode, Clock, BookMarked, Wallet, Award,
+  Shield, BarChart3, Crown
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -29,6 +30,16 @@ interface DashboardData {
   popularBooks: Array<{ id: number; title: string; author_name: string; borrow_count: number }>;
   borrowTrends: Array<{ month: string; count: number }>;
   recentTransactions: Array<{ id: number; borrow_date: string; status: string; reader_name: string; book_title: string }>;
+  unpaidFinesList?: Array<{
+    id: number;
+    amount: number;
+    reason: string;
+    created_at: string;
+    user_id: number;
+    reader_name: string;
+    card_number: string;
+    book_title?: string;
+  }>;
 }
 
 export default function Dashboard() {
@@ -72,14 +83,15 @@ export default function Dashboard() {
   };
 
   useEffect(() => {
-    if (user?.role === "admin" || user?.role === "librarian") {
+    if (user?.role === "admin" || user?.role === "librarian" || user?.role === "owner") {
       fetchLibrarianStats();
     } else if (user?.role === "reader") {
       fetchReaderData();
     }
   }, [user]);
 
-  const isLibrarian = user?.role === "admin" || user?.role === "librarian";
+  const isStaffOrOwner = user?.role === "admin" || user?.role === "librarian" || user?.role === "owner";
+  const isOwner = user?.role === "owner";
 
   if (loading) {
     return (
@@ -89,30 +101,43 @@ export default function Dashboard() {
     );
   }
 
-  // Render LIBRARIAN / ADMIN dashboard
-  if (isLibrarian && data) {
+  // Render LIBRARIAN / ADMIN / OWNER dashboard
+  if (isStaffOrOwner && data) {
     const { stats, popularBooks, borrowTrends, recentTransactions } = data;
     
     return (
       <div className="space-y-6">
         {/* Hero strip */}
-        <Card className="overflow-hidden border-primary/20 bg-gradient-to-br from-primary to-primary/80 text-primary-foreground shadow-md">
+        <Card className="overflow-hidden border-primary/20 bg-gradient-to-br from-primary via-primary/95 to-primary/80 text-primary-foreground shadow-md">
           <CardContent className="flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between">
             <div>
               <Badge className="bg-primary-foreground/15 text-primary-foreground hover:bg-primary-foreground/20 border-0">
-                <Sparkles className="mr-1 h-3 w-3 animate-pulse" /> Hôm nay, {new Date().toLocaleDateString("vi-VN")}
+                <Sparkles className="mr-1 h-3 w-3 animate-pulse" /> {isOwner ? "👑 Trung tâm Điều hành Giám đốc" : "Hôm nay, " + new Date().toLocaleDateString("vi-VN")}
               </Badge>
               <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight md:text-4xl">
-                Chào buổi sáng, {user?.fullName}.
+                {isOwner ? `Xin chào Giám đốc, ${user?.fullName}` : `Chào buổi sáng, ${user?.fullName}.`}
               </h2>
               <p className="mt-1 max-w-xl text-sm text-primary-foreground/80">
-                Hệ thống ghi nhận đang có <strong>{stats.currentlyBorrowing}</strong> lượt mượn sách hoạt động và <strong>{stats.overdueCount}</strong> lượt bị quá hạn cần nhắc nhở.
+                {isOwner 
+                  ? `Tổng quan toàn diện: ${stats.totalCopies} cuốn sách, ${stats.activeReaders} độc giả, ${stats.currentlyBorrowing} lượt đang lưu thông và ${Number(stats.unpaidFinesSum || 0).toLocaleString("vi-VN")}đ nợ phạt cần kiểm soát.`
+                  : `Hệ thống ghi nhận đang có ${stats.currentlyBorrowing} lượt mượn sách hoạt động và ${stats.overdueCount} lượt bị quá hạn cần nhắc nhở.`}
               </p>
             </div>
-            <div className="flex gap-2">
-              <Button size="lg" variant="secondary" onClick={() => navigate("/borrow")} className="gap-2 shadow-sm">
-                <QrCode className="h-4 w-4" /> Quét QR mượn / trả
-              </Button>
+            <div className="flex flex-wrap gap-2">
+              {isOwner ? (
+                <>
+                  <Button size="lg" variant="secondary" onClick={() => navigate("/settings")} className="gap-2 shadow-sm font-semibold">
+                    <Shield className="h-4 w-4" /> Phê duyệt Quy chế
+                  </Button>
+                  <Button size="lg" variant="outline" onClick={() => navigate("/reports")} className="gap-2 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/20 border-primary-foreground/30">
+                    <BarChart3 className="h-4 w-4" /> Báo cáo quản trị
+                  </Button>
+                </>
+              ) : (
+                <Button size="lg" variant="secondary" onClick={() => navigate("/borrow")} className="gap-2 shadow-sm">
+                  <QrCode className="h-4 w-4" /> Quét QR mượn / trả
+                </Button>
+              )}
             </div>
           </CardContent>
         </Card>
@@ -178,30 +203,64 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="font-display">Phí phạt tồn đọng</CardTitle>
-              <p className="mt-1 text-xs text-muted-foreground">Tổng số tiền phạt quá hạn chưa thanh toán</p>
+          <Card className="flex flex-col">
+            <CardHeader className="pb-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="font-display text-base">Phí phạt tồn đọng</CardTitle>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    Tổng nợ: <strong className="text-destructive font-bold">{(Number(stats.unpaidFinesSum) || 0).toLocaleString("vi-VN")}đ</strong>
+                  </p>
+                </div>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onClick={() => navigate("/fines")} 
+                  className="text-xs h-7 text-primary hover:text-primary gap-1 px-2"
+                >
+                  Sổ phạt <ArrowUpRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
             </CardHeader>
-            <CardContent className="flex flex-col justify-between h-[280px]">
-              <div className="space-y-2">
-                <div className="flex items-end gap-2">
-                  <span className="font-display text-4xl font-semibold text-destructive">{(stats.unpaidFinesSum).toLocaleString("vi-VN")}đ</span>
+            <CardContent className="flex-1 flex flex-col justify-between pt-1 pb-4">
+              {!data.unpaidFinesList || data.unpaidFinesList.length === 0 ? (
+                <div className="py-12 text-center text-xs text-muted-foreground">
+                  <Wallet className="h-8 w-8 text-muted-foreground/30 mx-auto mb-1.5" />
+                  <p>Không có khoản nợ phạt nào đang tồn đọng</p>
                 </div>
-                <Progress value={Math.min(100, (stats.unpaidFinesSum / 200000) * 100)} className="h-2 bg-destructive/10" />
-                <p className="text-xs text-muted-foreground mt-2">
-                  Đang tích cực thu hồi nợ phí trễ hạn để bổ sung quỹ mua sắm sách mới cho Athenaeum.
-                </p>
-              </div>
-              <div className="rounded-md bg-muted/60 p-4 mt-auto">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="h-4 w-4 text-warning" />
-                  <span className="text-xs font-semibold">Tự động phát sinh phạt:</span>
+              ) : (
+                <div className="space-y-2 max-h-[200px] overflow-y-auto pr-1">
+                  {data.unpaidFinesList.map((f) => (
+                    <div 
+                      key={f.id} 
+                      onClick={() => navigate("/fines")}
+                      className="p-2 rounded-lg border bg-muted/20 hover:bg-destructive/5 hover:border-destructive/30 transition cursor-pointer flex items-center justify-between text-xs gap-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <p className="font-semibold truncate text-foreground flex items-center gap-1.5">
+                          <span>{f.reader_name}</span>
+                          <span className="font-mono text-[10px] text-muted-foreground">({f.card_number})</span>
+                        </p>
+                        <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                          {f.book_title ? `Sách: ${f.book_title}` : f.reason}
+                        </p>
+                      </div>
+                      <Badge variant="destructive" className="text-[10px] font-semibold shrink-0 py-0.5">
+                        {f.amount.toLocaleString("vi-VN")}đ
+                      </Badge>
+                    </div>
+                  ))}
                 </div>
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  Hệ thống tự động cộng dồn 5.000đ/ngày trễ hạn khi độc giả trả sách quá thời hạn đăng ký mượn.
-                </p>
-              </div>
+              )}
+
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="w-full text-xs h-8 gap-1.5 mt-3 border-destructive/20 text-destructive hover:bg-destructive/10"
+                onClick={() => navigate("/fines")}
+              >
+                <Wallet className="h-3.5 w-3.5" /> Mở Sổ Quản Lý & Thu Phí Phạt
+              </Button>
             </CardContent>
           </Card>
         </div>
@@ -293,7 +352,7 @@ export default function Dashboard() {
         {[
           { label: "Sách đang mượn", value: activeBorrows.length.toString(), icon: BookOpen, accent: "var(--chart-1)", desc: "Hãy chú ý hạn trả trên phiếu mượn" },
           { label: "Phiếu đặt trước", value: activeReservationsCount.toString(), icon: Clock, accent: "var(--chart-3)", desc: "Sách đang xếp hàng đợi bạn" },
-          { label: "Hóa đơn phí phạt", value: `${unpaidFines.reduce((s, f) => s + f.amount, 0).toLocaleString("vi-VN")}đ`, icon: Wallet, accent: "var(--chart-2)", desc: `${unpaidFines.length} khoản phí quá hạn` }
+          { label: "Hóa đơn phí phạt", value: `${unpaidFines.reduce((s, f) => s + (Number(f.amount) || 0), 0).toLocaleString("vi-VN")}đ`, icon: Wallet, accent: "var(--chart-2)", desc: `${unpaidFines.length} khoản phí quá hạn` }
         ].map((s, idx) => (
           <Card key={idx} className="relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1" style={{ background: `linear-gradient(90deg, ${s.accent}, transparent)` }} />

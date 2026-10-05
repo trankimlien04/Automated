@@ -61,8 +61,26 @@ function initCronJobs() {
                         record.u_id,
                         `Tự động khóa tài khoản độc giả ${record.full_name} do trễ hạn ${overdueDays} ngày`
                     ]);
+
+                    // Also notify all staff
+                    const { notifyAllStaff } = require('./notificationService');
+                    await notifyAllStaff(
+                        'Độc giả bị khóa tài khoản do quá hạn',
+                        `Tài khoản của độc giả ${record.full_name} đã bị khóa tự động do mượn sách "${record.title}" quá hạn ${overdueDays} ngày.`,
+                        'warning'
+                    );
                 }
             }
+
+            if (overdueRecords.length > 0) {
+                const { notifyAllStaff } = require('./notificationService');
+                await notifyAllStaff(
+                    'Báo cáo tự động: Sách mượn quá hạn',
+                    `Hệ thống phát hiện ${overdueRecords.length} lượt mượn quá hạn cần theo dõi thu hồi và xử lý phạt.`,
+                    'warning'
+                );
+            }
+
             console.log(`✅ [CRON JOB] Processed ${overdueRecords.length} overdue borrow records.`);
         } catch (error) {
             console.error('❌ [CRON ERROR] Error in midnight maintenance:', error);
@@ -95,7 +113,26 @@ function initCronJobs() {
                 ]);
             }
 
-            console.log(`✅ [CRON JOB] Sent ${dueSoon.length} reminder notifications.`);
+            // Remind readers whose library card is expiring in 7 days
+            const inSevenDays = new Date();
+            inSevenDays.setDate(today.getDate() + 7);
+            const inSevenDaysStr = inSevenDays.toISOString().slice(0, 10);
+
+            const [expiringCards] = await db.execute(`
+                SELECT id, full_name, card_number, card_expiry
+                FROM users
+                WHERE role = 'reader' AND status = 'active' AND card_expiry = ?
+            `, [inSevenDaysStr]);
+
+            for (const u of expiringCards) {
+                await db.execute('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")', [
+                    u.id,
+                    'Thẻ thư viện sắp hết hạn',
+                    `Thẻ thư viện mã ${u.card_number} của bạn sẽ hết hạn vào ngày ${new Date(u.card_expiry).toLocaleDateString('vi-VN')}. Vui lòng liên hệ quầy thủ thư để gia hạn thẻ.`
+                ]);
+            }
+
+            console.log(`✅ [CRON JOB] Sent ${dueSoon.length} book reminders and ${expiringCards.length} card expiry reminders.`);
         } catch (error) {
             console.error('❌ [CRON ERROR] Error in morning reminders:', error);
         }

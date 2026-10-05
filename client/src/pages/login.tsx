@@ -112,13 +112,64 @@ export default function LoginPage() {
                     />
                   </div>
                 </CardContent>
-                <CardFooter className="flex flex-col">
+                <CardFooter className="flex flex-col gap-3">
                   <Button className="w-full" type="submit" disabled={loading}>
                     {loading ? "Đang xử lý..." : "Đăng nhập"}
                   </Button>
-                  <p className="mt-4 text-xs text-center text-muted-foreground">
-                    Tài khoản Demo Admin: <span className="font-semibold">admin@library.com</span> / <span className="font-semibold">admin123</span>
-                  </p>
+
+                  <div className="w-full pt-2 border-t text-center space-y-2">
+                    <p className="text-[11px] font-medium text-muted-foreground">Tài khoản demo nhanh:</p>
+                    <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[10px] px-1 border-primary/40 bg-primary/5 hover:bg-primary/15 text-primary"
+                        onClick={() => {
+                          setEmail("owner@library.com");
+                          setPassword("123456");
+                        }}
+                      >
+                        👑 Chủ thư viện
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[10px] px-1"
+                        onClick={() => {
+                          setEmail("admin@library.com");
+                          setPassword("admin123");
+                        }}
+                      >
+                        🛡️ Quản trị viên
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[10px] px-1"
+                        onClick={() => {
+                          setEmail("librarian@library.com");
+                          setPassword("123456");
+                        }}
+                      >
+                        📚 Thủ thư
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-[10px] px-1"
+                        onClick={() => {
+                          setEmail("reader@library.com");
+                          setPassword("123456");
+                        }}
+                      >
+                        📖 Độc giả
+                      </Button>
+                    </div>
+                  </div>
                 </CardFooter>
               </form>
             </Card>
