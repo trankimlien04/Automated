@@ -12,8 +12,17 @@ router.get('/unread-count', authenticateToken, notificationController.getUnreadC
 // Mark all notifications as read
 router.put('/read-all', authenticateToken, notificationController.markAllRead);
 
+// Batch mark notifications as read
+router.put('/batch-read', authenticateToken, notificationController.batchMarkRead);
+
 // Clear all read notifications
 router.delete('/clear-read', authenticateToken, notificationController.clearReadNotifications);
+
+// Batch delete notifications
+router.delete('/batch-delete', authenticateToken, notificationController.batchDelete);
+
+// Delete all notifications
+router.delete('/delete-all', authenticateToken, notificationController.deleteAllNotifications);
 
 // Trigger manual system reminders check
 router.post('/trigger-reminders', authenticateToken, notificationController.triggerManualReminders);

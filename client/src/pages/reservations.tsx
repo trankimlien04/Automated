@@ -321,11 +321,17 @@ export default function ReservationsPage() {
       return;
     }
 
+    const targetBookCopyQr = bookCopyQrInput.trim();
+    if (!targetBookCopyQr) {
+      toast.error("Vui lòng quét hoặc nhập mã QR trên cuốn sách vật lý mà độc giả mang tới bàn!");
+      return;
+    }
+
     setSubmittingHandover(true);
     try {
       const res = await api.put(`/reservations/${selectedResv.id}/complete`, {
         scannedCode: targetCode,
-        bookCopyQr: bookCopyQrInput.trim() || undefined,
+        bookCopyQr: targetBookCopyQr,
       });
 
       toast.success(res.data.message || "Đã xác thực QR và hoàn tất giao sách thành công!");
@@ -738,17 +744,19 @@ export default function ReservationsPage() {
                 </div>
               )}
 
-              {/* Optional: Gán mã QR bản sao cụ thể */}
+              {/* Mã QR bản sao cuốn sách vật lý độc giả mang tới */}
               <div className="space-y-1.5 border-t border-border/50 pt-3">
-                <label className="text-[11px] text-muted-foreground font-medium flex items-center justify-between">
-                  <span>Mã QR bản sao sách giao (Tùy chọn)</span>
-                  <span className="text-[10px] text-muted-foreground">Mặc định: Tự động chọn 1 bản sao sẵn có trong kho</span>
+                <label className="text-[11px] text-foreground font-semibold flex items-center justify-between">
+                  <span className="flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                    <QrCode className="h-3.5 w-3.5" /> Mã QR trên cuốn sách vật lý độc giả mang tới (*)
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">Bắt buộc quét đúng sách</span>
                 </label>
                 <Input
                   value={bookCopyQrInput}
                   onChange={(e) => setBookCopyQrInput(e.target.value)}
-                  placeholder="Ví dụ: QR-BK-1-1 hoặc LIB-BK-..."
-                  className="text-xs font-mono h-8 bg-muted/20"
+                  placeholder="Quét mã QR sách hoặc nhập (VD: LIB-BK-1-1)..."
+                  className="text-xs font-mono h-8 bg-card border-border/80"
                 />
               </div>
             </div>

@@ -22,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   CheckCircle2,
   AlertTriangle,
@@ -39,11 +40,13 @@ import {
   Megaphone,
   Clock,
   ShieldAlert,
-  Sparkles
+  Sparkles,
+  X
 } from "lucide-react";
 import api from "@/services/api";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
+import { useConfirm } from "@/hooks/use-confirm";
 
 interface Notification {
   id: number;
@@ -56,7 +59,9 @@ interface Notification {
 
 export default function NotificationsPage() {
   const { user } = useAuth();
+  const { confirm, ConfirmDialogComponent } = useConfirm();
   const [notiList, setNotiList] = useState<Notification[]>([]);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<"all" | "unread" | "borrow" | "reservation" | "fine" | "system">("all");
   const [searchFilter, setSearchFilter] = useState("");
@@ -107,27 +112,108 @@ export default function NotificationsPage() {
     }
   };
 
-  const handleDeleteNotification = async (e: React.MouseEvent, id: number) => {
+  const handleDeleteNotification = (e: React.MouseEvent, id: number) => {
     e.stopPropagation();
-    try {
-      await api.delete(`/notifications/${id}`);
-      setNotiList(prev => prev.filter(n => n.id !== id));
-      toast.success("Đã xóa thông báo");
-    } catch (error) {
-      console.error("Lỗi khi xóa thông báo:", error);
-      toast.error("Không thể xóa thông báo");
-    }
+    confirm({
+      title: "Xác nhận xóa thông báo này?",
+      description: "Thông báo này sẽ bị xóa khỏi hộp thư của bạn và không thể phục hồi.",
+      confirmText: "Xóa thông báo",
+      cancelText: "Hủy bỏ",
+      variant: "destructive",
+      onConfirm: async () => {
+        try {
+          await api.delete(`/notifications/${id}`);
+          setNotiList(prev => prev.filter(n => n.id !== id));
+          setSelectedIds(prev => prev.filter(itemId => itemId !== id));
+          toast.success("Đã xóa thông báo thành công");
+        } catch (error) {
+          console.error("Lỗi khi xóa thông báo:", error);
+          toast.error("Không thể xóa thông báo");
+        }
+      },
+    });
   };
 
   const handleClearRead = async () => {
     try {
       await api.delete("/notifications/clear-read");
       setNotiList(prev => prev.filter(n => !n.is_read));
+      setSelectedIds(prev => prev.filter(id => {
+        const item = notiList.find(n => n.id === id);
+        return item && !item.is_read;
+      }));
       toast.success("Đã dọn dẹp các thông báo đã đọc");
     } catch (error) {
       console.error("Lỗi khi dọn thông báo:", error);
       toast.error("Không thể dọn thông báo");
     }
+  };
+
+  // Batch Selection Handlers
+  const handleToggleSelect = (id: number, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setSelectedIds(prev =>
+      prev.includes(id) ? prev.filter(item => item !== id) : [...prev, id]
+    );
+  };
+
+  const handleBatchMarkAsRead = async () => {
+    if (selectedIds.length === 0) return;
+    const count = selectedIds.length;
+    try {
+      await api.put("/notifications/batch-read", { ids: selectedIds });
+      setNotiList(prev => prev.map(n => selectedIds.includes(n.id) ? { ...n, is_read: true } : n));
+      setSelectedIds([]); // Trở về trạng thái ban đầu sau khi đánh dấu đọc xong
+      toast.success(`Đã đánh dấu đã đọc ${count} thông báo`);
+    } catch (error) {
+      console.error("Lỗi khi đánh dấu đọc nhiều thông báo:", error);
+      toast.error("Thao tác thất bại");
+    }
+  };
+
+  const handleBatchDelete = () => {
+    if (selectedIds.length === 0) return;
+    const count = selectedIds.length;
+    confirm({
+      title: `Xác nhận xóa ${count} thông báo đã chọn?`,
+      description: "Các thông báo đã chọn này sẽ bị xóa khỏi hộp thư của bạn và không thể phục hồi.",
+      confirmText: "Xóa thông báo",
+      cancelText: "Hủy bỏ",
+      variant: "destructive",
+      onConfirm: async () => {
+        try {
+          await api.delete("/notifications/batch-delete", { data: { ids: selectedIds } });
+          setNotiList(prev => prev.filter(n => !selectedIds.includes(n.id)));
+          setSelectedIds([]);
+          toast.success(`Đã xóa thành công ${count} thông báo`);
+        } catch (error) {
+          console.error("Lỗi khi xóa nhiều thông báo:", error);
+          toast.error("Không thể xóa các thông báo đã chọn");
+        }
+      },
+    });
+  };
+
+  const handleDeleteAll = () => {
+    if (notiList.length === 0) return;
+    confirm({
+      title: "Xác nhận xóa TẤT CẢ thông báo?",
+      description: `Hành động này sẽ xóa toàn bộ ${notiList.length} thông báo trong hộp thư của bạn và không thể hoàn tác.`,
+      confirmText: "Xóa tất cả",
+      cancelText: "Hủy",
+      variant: "destructive",
+      onConfirm: async () => {
+        try {
+          await api.delete("/notifications/delete-all");
+          setNotiList([]);
+          setSelectedIds([]);
+          toast.success("Đã xóa toàn bộ thông báo thành công");
+        } catch (error) {
+          console.error("Lỗi khi xóa tất cả thông báo:", error);
+          toast.error("Không thể xóa tất cả thông báo");
+        }
+      },
+    });
   };
 
   const handleTriggerReminders = async () => {
@@ -486,20 +572,6 @@ export default function NotificationsPage() {
               </Dialog>
             </>
           )}
-
-          {unreadCount > 0 && (
-            <Button variant="outline" size="sm" onClick={handleMarkAllAsRead} className="text-xs gap-1.5 shadow-xs">
-              <CheckCheck className="h-3.5 w-3.5 text-primary" />
-              <span>Đọc tất cả</span>
-            </Button>
-          )}
-
-          {notiList.some(n => n.is_read) && (
-            <Button variant="ghost" size="sm" onClick={handleClearRead} className="text-xs text-muted-foreground hover:text-destructive gap-1">
-              <Trash2 className="h-3.5 w-3.5" />
-              <span>Dọn đã đọc</span>
-            </Button>
-          )}
         </div>
       </div>
 
@@ -558,6 +630,75 @@ export default function NotificationsPage() {
                 </Button>
               ))}
             </div>
+
+            {/* Thanh Hộp Kiểm Chọn Nhiều & Thao Tác Hàng Loạt */}
+            {filteredList.length > 0 && (
+              <div className="flex flex-wrap items-center justify-between gap-3 pt-3 border-t mt-3 text-xs">
+                <div className="flex items-center gap-2.5">
+                  <Checkbox
+                    id="select-all-noti"
+                    checked={filteredList.length > 0 && filteredList.every((n) => selectedIds.includes(n.id))}
+                    onCheckedChange={() => {
+                      const allSelected = filteredList.every((n) => selectedIds.includes(n.id));
+                      if (allSelected) {
+                        const set = new Set(filteredList.map((n) => n.id));
+                        setSelectedIds((prev) => prev.filter((id) => !set.has(id)));
+                      } else {
+                        const newSelected = Array.from(new Set([...selectedIds, ...filteredList.map((n) => n.id)]));
+                        setSelectedIds(newSelected);
+                      }
+                    }}
+                  />
+                  <label
+                    htmlFor="select-all-noti"
+                    className="text-xs font-semibold cursor-pointer select-none text-foreground flex items-center gap-1.5"
+                  >
+                    <span>Chọn tất cả ({filteredList.length})</span>
+                  </label>
+                  {selectedIds.length > 0 && (
+                    <Badge variant="secondary" className="text-[11px] px-2 py-0.5 bg-primary/10 text-primary font-bold">
+                      Đã chọn {selectedIds.length}
+                    </Badge>
+                  )}
+                </div>
+
+                {selectedIds.length > 0 ? (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleBatchMarkAsRead}
+                      className="h-7 text-xs gap-1 border-primary/30 text-primary hover:bg-primary/10"
+                    >
+                      <CheckCheck className="h-3.5 w-3.5" />
+                      <span>Đánh dấu đã đọc ({selectedIds.length})</span>
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      onClick={handleBatchDelete}
+                      className="h-7 text-xs gap-1 shadow-xs"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Xóa đã chọn ({selectedIds.length})</span>
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setSelectedIds([])}
+                      className="h-7 text-xs text-muted-foreground hover:text-foreground gap-1 px-2"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                      <span>Bỏ chọn</span>
+                    </Button>
+                  </div>
+                ) : (
+                  <span className="text-[11px] text-muted-foreground italic hidden sm:inline-block">
+                    Tick chọn để đọc hoặc xóa nhiều thông báo cùng lúc
+                  </span>
+                )}
+              </div>
+            )}
           </CardHeader>
 
           <CardContent className="p-4 space-y-2.5">
@@ -580,17 +721,32 @@ export default function NotificationsPage() {
               filteredList.map((n) => {
                 const details = getNotificationDetails(n);
                 const { Icon, iconBg, badge, badgeCls } = details;
+                const isSelected = selectedIds.includes(n.id);
 
                 return (
                   <div
                     key={n.id}
                     onClick={() => !n.is_read && handleMarkAsRead(n.id)}
-                    className={`group relative flex items-start gap-3.5 rounded-xl border p-3.5 transition cursor-pointer hover:border-primary/40 hover:bg-accent/40 ${
-                      !n.is_read 
-                        ? "border-primary/30 bg-primary/[0.03] shadow-xs" 
-                        : "border-border/60 bg-card/60"
+                    className={`group relative flex items-start gap-3 rounded-xl border p-3.5 transition cursor-pointer ${
+                      isSelected
+                        ? "border-primary bg-primary/[0.08] shadow-xs"
+                        : !n.is_read 
+                        ? "border-primary/30 bg-primary/[0.03] shadow-xs hover:border-primary/50 hover:bg-accent/40" 
+                        : "border-border/60 bg-card/60 hover:border-primary/40 hover:bg-accent/40"
                     }`}
                   >
+                    {/* Checkbox select */}
+                    <div 
+                      className="pt-1 shrink-0" 
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Checkbox
+                        checked={isSelected}
+                        onCheckedChange={() => handleToggleSelect(n.id)}
+                        className="data-[state=checked]:bg-primary"
+                      />
+                    </div>
+
                     {/* Status Icon */}
                     <div className={`h-9 w-9 shrink-0 rounded-lg grid place-items-center ${iconBg}`}>
                       <Icon className="h-4.5 w-4.5" />
@@ -735,6 +891,7 @@ export default function NotificationsPage() {
           </Card>
         </div>
       </div>
+      {ConfirmDialogComponent}
     </div>
   );
 }

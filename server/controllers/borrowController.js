@@ -1,5 +1,6 @@
 const db = require('../config/db');
 const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
+const { syncOverdueFines, calculateOverdue } = require('../services/fineSyncService');
 
 // Helper to reliably find user by any representation of QR code / Card / ID / Email / Phone
 const findUserByAnyCode = async (code) => {
@@ -448,7 +449,7 @@ exports.borrowBook = async (req, res) => {
 };
 
 exports.returnBook = async (req, res) => {
-    let { bookQrCode, qrCode, copyQr, confirmPaidFine } = req.body;
+    let { bookQrCode, qrCode, copyQr, readerCardNumber, borrowRecordId, confirmPaidFine, paymentMethod, paymentChannel, transactionRef } = req.body;
     const processedBy = req.user.id;
 
     try {
@@ -505,36 +506,45 @@ exports.returnBook = async (req, res) => {
         }
 
         // 2. Find active borrow record
-        const [records] = await db.execute(
-            'SELECT br.*, u.full_name, u.email, u.card_number, u.id as u_id FROM borrow_records br JOIN users u ON br.user_id = u.id WHERE br.book_copy_id = ? AND br.status = "borrowing"',
-            [copy.id]
-        );
+        let recordQuery = 'SELECT br.*, u.full_name, u.email, u.card_number, u.id as u_id FROM borrow_records br JOIN users u ON br.user_id = u.id WHERE br.book_copy_id = ? AND br.status = "borrowing"';
+        const queryParams = [copy.id];
+        if (borrowRecordId) {
+            recordQuery += ' AND br.id = ?';
+            queryParams.push(borrowRecordId);
+        }
+        const [records] = await db.execute(recordQuery, queryParams);
         if (records.length === 0) {
             return res.status(404).json({ message: 'Không tìm thấy phiếu mượn hoạt động cho bản sao sách này' });
         }
         const record = records[0];
 
-        const today = new Date();
-        const dueDate = new Date(record.due_date);
-        today.setHours(0, 0, 0, 0);
-        dueDate.setHours(0, 0, 0, 0);
-
-        let overdueDays = 0;
-        let fineAmount = 0;
-
-        // Calculate if overdue
-        if (today > dueDate) {
-            const timeDiff = today.getTime() - dueDate.getTime();
-            overdueDays = Math.ceil(timeDiff / (1000 * 3600 * 24));
-            
-            // Get fine config
-            const [configs] = await db.execute('SELECT value FROM system_configs WHERE key_name = "fine_per_day"');
-            const finePerDay = parseInt(configs.length > 0 ? configs[0].value : '5000');
-            fineAmount = overdueDays * finePerDay;
+        // 2.1. Strict Reader Verification if readerCardNumber provided
+        if (readerCardNumber) {
+            const rawReaderCode = readerCardNumber.toString().trim();
+            const verifiedReader = await findUserByAnyCode(rawReaderCode);
+            if (verifiedReader && verifiedReader.user) {
+                if (verifiedReader.user.id !== record.u_id) {
+                    return res.status(400).json({
+                        message: `SAI ĐỘC GIẢ: Thẻ vừa xác thực là của độc giả "${verifiedReader.user.full_name}" (${verifiedReader.user.card_number || rawReaderCode}), KHÔNG PHẢI độc giả "${record.full_name}" (${record.card_number}) đã mượn cuốn «${copy.title}»!`
+                    });
+                }
+            }
         }
 
-        // Strict Enforcement: Overdue books CANNOT be returned unless fine is paid/collected
-        if (overdueDays > 0 && !confirmPaidFine) {
+        // Get fine config
+        const [configs] = await db.execute('SELECT value FROM system_configs WHERE key_name = "fine_per_day"');
+        const finePerDay = parseInt(configs.length > 0 ? configs[0].value : '5000');
+        const { overdueDays, fineAmount } = calculateOverdue(record.due_date, finePerDay);
+
+        // Check if fine was already paid previously (e.g. reader paid online via VietQR beforehand)
+        const [existingFines] = await db.execute(
+            'SELECT * FROM fines WHERE borrow_record_id = ? ORDER BY id DESC LIMIT 1',
+            [record.id]
+        );
+        const hasExistingPaidFine = existingFines.length > 0 && existingFines[0].status === 'paid';
+
+        // Strict Enforcement: Overdue books CANNOT be returned unless fine is paid/collected OR already paid online
+        if (overdueDays > 0 && !hasExistingPaidFine && !confirmPaidFine) {
             return res.status(400).json({
                 message: `Sách "${copy.title}" đã bị quá hạn ${overdueDays} ngày (Hạn trả: ${new Date(record.due_date).toLocaleDateString('vi-VN')}). Phí phạt: ${fineAmount.toLocaleString('vi-VN')}đ. Độc giả phải đóng phí phạt mới được phép trả sách!`,
                 requiresFinePayment: true,
@@ -543,7 +553,8 @@ exports.returnBook = async (req, res) => {
                 bookTitle: copy.title,
                 readerName: record.full_name,
                 cardNumber: record.card_number,
-                copyQr: copy.qr_code
+                copyQr: copy.qr_code,
+                borrowRecordId: record.id
             });
         }
 
@@ -570,18 +581,48 @@ exports.returnBook = async (req, res) => {
                 [copy.book_real_id]
             );
 
-            // If there's fine, insert fine record with status = 'paid' because fine was collected
-            if (fineAmount > 0) {
-                await connection.execute(
-                    'INSERT INTO fines (borrow_record_id, user_id, amount, reason, status, paid_at) VALUES (?, ?, ?, ?, "paid", NOW())',
-                    [record.id, record.u_id, fineAmount, `Trả trễ hạn ${overdueDays} ngày (Hạn trả: ${new Date(record.due_date).toLocaleDateString('vi-VN')})`]
-                );
+            const finalMethod = paymentMethod === 'transfer' ? 'transfer' : 'cash';
+            const finalChannel = paymentChannel === 'online' ? 'online' : 'counter';
+            const finalRef = transactionRef || (finalMethod === 'transfer' ? `TXN-RET-${record.id}-${Date.now().toString().slice(-6)}` : null);
+
+            // If there's fine and it wasn't already paid, record fine as paid
+            if (fineAmount > 0 && !hasExistingPaidFine) {
+                if (existingFines.length > 0) {
+                    await connection.execute(
+                        'UPDATE fines SET amount = ?, reason = ?, status = "paid", paid_at = NOW(), payment_method = ?, payment_channel = ?, transaction_ref = ? WHERE id = ?',
+                        [
+                            fineAmount,
+                            `Trả trễ hạn ${overdueDays} ngày (Hạn trả: ${new Date(record.due_date).toLocaleDateString('vi-VN')})`,
+                            finalMethod,
+                            finalChannel,
+                            finalRef,
+                            existingFines[0].id
+                        ]
+                    );
+                } else {
+                    await connection.execute(
+                        'INSERT INTO fines (borrow_record_id, user_id, amount, reason, status, paid_at, payment_method, payment_channel, transaction_ref) VALUES (?, ?, ?, ?, "paid", NOW(), ?, ?, ?)',
+                        [
+                            record.id,
+                            record.u_id,
+                            fineAmount,
+                            `Trả trễ hạn ${overdueDays} ngày (Hạn trả: ${new Date(record.due_date).toLocaleDateString('vi-VN')})`,
+                            finalMethod,
+                            finalChannel,
+                            finalRef
+                        ]
+                    );
+                }
             }
+
+            const methodDesc = hasExistingPaidFine 
+                ? 'Đã nộp trước qua Chuyển khoản online' 
+                : (finalMethod === 'transfer' ? 'Chuyển khoản VietQR tại quầy' : 'Tiền mặt tại quầy');
 
             // Save log
             await connection.execute(
                 'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?)',
-                [processedBy, 'RETURN', 'borrow_records', record.id, `Trả sách: ${copy.title}. Độc giả: ${record.full_name}. ${overdueDays > 0 ? `Đã thu phí phạt trễ hạn ${overdueDays} ngày: ${fineAmount.toLocaleString('vi-VN')}đ` : 'Trả đúng hạn'}`]
+                [processedBy, 'RETURN', 'borrow_records', record.id, `Trả sách: ${copy.title}. Độc giả: ${record.full_name}. ${overdueDays > 0 ? `Phí phạt trễ hạn ${overdueDays} ngày: ${fineAmount.toLocaleString('vi-VN')}đ [Hình thức: ${methodDesc}]` : 'Trả đúng hạn'}`]
             );
 
             // Notify reader
@@ -591,7 +632,7 @@ exports.returnBook = async (req, res) => {
                     [
                         record.u_id,
                         'Hoàn tất trả sách & nộp phạt trễ hạn',
-                        `Bạn đã hoàn tất trả cuốn sách "${copy.title}" và thanh toán phí phạt trễ hạn ${fineAmount.toLocaleString('vi-VN')}đ (${overdueDays} ngày).`
+                        `Bạn đã hoàn tất trả cuốn sách "${copy.title}". Phí phạt trễ hạn: ${fineAmount.toLocaleString('vi-VN')}đ (${overdueDays} ngày) [${methodDesc}].`
                     ]
                 );
             } else {
@@ -608,7 +649,7 @@ exports.returnBook = async (req, res) => {
             // Notify all staff (Librarians, Admin, Owner)
             await notifyAllStaff(
                 'Độc giả hoàn trả sách',
-                `Độc giả ${record.full_name} (${record.card_number}) vừa hoàn trả cuốn "${copy.title}". ${overdueDays > 0 ? `Đã phát sinh & thu phí phạt trễ hạn: ${fineAmount.toLocaleString('vi-VN')}đ (${overdueDays} ngày).` : 'Trả đúng hạn.'}`,
+                `Độc giả ${record.full_name} (${record.card_number}) vừa hoàn trả cuốn "${copy.title}". ${overdueDays > 0 ? `Phí phạt trễ hạn: ${fineAmount.toLocaleString('vi-VN')}đ (${overdueDays} ngày) - ${methodDesc}.` : 'Trả đúng hạn.'}`,
                 overdueDays > 0 ? 'warning' : 'info'
             );
 
@@ -668,16 +709,23 @@ exports.getBorrowRecords = async (req, res) => {
     const { role, id } = req.user;
 
     try {
+        // Sync overdue fines in real-time before fetching records
+        await syncOverdueFines(role === 'reader' ? id : null);
+
         let query = `
-            SELECT br.id, br.borrow_date, br.due_date, br.return_date, br.status, br.renewal_count,
+            SELECT br.id, br.user_id as user_id, br.borrow_date, br.due_date, br.return_date, br.status, br.renewal_count,
                    u.full_name as reader_name, u.card_number, u.phone as reader_phone,
                    b.title as book_title, b.cover_image, bc.qr_code,
-                   p.full_name as processed_by_name
+                   p.full_name as processed_by_name,
+                   f.id as fine_id, f.status as fine_status, f.amount as fine_amount,
+                   f.payment_method as fine_payment_method, f.payment_channel as fine_payment_channel,
+                   f.paid_at as fine_paid_at
             FROM borrow_records br
             JOIN users u ON br.user_id = u.id
             JOIN book_copies bc ON br.book_copy_id = bc.id
             JOIN books b ON bc.book_id = b.id
             LEFT JOIN users p ON br.processed_by = p.id
+            LEFT JOIN fines f ON f.borrow_record_id = br.id
         `;
         
         const params = [];
@@ -689,7 +737,16 @@ exports.getBorrowRecords = async (req, res) => {
         query += ' ORDER BY br.borrow_date DESC LIMIT 100';
 
         const [records] = await db.execute(query, params);
-        res.status(200).json(records);
+        const formatted = records.map(r => {
+            const { overdueDays, fineAmount } = calculateOverdue(r.due_date);
+            return {
+                ...r,
+                overdue_days: overdueDays,
+                fine_amount: r.fine_amount ? Number(r.fine_amount) : fineAmount,
+                fine_already_paid: r.fine_status === 'paid'
+            };
+        });
+        res.status(200).json(formatted);
     } catch (error) {
         console.error('Lỗi khi lấy lịch sử mượn trả:', error);
         res.status(500).json({ message: 'Lỗi server' });
@@ -846,6 +903,9 @@ exports.getReaderCheckoutInfo = async (req, res) => {
             return res.status(404).json({ message: `Không tìm thấy thông tin độc giả với mã [${rawCode}]` });
         }
 
+        // Sync overdue fines in real-time for this user
+        await syncOverdueFines(user.id);
+
         // Get fine per day config
         const [configs] = await db.execute('SELECT key_name, value FROM system_configs');
         const configMap = Object.fromEntries(configs.map(c => [c.key_name, c.value]));
@@ -863,28 +923,40 @@ exports.getReaderCheckoutInfo = async (req, res) => {
             ORDER BY r.reservation_date DESC
         `, [user.id]);
 
-        // Get active borrows
+        // Get active borrows with fine status
         const [activeBorrows] = await db.execute(`
             SELECT br.id, br.borrow_date, br.due_date, br.renewal_count, b.title as book_title, b.cover_image, b.id as book_id,
-                   bc.qr_code, GREATEST(0, DATEDIFF(CURDATE(), br.due_date)) as overdue_days
+                   bc.qr_code, GREATEST(0, DATEDIFF(CURDATE(), br.due_date)) as overdue_days,
+                   f.id as paid_fine_id, f.status as fine_status, f.payment_method as fine_payment_method,
+                   f.payment_channel as fine_payment_channel, f.paid_at as fine_paid_at, f.amount as fine_paid_amount
             FROM borrow_records br
             JOIN book_copies bc ON br.book_copy_id = bc.id
             JOIN books b ON bc.book_id = b.id
+            LEFT JOIN fines f ON f.borrow_record_id = br.id AND f.status = 'paid'
             WHERE br.user_id = ? AND br.status = 'borrowing'
             ORDER BY br.due_date ASC
         `, [user.id]);
 
         // Calculate fine amounts for active overdue loans
-        const enrichedActiveBorrows = activeBorrows.map(loan => ({
-            ...loan,
-            overdue_days: Number(loan.overdue_days) || 0,
-            fine_amount: (Number(loan.overdue_days) || 0) * finePerDay,
-            renewal_count: Number(loan.renewal_count) || 0
-        }));
+        const enrichedActiveBorrows = activeBorrows.map(loan => {
+            const isAlreadyPaid = Boolean(loan.paid_fine_id && loan.fine_status === 'paid');
+            const { overdueDays, fineAmount } = calculateOverdue(loan.due_date, finePerDay);
+            return {
+                ...loan,
+                overdue_days: overdueDays,
+                fine_amount: fineAmount,
+                renewal_count: Number(loan.renewal_count) || 0,
+                fine_already_paid: isAlreadyPaid,
+                fine_paid_amount: Number(loan.fine_paid_amount) || 0,
+                fine_payment_method: loan.fine_payment_method || null,
+                fine_payment_channel: loan.fine_payment_channel || null,
+                fine_paid_at: loan.fine_paid_at || null
+            };
+        });
 
         // Get unpaid fines history for this user
         const [unpaidFines] = await db.execute(`
-            SELECT f.id, f.amount, f.reason, f.status, f.created_at, b.title as book_title
+            SELECT f.id, f.amount, f.reason, f.status, f.created_at, b.title as book_title, bc.qr_code as book_copy_qr
             FROM fines f
             LEFT JOIN borrow_records br ON f.borrow_record_id = br.id
             LEFT JOIN book_copies bc ON br.book_copy_id = bc.id
@@ -949,12 +1021,19 @@ exports.getReaderCheckoutInfo = async (req, res) => {
 
 // POST /api/borrow/approve-reservation
 exports.approveReservation = async (req, res) => {
-    const { reservationId } = req.body;
+    const { reservationId, bookCopyQr, bookQrCode } = req.body;
+    const targetBookQr = (bookCopyQr || bookQrCode || '').trim();
     const processedBy = req.user.id;
 
     try {
         if (!reservationId) {
             return res.status(400).json({ message: 'Vui lòng cung cấp mã yêu cầu mượn' });
+        }
+
+        if (!targetBookQr) {
+            return res.status(400).json({ 
+                message: 'Vui lòng quét mã QR trên cuốn sách vật lý mà độc giả mang tới bàn để hoàn tất cho mượn!' 
+            });
         }
 
         const [resvs] = await db.execute(`
@@ -972,7 +1051,7 @@ exports.approveReservation = async (req, res) => {
         const resv = resvs[0];
 
         if (resv.status === 'completed' || resv.status === 'fulfilled') {
-            return res.status(400).json({ message: 'Yêu cầu mượn này đã được xử lý trước đó' });
+            return res.status(400).json({ message: 'Yêu cầu mượn này đã được xử lý trao sách trước đó' });
         }
         if (resv.status === 'cancelled') {
             return res.status(400).json({ message: 'Yêu cầu mượn này đã bị hủy' });
@@ -984,55 +1063,71 @@ exports.approveReservation = async (req, res) => {
             return res.status(400).json({ message: eligibility.message });
         }
 
-        // Find available copy
+        // Tìm đúng bản sao sách theo mã QR quét được từ cuốn sách vật lý
         const [copies] = await db.execute(
-            'SELECT * FROM book_copies WHERE book_id = ? AND status = "available" LIMIT 1',
-            [resv.book_id]
+            'SELECT bc.*, b.title as copy_book_title FROM book_copies bc JOIN books b ON bc.book_id = b.id WHERE bc.qr_code = ?',
+            [targetBookQr]
         );
         if (copies.length === 0) {
-            return res.status(400).json({ message: `Sách "${resv.book_title}" hiện không còn bản sao nào sẵn sàng trong kho` });
+            return res.status(404).json({ 
+                message: `Mã QR sách [${targetBookQr}] không tồn tại trong hệ thống thư viện!` 
+            });
         }
         const copy = copies[0];
-        const maxBorrowDays = eligibility.maxBorrowDays;
 
+        // ĐỐI SOÁT CHẶT CHẼ: Cuốn sách vật lý độc giả cầm tới phải thuộc đúng đầu sách đã đăng ký
+        if (copy.book_id !== resv.book_id) {
+            return res.status(400).json({ 
+                message: `MÃ SÁCH KHÔNG KHỚP: Cuốn sách độc giả mang tới là "${copy.copy_book_title}" (${copy.qr_code}), nhưng độc giả đã đăng ký mượn cuốn "${resv.book_title}". Vui lòng yêu cầu độc giả lấy đúng sách!` 
+            });
+        }
+
+        // Kiểm tra trạng thái bản sao
+        if (copy.status !== 'available') {
+            return res.status(400).json({ 
+                message: `Bản sao sách [${copy.qr_code}] hiện không ở trạng thái sẵn sàng (Trạng thái: ${copy.status}). Vui lòng chọn bản sao khác sẵn có trong kho!` 
+            });
+        }
+
+        const maxBorrowDays = eligibility.maxBorrowDays;
         const dueDate = new Date();
         dueDate.setDate(dueDate.getDate() + maxBorrowDays);
 
         const connection = await db.getConnection();
         await connection.beginTransaction();
         try {
-            // Create borrow record
+            // Tạo bản ghi mượn chính xác với bản sao vừa quét
             await connection.execute(
                 'INSERT INTO borrow_records (user_id, book_copy_id, due_date, status, processed_by) VALUES (?, ?, ?, "borrowing", ?)',
                 [resv.u_id, copy.id, dueDate.toISOString().slice(0, 10), processedBy]
             );
 
-            // Update book copy status
+            // Cập nhật trạng thái bản sao -> borrowed
             await connection.execute('UPDATE book_copies SET status = "borrowed" WHERE id = ?', [copy.id]);
 
-            // Decrement book available count
+            // Giảm số lượng bản sao sẵn có của đầu sách
             await connection.execute('UPDATE books SET available_copies = GREATEST(0, available_copies - 1) WHERE id = ?', [resv.book_id]);
 
-            // Mark reservation as completed
+            // Cập nhật trạng thái phiếu đăng ký -> completed
             await connection.execute('UPDATE reservations SET status = "completed" WHERE id = ?', [resv.id]);
 
-            // Log activity
+            // Ghi nhật ký hoạt động
             await connection.execute(
                 'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?)',
-                [processedBy, 'BORROW', 'borrow_records', copy.id, `Thủ thư duyệt mượn sách "${resv.book_title}" cho độc giả ${resv.full_name}`]
+                [processedBy, 'BORROW', 'borrow_records', copy.id, `Thủ thư quét khớp mã bản sao ${copy.qr_code} và duyệt trao sách "${resv.book_title}" cho độc giả ${resv.full_name}`]
             );
 
-            // Notify reader
+            // Gửi thông báo cho độc giả
             await connection.execute(
                 'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
                 [
                     resv.u_id,
                     'Đã nhận sách tại quầy',
-                    `Thủ thư đã duyệt và bàn giao thành công cuốn sách "${resv.book_title}" (Mã bản sao: ${copy.qr_code}) cho bạn. Hạn trả sách: ${dueDate.toLocaleDateString('vi-VN')}.`
+                    `Thủ thư đã quét xác thực bản sao sách (${copy.qr_code}) và bàn giao thành công cuốn "${resv.book_title}" cho bạn. Hạn trả sách: ${dueDate.toLocaleDateString('vi-VN')}.`
                 ]
             );
 
-            // Notify all staff
+            // Gửi thông báo cho ban thư viện
             await notifyAllStaff(
                 'Độc giả nhận sách đặt trước tại quầy',
                 `Độc giả ${resv.full_name} (${resv.card_number || 'ID: #' + resv.u_id}) vừa nhận cuốn "${resv.book_title}" (Mã bản sao: ${copy.qr_code}). Hạn trả: ${dueDate.toLocaleDateString('vi-VN')}.`,
@@ -1041,7 +1136,7 @@ exports.approveReservation = async (req, res) => {
 
             await connection.commit();
             res.status(200).json({
-                message: `Đã duyệt và trao sách "${resv.book_title}" thành công cho độc giả ${resv.full_name}!`,
+                message: `Đã đối soát khớp mã QR và trao cuốn "${resv.book_title}" (Mã bản sao: ${copy.qr_code}) cho độc giả ${resv.full_name}!`,
                 data: {
                     readerName: resv.full_name,
                     bookTitle: resv.book_title,
@@ -1058,6 +1153,37 @@ exports.approveReservation = async (req, res) => {
     } catch (error) {
         console.error('Lỗi khi duyệt mượn sách:', error);
         res.status(500).json({ message: 'Lỗi server khi duyệt mượn sách' });
+    }
+};
+
+// GET /api/borrow/check-copy/:qrCode
+exports.checkBookCopy = async (req, res) => {
+    const { qrCode } = req.params;
+    try {
+        if (!qrCode || !qrCode.trim()) {
+            return res.status(400).json({ message: 'Vui lòng cung cấp mã QR bản sao sách' });
+        }
+
+        const [copies] = await db.execute(`
+            SELECT bc.id, bc.book_id, bc.qr_code, bc.status, bc.condition_note,
+                   b.title as book_title, b.isbn, b.cover_image, b.available_copies,
+                   br.id as active_borrow_id, br.user_id as borrower_user_id, br.borrow_date, br.due_date,
+                   u.full_name as borrower_name, u.card_number as borrower_card_number
+            FROM book_copies bc
+            JOIN books b ON bc.book_id = b.id
+            LEFT JOIN borrow_records br ON bc.id = br.book_copy_id AND br.status = 'borrowing'
+            LEFT JOIN users u ON br.user_id = u.id
+            WHERE bc.qr_code = ?
+        `, [qrCode.trim()]);
+
+        if (copies.length === 0) {
+            return res.status(404).json({ message: `Mã QR [${qrCode}] không tồn tại trong hệ thống thư viện` });
+        }
+
+        res.status(200).json(copies[0]);
+    } catch (error) {
+        console.error('Lỗi khi kiểm tra mã bản sao:', error);
+        res.status(500).json({ message: 'Lỗi server khi kiểm tra mã bản sao' });
     }
 };
 

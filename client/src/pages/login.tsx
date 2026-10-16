@@ -9,6 +9,7 @@ import { BookMarked, Sparkles } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import api from "@/services/api";
 import { toast } from "sonner";
+import { isValidEmail, isValidPhone, sanitizePhoneInput, validateEmailInput, validatePhoneInput } from "@/lib/validators";
 
 export default function LoginPage() {
   const [isLogin, setIsLogin] = useState(true);
@@ -27,9 +28,16 @@ export default function LoginPage() {
       toast.error("Vui lòng nhập đầy đủ thông tin");
       return;
     }
+
+    const emailErr = validateEmailInput(email);
+    if (emailErr) {
+      toast.error(emailErr);
+      return;
+    }
+
     setLoading(true);
     try {
-      const response = await api.post("/auth/login", { email, password });
+      const response = await api.post("/auth/login", { email: email.trim(), password });
       login(response.data.token, response.data.user);
       toast.success("Đăng nhập thành công!");
       navigate("/");
@@ -47,9 +55,27 @@ export default function LoginPage() {
       toast.error("Vui lòng điền đầy đủ tên, email và mật khẩu");
       return;
     }
+
+    const emailErr = validateEmailInput(email);
+    if (emailErr) {
+      toast.error(emailErr);
+      return;
+    }
+
+    const phoneErr = validatePhoneInput(phone, false);
+    if (phoneErr) {
+      toast.error(phoneErr);
+      return;
+    }
+
     setLoading(true);
     try {
-      const response = await api.post("/auth/register", { fullName, email, password, phone });
+      const response = await api.post("/auth/register", { 
+        fullName: fullName.trim(), 
+        email: email.trim(), 
+        password, 
+        phone: phone ? phone.trim() : null 
+      });
       toast.success(response.data.message || "Đăng ký thành công! Hãy đợi Admin duyệt.");
       setIsLogin(true);
     } catch (error: any) {
@@ -89,7 +115,7 @@ export default function LoginPage() {
               </CardHeader>
               <form onSubmit={handleLoginSubmit}>
                 <CardContent className="space-y-4">
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     <Label htmlFor="login-email">Email</Label>
                     <Input
                       id="login-email"
@@ -99,6 +125,11 @@ export default function LoginPage() {
                       onChange={(e) => setEmail(e.target.value)}
                       required
                     />
+                    {email && !isValidEmail(email) && (
+                      <p className="text-[11px] text-destructive">
+                        Email không đúng định dạng (Ví dụ: name@example.com)
+                      </p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="login-password">Mật khẩu</Label>
@@ -194,7 +225,7 @@ export default function LoginPage() {
                       required
                     />
                   </div>
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     <Label htmlFor="reg-email">Email</Label>
                     <Input
                       id="reg-email"
@@ -204,16 +235,30 @@ export default function LoginPage() {
                       onChange={(e) => setEmail(e.target.value)}
                       required
                     />
+                    {email && !isValidEmail(email) && (
+                      <p className="text-[11px] text-destructive">
+                        Email không đúng định dạng (Ví dụ: name@example.com)
+                      </p>
+                    )}
                   </div>
-                  <div className="space-y-2">
+                  <div className="space-y-1.5">
                     <Label htmlFor="reg-phone">Số điện thoại</Label>
                     <Input
                       id="reg-phone"
                       type="tel"
                       placeholder="0901234567"
                       value={phone}
-                      onChange={(e) => setPhone(e.target.value)}
+                      maxLength={10}
+                      onChange={(e) => setPhone(sanitizePhoneInput(e.target.value))}
                     />
+                    <p className="text-[11px] text-muted-foreground">
+                      Chỉ nhập số, không được ghi chữ (10 chữ số, VD: 0901234567)
+                    </p>
+                    {phone && !isValidPhone(phone) && (
+                      <p className="text-[11px] text-destructive">
+                        Số điện thoại phải gồm 10 chữ số, bắt đầu bằng số 0
+                      </p>
+                    )}
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="reg-password">Mật khẩu</Label>

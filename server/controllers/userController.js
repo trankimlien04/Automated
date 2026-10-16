@@ -1,6 +1,7 @@
 const db = require('../config/db');
 const bcrypt = require('bcrypt');
 const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
+const { validateEmail, validatePhone } = require('../utils/validators');
 
 exports.getAllUsers = async (req, res) => {
     try {
@@ -202,10 +203,17 @@ exports.updateMyProfile = async (req, res) => {
         return res.status(400).json({ message: 'Họ và tên không được để trống' });
     }
 
+    const phoneCheck = validatePhone(phone, false);
+    if (!phoneCheck.isValid) {
+        return res.status(400).json({ message: phoneCheck.message });
+    }
+
+    const cleanPhone = phone ? phone.trim() : null;
+
     try {
         await db.execute(
             'UPDATE users SET full_name = ?, phone = ?, avatar_url = ? WHERE id = ?',
-            [full_name.trim(), phone || null, avatar_url || null, userId]
+            [full_name.trim(), cleanPhone, avatar_url || null, userId]
         );
 
         // Ghi activity log
@@ -269,7 +277,20 @@ exports.createUser = async (req, res) => {
             return res.status(400).json({ message: 'Vui lòng cung cấp đầy đủ họ tên, email, mật khẩu và vai trò' });
         }
 
-        const [existingUsers] = await db.execute('SELECT id FROM users WHERE email = ?', [email]);
+        const emailCheck = validateEmail(email);
+        if (!emailCheck.isValid) {
+            return res.status(400).json({ message: emailCheck.message });
+        }
+
+        const phoneCheck = validatePhone(phone, false);
+        if (!phoneCheck.isValid) {
+            return res.status(400).json({ message: phoneCheck.message });
+        }
+
+        const cleanEmail = email.trim();
+        const cleanPhone = phone ? phone.trim() : null;
+
+        const [existingUsers] = await db.execute('SELECT id FROM users WHERE email = ?', [cleanEmail]);
         if (existingUsers.length > 0) {
             return res.status(400).json({ message: 'Email đã được đăng ký' });
         }
@@ -285,7 +306,7 @@ exports.createUser = async (req, res) => {
 
         const [result] = await db.execute(
             'INSERT INTO users (full_name, email, password_hash, role, phone, card_number, card_expiry, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-            [fullName, email, hashedPassword, role, phone || null, null, cardExpiry, 'active']
+            [fullName.trim(), cleanEmail, hashedPassword, role, cleanPhone, null, cardExpiry, 'active']
         );
 
         const newId = result.insertId;

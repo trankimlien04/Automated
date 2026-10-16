@@ -123,6 +123,9 @@ CREATE TABLE IF NOT EXISTS fines (
     amount DECIMAL(10, 2) NOT NULL,
     reason TEXT,
     status ENUM('unpaid', 'paid') DEFAULT 'unpaid',
+    payment_method ENUM('cash', 'transfer') DEFAULT 'cash',
+    payment_channel ENUM('counter', 'online') DEFAULT 'counter',
+    transaction_ref VARCHAR(100) NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     paid_at DATETIME NULL,
     FOREIGN KEY (borrow_record_id) REFERENCES borrow_records(id) ON DELETE CASCADE,
@@ -206,7 +209,11 @@ TRUNCATE TABLE system_configs;
 INSERT INTO system_configs (key_name, value, description) VALUES
 ('max_borrow_days', '14', 'Số ngày mượn tối đa cho mỗi sách'),
 ('fine_per_day', '5000', 'Số tiền phạt mỗi ngày trễ hạn (VNĐ)'),
-('max_books_per_user', '3', 'Số lượng sách tối đa một độc giả được mượn cùng lúc');
+('max_books_per_user', '3', 'Số lượng sách tối đa một độc giả được mượn cùng lúc'),
+('bank_code', 'MB', 'Mã ngân hàng nhận thanh toán VietQR (ví dụ: MB, VCB, TCB, ICB, ACB...)'),
+('bank_name', 'MBBank (Ngân hàng Quân Đội)', 'Tên ngân hàng thụ hưởng'),
+('bank_account_no', '0901111222', 'Số tài khoản ngân hàng nhận tiền phạt'),
+('bank_account_name', 'THU VIEN ATHENAEUM', 'Tên chủ tài khoản thụ hưởng');
 
 -- 2.2. NGƯỜI DÙNG (USERS)
 -- Mật khẩu mặc định:
