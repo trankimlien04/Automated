@@ -1,53 +1,32 @@
 const cron = require('node-cron');
 const db = require('../config/db');
+const { syncOverdueFines, calculateOverdue } = require('./fineSyncService');
 
 function initCronJobs() {
     console.log('⏰ Initializing automated cron jobs...');
+
+    // Immediately run overdue fine sync on startup
+    syncOverdueFines().catch(err => console.error('Initial fine sync error:', err));
 
     // Run every day at 00:00 AM to calculate fines and lock severely overdue accounts
     cron.schedule('0 0 * * *', async () => {
         console.log('🔄 [CRON JOB] Running daily midnight maintenance (Fines & Account locking)...');
         try {
-            const todayStr = new Date().toISOString().slice(0, 10);
-            
-            // 1. Get fine rate per day from config
-            const [configs] = await db.execute('SELECT value FROM system_configs WHERE key_name = "fine_per_day"');
-            const finePerDay = parseInt(configs.length > 0 ? configs[0].value : '5000');
+            // 1. Sync all overdue fines using standard normalized calendar calculation
+            await syncOverdueFines();
 
-            // 2. Find all unreturned records that are past due_date
+            // 2. Find all unreturned records that are past due_date to check for auto-lock
             const [overdueRecords] = await db.execute(`
                 SELECT br.*, u.id as u_id, u.full_name, u.status as user_status, b.title
                 FROM borrow_records br
                 JOIN users u ON br.user_id = u.id
                 JOIN book_copies bc ON br.book_copy_id = bc.id
                 JOIN books b ON bc.book_id = b.id
-                WHERE br.status = 'borrowing' AND br.due_date < ?
-            `, [todayStr]);
+                WHERE br.status = 'borrowing' AND br.due_date < NOW()
+            `);
 
             for (const record of overdueRecords) {
-                const dueDate = new Date(record.due_date);
-                const today = new Date();
-                const diffTime = Math.abs(today - dueDate);
-                const overdueDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-                // Update or Insert Fine
-                const fineAmount = overdueDays * finePerDay;
-                const [existingFine] = await db.execute('SELECT id FROM fines WHERE borrow_record_id = ?', [record.id]);
-                
-                if (existingFine.length > 0) {
-                    await db.execute('UPDATE fines SET amount = ?, reason = ? WHERE id = ?', [
-                        fineAmount,
-                        `Trả trễ hạn ${overdueDays} ngày (Hạn: ${dueDate.toLocaleDateString('vi-VN')})`,
-                        existingFine[0].id
-                    ]);
-                } else {
-                    await db.execute('INSERT INTO fines (borrow_record_id, user_id, amount, reason, status) VALUES (?, ?, ?, ?, "unpaid")', [
-                        record.id,
-                        record.u_id,
-                        fineAmount,
-                        `Trả trễ hạn ${overdueDays} ngày`
-                    ]);
-                }
+                const { overdueDays } = calculateOverdue(record.due_date);
 
                 // Auto lock account if overdue by 7 days or more (UC24)
                 if (overdueDays >= 7 && record.user_status !== 'locked') {

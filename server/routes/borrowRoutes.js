@@ -21,4 +21,7 @@ router.get('/reader-checkout-info/:cardNumber', authenticateToken, requireRole([
 // Approve and fulfill reservation into borrow record (Only Librarian/Admin)
 router.post('/approve-reservation', authenticateToken, requireRole(['admin', 'librarian']), borrowController.approveReservation);
 
+// Check book copy information by QR code
+router.get('/check-copy/:qrCode', authenticateToken, borrowController.checkBookCopy);
+
 module.exports = router;

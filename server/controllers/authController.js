@@ -2,6 +2,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const db = require('../config/db');
 const { notifyRoles } = require('../services/notificationService');
+const { validateEmail, validatePhone } = require('../utils/validators');
 
 exports.register = async (req, res) => {
     const { fullName, email, password, phone } = req.body;
@@ -11,7 +12,20 @@ exports.register = async (req, res) => {
             return res.status(400).json({ message: 'Vui lòng cung cấp đầy đủ tên, email và mật khẩu' });
         }
 
-        const [existingUsers] = await db.execute('SELECT id FROM users WHERE email = ?', [email]);
+        const emailCheck = validateEmail(email);
+        if (!emailCheck.isValid) {
+            return res.status(400).json({ message: emailCheck.message });
+        }
+
+        const phoneCheck = validatePhone(phone, false);
+        if (!phoneCheck.isValid) {
+            return res.status(400).json({ message: phoneCheck.message });
+        }
+
+        const cleanEmail = email.trim();
+        const cleanPhone = phone ? phone.trim() : null;
+
+        const [existingUsers] = await db.execute('SELECT id FROM users WHERE email = ?', [cleanEmail]);
         if (existingUsers.length > 0) {
             return res.status(400).json({ message: 'Email đã được đăng ký' });
         }
@@ -20,7 +34,7 @@ exports.register = async (req, res) => {
         
         const [result] = await db.execute(
             'INSERT INTO users (full_name, email, password_hash, phone, role, status) VALUES (?, ?, ?, ?, ?, ?)',
-            [fullName, email, hashedPassword, phone || null, 'reader', 'pending']
+            [fullName.trim(), cleanEmail, hashedPassword, cleanPhone, 'reader', 'pending']
         );
 
         // Notify Admin & Librarian
@@ -46,7 +60,12 @@ exports.login = async (req, res) => {
             return res.status(400).json({ message: 'Vui lòng cung cấp email và mật khẩu' });
         }
 
-        const [users] = await db.execute('SELECT * FROM users WHERE email = ?', [email]);
+        const emailCheck = validateEmail(email);
+        if (!emailCheck.isValid) {
+            return res.status(400).json({ message: emailCheck.message });
+        }
+
+        const [users] = await db.execute('SELECT * FROM users WHERE email = ?', [email.trim()]);
         if (users.length === 0) {
             return res.status(401).json({ message: 'Email hoặc mật khẩu không đúng' });
         }

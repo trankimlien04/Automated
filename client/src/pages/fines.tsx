@@ -3,23 +3,27 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Wallet, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { Wallet, AlertTriangle, CheckCircle2, QrCode, Banknote, ShieldCheck } from "lucide-react";
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
-
 import { useConfirm } from "@/hooks/use-confirm";
+import { VietQrModal } from "@/components/vietqr-modal";
 
 interface Fine {
   id: number;
   amount: number;
   reason: string;
   status: "paid" | "unpaid";
+  payment_method?: "cash" | "transfer";
+  payment_channel?: "counter" | "online";
+  transaction_ref?: string | null;
   payment_date: string | null;
   created_at: string;
   reader_name: string;
   card_number: string;
   book_title: string | null;
+  book_copy_qr?: string | null;
 }
 
 export default function FinesPage() {
@@ -27,6 +31,11 @@ export default function FinesPage() {
   const [loading, setLoading] = useState(true);
   const { user } = useAuth();
   const { confirm, ConfirmDialogComponent } = useConfirm();
+
+  // VietQR modal state
+  const [qrModalOpen, setQrModalOpen] = useState(false);
+  const [selectedFine, setSelectedFine] = useState<Fine | null>(null);
+  const [isSubmittingPay, setIsSubmittingPay] = useState(false);
 
   const fetchFines = async () => {
     setLoading(true);
@@ -45,23 +54,30 @@ export default function FinesPage() {
     fetchFines();
   }, []);
 
-  const handlePayFine = (id: number) => {
-    confirm({
-      title: "Xác nhận thanh toán",
-      description: "Bạn có chắc chắn muốn ghi nhận độc giả đã thanh toán hóa đơn phí phạt này?",
-      confirmText: "Xác nhận thu",
-      cancelText: "Hủy",
-      onConfirm: async () => {
-        try {
-          await api.put(`/fines/${id}/pay`);
-          toast.success("Ghi nhận thanh toán phí phạt thành công!");
-          fetchFines();
-        } catch (error: any) {
-          console.error("Lỗi khi thanh toán:", error);
-          toast.error(error.response?.data?.message || "Không thể thực hiện ghi nhận thanh toán");
-        }
-      }
-    });
+  const openPayModal = (fine: Fine) => {
+    setSelectedFine(fine);
+    setQrModalOpen(true);
+  };
+
+  const handleConfirmPayment = async (method: "transfer" | "cash") => {
+    if (!selectedFine) return;
+    setIsSubmittingPay(true);
+    try {
+      const res = await api.put(`/fines/${selectedFine.id}/pay`, {
+        payment_method: method,
+        payment_channel: user?.role === "reader" ? "online" : "counter",
+        transaction_ref: method === "transfer" ? `TXN-FINE-${selectedFine.id}-${Date.now().toString().slice(-6)}` : null
+      });
+      toast.success(res.data.message || "Thanh toán phí phạt thành công!");
+      setQrModalOpen(false);
+      setSelectedFine(null);
+      fetchFines();
+    } catch (error: any) {
+      console.error("Lỗi khi thanh toán:", error);
+      toast.error(error.response?.data?.message || "Không thể thực hiện ghi nhận thanh toán");
+    } finally {
+      setIsSubmittingPay(false);
+    }
   };
 
   const totalUnpaid = finesList
@@ -72,37 +88,64 @@ export default function FinesPage() {
     .reduce((s, f) => s + (Number(f.amount) || 0), 0);
   
   const canManage = user?.role === "admin" || user?.role === "librarian";
+  const isReader = user?.role === "reader";
 
   return (
     <div className="space-y-6">
       <div className="grid gap-4 md:grid-cols-3">
-        <Card className="border-destructive/30 bg-destructive/5 animate-pulse">
+        <Card className="border-destructive/30 bg-destructive/5">
           <CardContent className="p-5">
-            <AlertTriangle className="h-5 w-5 text-destructive animate-bounce" />
+            <div className="flex items-center justify-between">
+              <AlertTriangle className="h-5 w-5 text-destructive" />
+              <Badge variant="outline" className="text-[10px] text-destructive border-destructive/30">Cần thanh toán</Badge>
+            </div>
             <p className="mt-3 font-display text-3xl font-semibold text-destructive">{totalUnpaid.toLocaleString("vi-VN")}đ</p>
-            <p className="text-xs text-muted-foreground font-medium">Tổng phí chưa thanh toán</p>
+            <p className="text-xs text-muted-foreground font-medium">
+              {isReader ? "Phí phạt bạn cần thanh toán" : "Tổng phí chưa thanh toán"}
+            </p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
-            <CheckCircle2 className="h-5 w-5 text-success" />
+            <div className="flex items-center justify-between">
+              <CheckCircle2 className="h-5 w-5 text-success" />
+              <Badge variant="outline" className="text-[10px] text-success border-success/30">Đã quyết toán</Badge>
+            </div>
             <p className="mt-3 font-display text-3xl font-semibold text-success">{totalPaid.toLocaleString("vi-VN")}đ</p>
-            <p className="text-xs text-muted-foreground font-medium">Đã thu thành công</p>
+            <p className="text-xs text-muted-foreground font-medium">
+              {isReader ? "Đã nộp thành công" : "Đã thu thành công vào quỹ"}
+            </p>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-5">
-            <Wallet className="h-5 w-5 text-primary" />
+            <div className="flex items-center justify-between">
+              <Wallet className="h-5 w-5 text-primary" />
+              <Badge variant="outline" className="text-[10px] text-primary border-primary/30">VietQR Napas247</Badge>
+            </div>
             <p className="mt-3 font-display text-3xl font-semibold text-primary">5.000đ</p>
-            <p className="text-xs text-muted-foreground font-medium">Định mức phí / ngày trễ hạn</p>
+            <p className="text-xs text-muted-foreground font-medium">Định mức phạt / ngày trễ hạn</p>
           </CardContent>
         </Card>
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle className="font-display">Quản lý hóa đơn phí phạt</CardTitle>
-          <p className="text-xs text-muted-foreground">Tự động tính phí dựa trên số ngày mượn trễ theo quy chế của Athenaeum</p>
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div>
+              <CardTitle className="font-display">
+                {isReader ? "Hóa đơn phí phạt của bạn" : "Quản lý hóa đơn phí phạt"}
+              </CardTitle>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                {isReader 
+                  ? "Bạn có thể thanh toán trực tuyến qua mã VietQR từ bất kỳ ngân hàng nào để thẻ thư viện không bị khóa."
+                  : "Hệ thống hỗ trợ Đa kênh: Độc giả tự nộp Online qua VietQR hoặc Thủ thư thu tiền mặt/VietQR tại quầy."}
+              </p>
+            </div>
+            <Badge variant="outline" className="w-fit text-xs gap-1.5 bg-primary/5 text-primary border-primary/20 py-1 px-2.5">
+              <QrCode className="h-3.5 w-3.5" /> Thanh toán VietQR tự động
+            </Badge>
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           {loading ? (
@@ -121,7 +164,7 @@ export default function FinesPage() {
                   <TableHead>Lý do</TableHead>
                   <TableHead>Số tiền</TableHead>
                   <TableHead>Trạng thái</TableHead>
-                  {canManage && <TableHead className="text-right">Thao tác</TableHead>}
+                  <TableHead className="text-right">Thao tác</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -131,33 +174,59 @@ export default function FinesPage() {
                     <TableCell className="font-medium text-xs">
                       {f.reader_name} <span className="text-[10px] text-muted-foreground">({f.card_number})</span>
                     </TableCell>
-                    <TableCell className="text-xs truncate max-w-[180px]">{f.book_title || "Thẻ phạt hệ thống"}</TableCell>
+                    <TableCell className="text-xs max-w-[200px]">
+                      <span className="font-medium truncate block">{f.book_title || "Thẻ phạt hệ thống"}</span>
+                      {f.book_copy_qr && (
+                        <code className="text-[10px] text-primary/80 font-mono font-semibold">[{f.book_copy_qr}]</code>
+                      )}
+                    </TableCell>
                     <TableCell className="text-[11px] text-muted-foreground max-w-[200px] truncate">{f.reason}</TableCell>
                     <TableCell className="font-semibold text-xs text-primary">{(Number(f.amount) || 0).toLocaleString("vi-VN")}đ</TableCell>
                     <TableCell>
                       {f.status === "paid" ? (
-                        <Badge className="bg-success/15 text-success border-success/20 text-[10px]" variant="outline">
-                          Đã thanh toán
-                        </Badge>
+                        <div className="space-y-0.5">
+                          <Badge className="bg-success/15 text-success border-success/20 text-[10px]" variant="outline">
+                            Đã thanh toán
+                          </Badge>
+                          <span className="block text-[10px] text-muted-foreground">
+                            {f.payment_method === 'transfer' ? 'Chuyển khoản VietQR' : 'Tiền mặt'}
+                            {f.payment_channel === 'online' ? ' (Online)' : ' (Tại quầy)'}
+                          </span>
+                        </div>
                       ) : (
                         <Badge className="bg-destructive/15 text-destructive border-destructive/20 text-[10px]" variant="outline">
                           Chưa thanh toán
                         </Badge>
                       )}
                     </TableCell>
-                    {canManage && (
-                      <TableCell className="text-right">
-                        {f.status === "unpaid" ? (
-                          <Button size="sm" className="h-7 text-xs" onClick={() => handlePayFine(f.id)}>
-                            Ghi nhận thu
+                    <TableCell className="text-right">
+                      {f.status === "unpaid" ? (
+                        isReader ? (
+                          <Button 
+                            size="sm" 
+                            className="h-7 text-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs"
+                            onClick={() => openPayModal(f)}
+                          >
+                            <QrCode className="h-3.5 w-3.5" /> Thanh toán VietQR
                           </Button>
                         ) : (
-                          <span className="text-xs text-muted-foreground italic">
-                            Đã thu ngày {f.payment_date ? new Date(f.payment_date).toLocaleDateString("vi-VN") : ""}
-                          </span>
-                        )}
-                      </TableCell>
-                    )}
+                          <Button 
+                            size="sm" 
+                            className="h-7 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-xs"
+                            onClick={() => openPayModal(f)}
+                          >
+                            <Wallet className="h-3.5 w-3.5" /> Thu tiền / QR
+                          </Button>
+                        )
+                      ) : (
+                        <div className="text-right text-[11px] text-muted-foreground italic">
+                          <span>Đã thu {f.payment_date ? new Date(f.payment_date).toLocaleDateString("vi-VN") : ""}</span>
+                          {f.transaction_ref && (
+                            <span className="block font-mono text-[9px] text-primary/80">{f.transaction_ref}</span>
+                          )}
+                        </div>
+                      )}
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -165,6 +234,25 @@ export default function FinesPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* VietQR Modal */}
+      {selectedFine && (
+        <VietQrModal
+          open={qrModalOpen}
+          onOpenChange={setQrModalOpen}
+          amount={Number(selectedFine.amount) || 0}
+          readerName={selectedFine.reader_name}
+          cardNumber={selectedFine.card_number}
+          bookTitle={selectedFine.book_title || undefined}
+          bookCopyQr={selectedFine.book_copy_qr || undefined}
+          overdueDays={selectedFine.reason ? parseInt(selectedFine.reason.match(/(\d+)\s*ngày/)?.[1] || "1", 10) : undefined}
+          transferNote={`PHAT ${selectedFine.card_number} ${selectedFine.book_copy_qr || `HD${selectedFine.id}`}`}
+          allowCashOption={canManage}
+          onConfirmPayment={handleConfirmPayment}
+          isSubmitting={isSubmittingPay}
+        />
+      )}
+
       {ConfirmDialogComponent}
     </div>
   );

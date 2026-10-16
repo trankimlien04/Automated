@@ -12,6 +12,7 @@ import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { useConfirm } from "@/hooks/use-confirm";
+import { isValidEmail, isValidPhone, sanitizePhoneInput, validateEmailInput, validatePhoneInput } from "@/lib/validators";
 
 interface User {
   id: number;
@@ -101,6 +102,18 @@ export default function AccountsPage() {
       return;
     }
 
+    const emailErr = validateEmailInput(newEmail);
+    if (emailErr) {
+      toast.error(emailErr);
+      return;
+    }
+
+    const phoneErr = validatePhoneInput(newPhone, false);
+    if (phoneErr) {
+      toast.error(phoneErr);
+      return;
+    }
+
     confirm({
       title: "Xác nhận tạo tài khoản",
       description: `Bạn có đồng ý tạo tài khoản ${roleMap[newRole]} cho "${newName}" không?`,
@@ -109,11 +122,11 @@ export default function AccountsPage() {
       onConfirm: async () => {
         try {
           await api.post("/users", {
-            fullName: newName,
-            email: newEmail,
+            fullName: newName.trim(),
+            email: newEmail.trim(),
             password: newPassword,
             role: newRole,
-            phone: newPhone,
+            phone: newPhone ? newPhone.trim() : null,
           });
 
           toast.success(`Tạo tài khoản ${roleMap[newRole]} thành công!`);
@@ -198,9 +211,26 @@ export default function AccountsPage() {
                 </DialogHeader>
                 <form onSubmit={handleCreateAccount} className="grid gap-3 mt-2">
                   <Input placeholder="Họ và tên" value={newName} onChange={(e) => setNewName(e.target.value)} required />
-                  <Input placeholder="Email đăng nhập" type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} required />
+                  <div>
+                    <Input placeholder="Email đăng nhập" type="email" value={newEmail} onChange={(e) => setNewEmail(e.target.value)} required />
+                    {newEmail && !isValidEmail(newEmail) && (
+                      <p className="text-[11px] text-destructive mt-1">Email không đúng định dạng (Ví dụ: user@example.com)</p>
+                    )}
+                  </div>
                   <Input placeholder="Mật khẩu đăng nhập mặc định" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />
-                  <Input placeholder="Số điện thoại" value={newPhone} onChange={(e) => setNewPhone(e.target.value)} />
+                  <div>
+                    <Input 
+                      placeholder="Số điện thoại (10 chữ số, VD: 0901234567)" 
+                      type="tel"
+                      value={newPhone} 
+                      maxLength={10}
+                      onChange={(e) => setNewPhone(sanitizePhoneInput(e.target.value))} 
+                    />
+                    <p className="text-[11px] text-muted-foreground mt-1">Chỉ nhập số, không được ghi chữ</p>
+                    {newPhone && !isValidPhone(newPhone) && (
+                      <p className="text-[11px] text-destructive mt-0.5">Số điện thoại phải gồm 10 chữ số, bắt đầu bằng 0</p>
+                    )}
+                  </div>
                   
                   <div className="flex flex-col gap-2">
                     <label className="text-xs text-muted-foreground">Vai trò</label>

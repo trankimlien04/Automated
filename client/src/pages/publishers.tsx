@@ -8,6 +8,7 @@ import { Plus, Edit, Trash2, Building2 } from "lucide-react";
 import api from "@/services/api";
 import { toast } from "sonner";
 import { useConfirm } from "@/hooks/use-confirm";
+import { isValidEmail, validateEmailInput } from "@/lib/validators";
 
 interface Publisher {
   id: number;
@@ -75,6 +76,14 @@ export default function PublishersPage() {
       return;
     }
 
+    if (email && email.trim() !== "") {
+      const emailErr = validateEmailInput(email);
+      if (emailErr) {
+        toast.error(emailErr);
+        return;
+      }
+    }
+
     const actionText = isEditMode ? "cập nhật" : "thêm mới";
     confirm({
       title: `Xác nhận ${actionText} nhà xuất bản`,
@@ -83,7 +92,11 @@ export default function PublishersPage() {
       cancelText: "Hủy",
       onConfirm: async () => {
         try {
-          const payload = { name, address, contact_email: email };
+          const payload = { 
+            name: name.trim(), 
+            address: address ? address.trim() : null, 
+            contact_email: email ? email.trim() : null 
+          };
           if (isEditMode && currentId) {
             await api.put(`/publishers/${currentId}`, payload);
             toast.success("Cập nhật nhà xuất bản thành công");
@@ -145,9 +158,12 @@ export default function PublishersPage() {
                 <label className="text-sm font-medium">Địa chỉ</label>
                 <Input placeholder="Nhập địa chỉ..." value={address} onChange={(e) => setAddress(e.target.value)} />
               </div>
-              <div className="space-y-2">
+              <div className="space-y-1.5">
                 <label className="text-sm font-medium">Email liên hệ</label>
                 <Input type="email" placeholder="example@publisher.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+                {email && !isValidEmail(email) && (
+                  <p className="text-[11px] text-destructive">Email không đúng định dạng (Ví dụ: example@publisher.com)</p>
+                )}
               </div>
               <div className="flex justify-end gap-2 mt-4">
                 <Button type="button" variant="outline" onClick={() => setIsDialogOpen(false)}>Hủy</Button>

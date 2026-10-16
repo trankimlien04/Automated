@@ -50,15 +50,19 @@ exports.createReservation = async (req, res) => {
             });
         }
 
-        // Check active borrows + reservations limit
+        // Check active borrows limit against dynamic system config
+        const [configs] = await db.execute('SELECT key_name, value FROM system_configs');
+        const configMap = Object.fromEntries(configs.map(c => [c.key_name, c.value]));
+        const maxBooks = parseInt(configMap['max_books_per_user'] || '5');
+
         const [activeBorrows] = await db.execute(
             'SELECT COUNT(*) as count FROM borrow_records WHERE user_id = ? AND status = "borrowing"',
             [userId]
         );
         const activeCount = parseInt(activeBorrows[0]?.count || 0);
-        if (activeCount >= 3) {
+        if (activeCount >= maxBooks) {
             return res.status(400).json({
-                message: 'Bạn đã đạt giới hạn tối đa 3 cuốn sách đang mượn cùng lúc. Vui lòng trả bớt sách trước khi đăng ký mượn thêm!'
+                message: `Bạn đã đạt giới hạn tối đa ${maxBooks} cuốn sách đang mượn cùng lúc. Vui lòng trả bớt sách trước khi đăng ký mượn thêm!`
             });
         }
 
@@ -71,7 +75,9 @@ exports.createReservation = async (req, res) => {
             return res.status(400).json({ message: 'Bạn đã đăng ký giữ / đặt trước đầu sách này rồi' });
         }
 
-        // Determine initial status: if available_copies > 0, set to ready immediately
+        // Xác định trạng thái ban đầu:
+        // - Nếu còn sách sẵn trong kho (available_copies > 0) -> 'ready' (Đăng ký mượn online, sẵn sàng tới lấy trên kệ ra quầy duyệt)
+        // - Nếu hết sách trong kho (available_copies <= 0) -> 'pending' (Xếp hàng đặt trước, chờ có người trả về kho)
         const initialStatus = book.available_copies > 0 ? 'ready' : 'pending';
 
         const [result] = await db.execute(
@@ -82,14 +88,14 @@ exports.createReservation = async (req, res) => {
         const reservationId = result.insertId;
         const ticketQr = `TICKET-RES-${reservationId}`;
 
-        // Insert notification for reader
+        // Gửi thông báo cho độc giả
         if (initialStatus === 'ready') {
             await db.execute(
                 'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
                 [
                     userId,
-                    'Đăng ký giữ sách thành công',
-                    `Đăng ký giữ sách "${book.title}" thành công. Mã phiếu nhận sách của bạn: ${ticketQr}. Bạn có thể đến quầy thư viện xuất trình mã QR để nhận sách.`
+                    'Đăng ký mượn online thành công',
+                    `Bạn đã đăng ký mượn online thành công cuốn "${book.title}". Khi đến thư viện, bạn vui lòng tự vào kệ lấy cuốn sách này và mang ra quầy xuất trình mã thẻ để Thủ thư quét mã duyệt trao sách nhé.`
                 ]
             );
         } else {
@@ -98,23 +104,23 @@ exports.createReservation = async (req, res) => {
                 [
                     userId,
                     'Ghi nhận đặt trước sách',
-                    `Yêu cầu đặt trước cuốn sách "${book.title}" đã được ghi nhận vào hàng đợi. Hệ thống sẽ gửi thông báo ngay khi có sách hoàn trả về kho.`
+                    `Đầu sách "${book.title}" hiện đang hết bản sao. Yêu cầu đặt trước của bạn đã được ghi nhận vào hàng đợi (Phiếu #${reservationId}). Ngay khi có người hoàn trả sách về thư viện, hệ thống sẽ tự động gửi thông báo mời bạn đến nhận!`
                 ]
             );
         }
 
-        // Notify all staff (Librarians, Admin, Owner)
+        // Gửi thông báo cho ban thư viện
         await notifyAllStaff(
-            'Độc giả đặt trước / giữ sách mới',
-            `Độc giả ${user.full_name} (${user.card_number || user.email}) vừa đăng ký ${initialStatus === 'ready' ? 'giữ sách nhận ngay' : 'đặt trước'} cuốn "${book.title}" (Phiếu #${reservationId}).`,
+            initialStatus === 'ready' ? 'Độc giả đăng ký mượn online' : 'Độc giả đặt trước sách (Hàng đợi)',
+            `Độc giả ${user.full_name} (${user.card_number || user.email}) vừa đăng ký ${initialStatus === 'ready' ? 'mượn online' : 'đặt trước'} cuốn "${book.title}" (Phiếu #${reservationId}).`,
             'info',
             userId
         );
 
         res.status(201).json({
-            message: initialStatus === 'ready' 
-                ? 'Đăng ký giữ sách thành công! Mã QR Phiếu nhận sách đã được tạo.' 
-                : 'Đặt trước sách thành công! Hệ thống sẽ thông báo khi có sách về kho.',
+            message: initialStatus === 'ready'
+                ? `Đăng ký mượn online cuốn "${book.title}" thành công! Khi đến thư viện, hãy tự lấy sách trên kệ và đưa thủ thư quét mã nhận sách.`
+                : `Đầu sách "${book.title}" hiện đang hết. Hệ thống đã ghi nhận đặt trước và sẽ thông báo khi có sách về kho!`,
             status: initialStatus,
             reservationId,
             ticketQrCode: ticketQr
@@ -280,30 +286,25 @@ exports.completeReservation = async (req, res) => {
             });
         }
 
-        // 3. Tìm bản sao sách khả dụng để giao
+        // 3. Tìm bản sao sách khả dụng để giao (Bắt buộc quét mã QR trên sách vật lý độc giả mang tới)
         let selectedCopy = null;
-        if (bookCopyQr && bookCopyQr.trim()) {
-            const [copies] = await db.execute(
-                'SELECT * FROM book_copies WHERE qr_code = ? AND book_id = ?',
-                [bookCopyQr.trim(), resv.book_real_id]
-            );
-            if (copies.length === 0) {
-                return res.status(400).json({ message: `Mã QR bản sao [${bookCopyQr}] không thuộc đầu sách "${resv.book_title}"` });
-            }
-            if (copies[0].status !== 'available') {
-                return res.status(400).json({ message: `Bản sao [${bookCopyQr}] hiện không ở trạng thái sẵn sàng (Trạng thái: ${copies[0].status})` });
-            }
-            selectedCopy = copies[0];
-        } else {
-            const [availableCopies] = await db.execute(
-                'SELECT * FROM book_copies WHERE book_id = ? AND status = "available" LIMIT 1',
-                [resv.book_real_id]
-            );
-            if (availableCopies.length === 0) {
-                return res.status(400).json({ message: `Đầu sách "${resv.book_title}" hiện không còn bản sao nào sẵn có trong kho để giao` });
-            }
-            selectedCopy = availableCopies[0];
+        if (!bookCopyQr || !bookCopyQr.trim()) {
+            return res.status(400).json({ 
+                message: 'Bắt buộc phải quét mã QR trên cuốn sách vật lý mà độc giả mang tới để hoàn tất trao sách!' 
+            });
         }
+
+        const [copies] = await db.execute(
+            'SELECT * FROM book_copies WHERE qr_code = ? AND book_id = ?',
+            [bookCopyQr.trim(), resv.book_real_id]
+        );
+        if (copies.length === 0) {
+            return res.status(400).json({ message: `Mã QR bản sao [${bookCopyQr}] không thuộc đầu sách "${resv.book_title}" hoặc không tồn tại!` });
+        }
+        if (copies[0].status !== 'available') {
+            return res.status(400).json({ message: `Bản sao [${bookCopyQr}] hiện không ở trạng thái sẵn sàng (Trạng thái: ${copies[0].status})` });
+        }
+        selectedCopy = copies[0];
 
         // 4. Tính hạn trả sách
         const [configs] = await db.execute('SELECT key_name, value FROM system_configs');

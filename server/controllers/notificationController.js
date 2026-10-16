@@ -104,6 +104,63 @@ exports.clearReadNotifications = async (req, res) => {
     }
 };
 
+// Đánh dấu đã đọc hàng loạt (theo danh sách id)
+exports.batchMarkRead = async (req, res) => {
+    const userId = req.user.id;
+    const { ids } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ message: 'Danh sách ID không hợp lệ' });
+    }
+
+    try {
+        const placeholders = ids.map(() => '?').join(',');
+        await db.execute(
+            `UPDATE notifications SET is_read = TRUE WHERE user_id = ? AND id IN (${placeholders})`,
+            [userId, ...ids]
+        );
+        res.status(200).json({ message: `Đã đánh dấu đã đọc ${ids.length} thông báo` });
+    } catch (error) {
+        console.error('Lỗi khi cập nhật nhiều thông báo:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+// Xóa thông báo hàng loạt (theo danh sách id)
+exports.batchDelete = async (req, res) => {
+    const userId = req.user.id;
+    const { ids } = req.body;
+
+    if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ message: 'Danh sách ID không hợp lệ' });
+    }
+
+    try {
+        const placeholders = ids.map(() => '?').join(',');
+        await db.execute(
+            `DELETE FROM notifications WHERE user_id = ? AND id IN (${placeholders})`,
+            [userId, ...ids]
+        );
+        res.status(200).json({ message: `Đã xóa ${ids.length} thông báo thành công` });
+    } catch (error) {
+        console.error('Lỗi khi xóa nhiều thông báo:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
+// Xóa tất cả thông báo của người dùng
+exports.deleteAllNotifications = async (req, res) => {
+    const userId = req.user.id;
+
+    try {
+        await db.execute('DELETE FROM notifications WHERE user_id = ?', [userId]);
+        res.status(200).json({ message: 'Đã xóa tất cả thông báo thành công' });
+    } catch (error) {
+        console.error('Lỗi khi xóa tất cả thông báo:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    }
+};
+
 // Gửi thông báo hệ thống / Phát loa (Broadcast hoặc gửi cá nhân)
 exports.broadcastNotification = async (req, res) => {
     const { title, message, type = 'info', audience = 'all', targetUserId } = req.body;

@@ -23,12 +23,15 @@ import {
   Wallet,
   Clock,
   Save,
-  Check
+  Check,
+  ArrowRight
 } from "lucide-react";
+import { Link } from "react-router-dom";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { isValidPhone, sanitizePhoneInput, validatePhoneInput } from "@/lib/validators";
 
 interface UserProfile {
   id: number;
@@ -121,11 +124,17 @@ export default function ProfilePage() {
       return;
     }
 
+    const phoneErr = validatePhoneInput(phone, false);
+    if (phoneErr) {
+      toast.error(phoneErr);
+      return;
+    }
+
     setSavingProfile(true);
     try {
       const response = await api.put("/users/profile/me", {
-        full_name: fullName,
-        phone: phone,
+        full_name: fullName.trim(),
+        phone: phone ? phone.trim() : null,
         avatar_url: avatarUrl
       });
       toast.success(response.data.message || "Cập nhật thông tin thành công!");
@@ -316,7 +325,14 @@ export default function ProfilePage() {
                   <p className="text-2xl font-bold text-primary mt-1">{stats.currentlyBorrowing || 0} <span className="text-xs font-normal text-muted-foreground">cuốn</span></p>
                 </Card>
                 <Card className="p-3.5">
-                  <p className="text-[11px] text-muted-foreground">Nợ phạt trễ hạn</p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-[11px] text-muted-foreground">Nợ phạt trễ hạn</p>
+                    {Number(stats.unpaidFines || 0) > 0 && (
+                      <Link to="/fines" className="text-[10px] font-semibold text-primary hover:underline flex items-center gap-0.5">
+                        Nộp phạt QR <ArrowRight className="h-3 w-3" />
+                      </Link>
+                    )}
+                  </div>
                   <p className="text-2xl font-bold text-destructive mt-1">{Number(stats.unpaidFines || 0).toLocaleString("vi-VN")} <span className="text-xs font-normal text-muted-foreground">đ</span></p>
                 </Card>
               </>
@@ -405,9 +421,15 @@ export default function ProfilePage() {
                   <Label className="text-xs">Số điện thoại liên lạc</Label>
                   <Input 
                     value={phone} 
-                    onChange={(e) => setPhone(e.target.value)} 
+                    type="tel"
+                    maxLength={10}
+                    onChange={(e) => setPhone(sanitizePhoneInput(e.target.value))} 
                     placeholder="Ví dụ: 0901234567"
                   />
+                  <p className="text-[11px] text-muted-foreground">Chỉ nhập số, không được ghi chữ (10 chữ số, VD: 0901234567).</p>
+                  {phone && !isValidPhone(phone) && (
+                    <p className="text-[11px] text-destructive">Số điện thoại phải gồm 10 chữ số, bắt đầu bằng số 0</p>
+                  )}
                 </div>
 
                 <div className="space-y-1.5">

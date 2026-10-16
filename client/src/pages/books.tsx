@@ -340,17 +340,21 @@ export default function BooksPage() {
   };
 
   const handleRegisterBorrow = async (book: Book) => {
+    const isAvailable = book.available_copies > 0;
     confirm({
-      title: "Đăng ký giữ sách / đặt mượn?",
-      description: `Bạn có muốn đăng ký giữ cuốn sách "${book.title}" vào danh sách nhận tại quầy thư viện không?`,
-      confirmText: "Xác nhận đăng ký",
-      cancelText: "Hủy",
+      title: isAvailable ? "Đăng ký mượn online cuốn này?" : "Đặt trước cuốn sách này?",
+      description: isAvailable
+        ? `Bạn có muốn đăng ký mượn online cuốn "${book.title}" không?\n\n👉 Sau khi đăng ký, khi đến thư viện bạn hãy tự vào kệ sách chọn lấy cuốn sách này và mang ra quầy xuất trình mã thẻ để Thủ thư quét mã duyệt mượn nhé.`
+        : `Đầu sách "${book.title}" hiện đã được các độc giả khác mượn hết (0 bản sao sẵn có trong kho).\n\nBạn có muốn đăng ký đặt trước không? Ngay khi có độc giả hoàn trả sách về thư viện, hệ thống sẽ tự động ưu tiên giữ sách và gửi thông báo mời bạn đến nhận!`,
+      confirmText: isAvailable ? "Xác nhận đăng ký mượn" : "Xác nhận đặt trước",
+      cancelText: "Hủy bỏ",
       onConfirm: async () => {
         try {
           const res = await api.post("/reservations", { bookId: book.id });
-          toast.success(res.data.message || "Đã tạo phiếu đăng ký thành công! Hãy đến thư viện đưa mã QR phiếu hoặc thẻ cá nhân để nhận sách.");
+          toast.success(res.data.message || (isAvailable ? "Đã đăng ký mượn online thành công!" : "Đã ghi nhận đặt trước vào hàng đợi!"));
+          fetchBooks();
         } catch (err: any) {
-          toast.error(err.response?.data?.message || "Không thể đăng ký sách này");
+          toast.error(err.response?.data?.message || "Không thể thực hiện yêu cầu này");
         }
       }
     });
@@ -726,15 +730,26 @@ export default function BooksPage() {
                     >
                       <Eye className="h-3.5 w-3.5" /> Xem mô tả & Chi tiết
                     </Button>
-                    <Button 
-                      size="sm" 
-                      className="w-full text-xs gap-1.5 bg-primary text-primary-foreground font-semibold shadow-xs h-8"
-                      onClick={() => handleRegisterBorrow(b)}
-                      disabled={b.available_copies <= 0}
-                    >
-                      <BookmarkPlus className="h-3.5 w-3.5" /> 
-                      {b.available_copies > 0 ? "Đăng ký mượn cuốn này" : "Tạm hết (Chờ tái bản)"}
-                    </Button>
+                    
+                    {b.available_copies > 0 ? (
+                      <Button 
+                        size="sm" 
+                        className="w-full text-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs h-8"
+                        onClick={() => handleRegisterBorrow(b)}
+                      >
+                        <BookmarkPlus className="h-3.5 w-3.5" /> 
+                        Đăng ký mượn online ({b.available_copies} cuốn sẵn)
+                      </Button>
+                    ) : (
+                      <Button 
+                        size="sm" 
+                        className="w-full text-xs gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold shadow-xs h-8 animate-in fade-in"
+                        onClick={() => handleRegisterBorrow(b)}
+                      >
+                        <BookmarkPlus className="h-3.5 w-3.5" /> 
+                        Hết sách • Đặt trước (Khi có sách)
+                      </Button>
+                    )}
                   </div>
                 ) : (
                   <div className="space-y-1.5">

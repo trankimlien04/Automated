@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { validateEmail } = require('../utils/validators');
 
 exports.getAllPublishers = async (req, res) => {
     try {
@@ -29,9 +30,15 @@ exports.createPublisher = async (req, res) => {
         if (!name) {
             return res.status(400).json({ message: 'Tên nhà xuất bản là bắt buộc' });
         }
+        if (contact_email && contact_email.trim() !== '') {
+            const emailCheck = validateEmail(contact_email);
+            if (!emailCheck.isValid) {
+                return res.status(400).json({ message: emailCheck.message });
+            }
+        }
         const [result] = await db.execute(
             'INSERT INTO publishers (name, address, contact_email) VALUES (?, ?, ?)',
-            [name, address || null, contact_email || null]
+            [name.trim(), address ? address.trim() : null, contact_email ? contact_email.trim() : null]
         );
         res.status(201).json({ message: 'Thêm nhà xuất bản thành công', publisherId: result.insertId });
     } catch (error) {
@@ -43,9 +50,15 @@ exports.createPublisher = async (req, res) => {
 exports.updatePublisher = async (req, res) => {
     const { name, address, contact_email } = req.body;
     try {
+        if (contact_email && contact_email.trim() !== '') {
+            const emailCheck = validateEmail(contact_email);
+            if (!emailCheck.isValid) {
+                return res.status(400).json({ message: emailCheck.message });
+            }
+        }
         await db.execute(
             'UPDATE publishers SET name = ?, address = ?, contact_email = ? WHERE id = ?',
-            [name, address || null, contact_email || null, req.params.id]
+            [name ? name.trim() : '', address ? address.trim() : null, contact_email ? contact_email.trim() : null, req.params.id]
         );
         res.status(200).json({ message: 'Cập nhật nhà xuất bản thành công' });
     } catch (error) {

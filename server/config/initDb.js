@@ -100,7 +100,39 @@ async function initOwnerAndConfigTables() {
             }
         }
 
-        console.log('✅ [INIT DB] Owner role & Maker-Checker tables ready!');
+        // 7. Ensure payment columns exist in fines table (Omnichannel payment: Cash & VietQR Transfer)
+        try {
+            const [pMethodCol] = await db.execute("SHOW COLUMNS FROM fines LIKE 'payment_method'");
+            if (pMethodCol.length === 0) {
+                await db.execute("ALTER TABLE fines ADD COLUMN payment_method ENUM('cash', 'transfer') DEFAULT 'cash'");
+            }
+            const [pChannelCol] = await db.execute("SHOW COLUMNS FROM fines LIKE 'payment_channel'");
+            if (pChannelCol.length === 0) {
+                await db.execute("ALTER TABLE fines ADD COLUMN payment_channel ENUM('counter', 'online') DEFAULT 'counter'");
+            }
+            const [pRefCol] = await db.execute("SHOW COLUMNS FROM fines LIKE 'transaction_ref'");
+            if (pRefCol.length === 0) {
+                await db.execute("ALTER TABLE fines ADD COLUMN transaction_ref VARCHAR(100) NULL");
+            }
+        } catch (colErr) {
+            console.error('⚠️ [INIT DB] Error verifying fines payment columns:', colErr.message);
+        }
+
+        // 8. Ensure library bank configuration exists for VietQR payment
+        const bankConfigs = [
+            ['bank_code', 'TPB', 'Mã ngân hàng nhận thanh toán VietQR (ví dụ: TPB, MB, VCB, TCB, ACB...)'],
+            ['bank_name', 'TPBank (Ngân hàng Tiên Phong)', 'Tên ngân hàng thụ hưởng'],
+            ['bank_account_no', '00000307092', 'Số tài khoản ngân hàng nhận tiền phạt'],
+            ['bank_account_name', 'THU VIEN ATHENAEUM', 'Tên chủ tài khoản thụ hưởng']
+        ];
+        for (const [key, val, desc] of bankConfigs) {
+            const [exist] = await db.execute('SELECT key_name FROM system_configs WHERE key_name = ?', [key]);
+            if (exist.length === 0) {
+                await db.execute('INSERT INTO system_configs (key_name, value, description) VALUES (?, ?, ?)', [key, val, desc]);
+            }
+        }
+
+        console.log('✅ [INIT DB] Owner role, Maker-Checker & VietQR Bank Config tables ready!');
     } catch (error) {
         console.error('⚠️ [INIT DB] Warning initializing owner/config tables:', error.message);
     }
