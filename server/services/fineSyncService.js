@@ -12,7 +12,9 @@ function calculateOverdue(dueDateInput, finePerDay = 5000) {
     due.setHours(0, 0, 0, 0);
 
     const diffTime = today.getTime() - due.getTime();
-    const overdueDays = Math.max(0, Math.round(diffTime / (1000 * 60 * 60 * 24)));
+    // Chỉ tính quá hạn khi ngày hôm nay thực sự sau ngày đến hạn (diffDays > 0)
+    const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+    const overdueDays = Math.max(0, diffDays);
     const fineAmount = overdueDays * finePerDay;
 
     return {
@@ -32,13 +34,37 @@ async function syncOverdueFines(userId = null) {
         const [configs] = await db.execute('SELECT value FROM system_configs WHERE key_name = "fine_per_day"');
         const finePerDay = parseInt(configs.length > 0 ? configs[0].value : '5000');
 
+        // BƯỚC 1: TỰ ĐỘNG DỌN DẸP / QUYẾT TOÁN CÁC BẢN GHI PHẠT LỖI
+        // 1.1. Sách đã trả đúng hạn hoặc trước hạn nhưng có fine 'unpaid' -> Xóa bỏ phạt oan
+        await db.execute(`
+            DELETE f FROM fines f
+            JOIN borrow_records br ON f.borrow_record_id = br.id
+            WHERE br.status = 'returned' AND DATE(br.return_date) <= DATE(br.due_date) AND f.status = 'unpaid'
+        `);
+
+        // 1.2. Sách đã trả vào kho (status = 'returned') nhưng vẫn còn fine 'unpaid' -> Đồng bộ thành 'paid' (vì đã hoàn tất nhận trả tại quầy)
+        await db.execute(`
+            UPDATE fines f
+            JOIN borrow_records br ON f.borrow_record_id = br.id
+            SET f.status = 'paid', f.paid_at = IFNULL(f.paid_at, br.return_date), f.payment_method = IFNULL(f.payment_method, 'cash'), f.payment_channel = IFNULL(f.payment_channel, 'counter')
+            WHERE br.status = 'returned' AND f.status = 'unpaid'
+        `);
+
+        // 1.3. Sách đang mượn nhưng chưa quá hạn (DATE(due_date) >= CURDATE()) nhưng có fine 'unpaid' -> Xóa bỏ
+        await db.execute(`
+            DELETE f FROM fines f
+            JOIN borrow_records br ON f.borrow_record_id = br.id
+            WHERE br.status = 'borrowing' AND DATE(br.due_date) >= CURDATE() AND f.status = 'unpaid'
+        `);
+
+        // BƯỚC 2: TÌM CÁC SÁCH ĐANG MƯỢN THỰC SỰ ĐÃ QUÁ HẠN (Hạn < Ngày hôm nay)
         let query = `
             SELECT br.*, u.id as u_id, u.full_name, u.status as user_status, b.title
             FROM borrow_records br
             JOIN users u ON br.user_id = u.id
             JOIN book_copies bc ON br.book_copy_id = bc.id
             JOIN books b ON bc.book_id = b.id
-            WHERE br.status = 'borrowing' AND br.due_date < NOW()
+            WHERE br.status = 'borrowing' AND DATE(br.due_date) < CURDATE()
         `;
         const params = [];
         if (userId) {
@@ -51,10 +77,13 @@ async function syncOverdueFines(userId = null) {
         for (const record of overdueRecords) {
             const { overdueDays, fineAmount, dueDateFormatted } = calculateOverdue(record.due_date, finePerDay);
             
-            // Only create/update fine if actually overdue by at least 1 day
-            const effectiveDays = Math.max(1, overdueDays);
-            const effectiveAmount = effectiveDays * finePerDay;
-            const fineReason = `Trả trễ hạn ${effectiveDays} ngày (Hạn: ${dueDateFormatted})`;
+            // Nếu không thực sự quá hạn, bỏ qua
+            if (overdueDays <= 0) {
+                await db.execute('DELETE FROM fines WHERE borrow_record_id = ? AND status = "unpaid"', [record.id]);
+                continue;
+            }
+
+            const fineReason = `Trả trễ hạn ${overdueDays} ngày (Hạn: ${dueDateFormatted})`;
 
             // Check if fine already exists for this borrow record
             const [existingFine] = await db.execute('SELECT id, status, amount, reason FROM fines WHERE borrow_record_id = ?', [record.id]);
@@ -62,9 +91,9 @@ async function syncOverdueFines(userId = null) {
             if (existingFine.length > 0) {
                 // If unpaid, sync amount and reason if not matching current exact overdue calculation
                 if (existingFine[0].status === 'unpaid') {
-                    if (Number(existingFine[0].amount) !== effectiveAmount || existingFine[0].reason !== fineReason) {
+                    if (Number(existingFine[0].amount) !== fineAmount || existingFine[0].reason !== fineReason) {
                         await db.execute('UPDATE fines SET amount = ?, reason = ? WHERE id = ?', [
-                            effectiveAmount,
+                            fineAmount,
                             fineReason,
                             existingFine[0].id
                         ]);
@@ -75,7 +104,7 @@ async function syncOverdueFines(userId = null) {
                 await db.execute('INSERT INTO fines (borrow_record_id, user_id, amount, reason, status) VALUES (?, ?, ?, ?, "unpaid")', [
                     record.id,
                     record.u_id,
-                    effectiveAmount,
+                    fineAmount,
                     fineReason
                 ]);
             }

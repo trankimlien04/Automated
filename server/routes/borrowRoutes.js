@@ -9,8 +9,15 @@ router.get('/records', authenticateToken, borrowController.getBorrowRecords);
 // Borrow a book (Librarian/Admin or Reader Self-Service)
 router.post('/borrow', authenticateToken, borrowController.borrowBook);
 
+// Borrow Requests (Đăng ký mượn online / Giỏ mượn sách có sẵn)
+router.get('/requests', authenticateToken, borrowController.getBorrowRequests);
+router.post('/requests', authenticateToken, borrowController.createBorrowRequest);
+router.delete('/requests/:id', authenticateToken, borrowController.cancelBorrowRequest);
+router.post('/requests/:id/fulfill', authenticateToken, requireRole(['admin', 'librarian']), borrowController.fulfillBorrowRequest);
+
 // Return a book (Only Admin & Librarian)
 router.post('/return', authenticateToken, requireRole(['admin', 'librarian']), borrowController.returnBook);
+
 
 // Renew a book borrow record
 router.post('/renew', authenticateToken, borrowController.renewBook);

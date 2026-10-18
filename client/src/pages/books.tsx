@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
-import { Plus, Search, QrCode, Filter, Star, Edit, Trash2, BookOpen, Download, CheckCircle2, BookmarkPlus, FileSpreadsheet, Upload, FileDown, AlertCircle, Info, Eye, Calendar, Building, FileText } from "lucide-react";
+import { Plus, Search, QrCode, Filter, Star, Edit, Trash2, BookOpen, Download, CheckCircle2, BookmarkPlus, FileSpreadsheet, Upload, FileDown, AlertCircle, Info, Eye, Calendar, Building, FileText, Clock } from "lucide-react";
 import * as XLSX from "xlsx";
 import { useRef } from "react";
 import api from "@/services/api";
@@ -68,6 +68,10 @@ export default function BooksPage() {
   // Book Detail viewing state (Description, Metadata)
   const [detailDialogOpen, setDetailDialogOpen] = useState(false);
   const [selectedBookForDetail, setSelectedBookForDetail] = useState<Book | null>(null);
+
+  // Reader's active borrow requests and reservations state
+  const [myBorrowRequests, setMyBorrowRequests] = useState<any[]>([]);
+  const [myReservations, setMyReservations] = useState<any[]>([]);
 
   const handleOpenBookDetail = (book: Book) => {
     setSelectedBookForDetail(book);
@@ -302,10 +306,24 @@ export default function BooksPage() {
     }
   };
 
+  const fetchUserStatus = async () => {
+    try {
+      const [reqRes, resvRes] = await Promise.all([
+        api.get("/borrow/requests"),
+        api.get("/reservations")
+      ]);
+      setMyBorrowRequests(reqRes.data || []);
+      setMyReservations(resvRes.data || []);
+    } catch (e) {
+      console.error("Lỗi khi tải thông tin mượn / đặt trước:", e);
+    }
+  };
+
   useEffect(() => {
     fetchBooks();
     fetchMetadata();
-  }, []);
+    fetchUserStatus();
+  }, [user]);
 
   const handleOpenQrDialog = async (book: Book) => {
     setSelectedBookForQr(book);
@@ -342,17 +360,23 @@ export default function BooksPage() {
   const handleRegisterBorrow = async (book: Book) => {
     const isAvailable = book.available_copies > 0;
     confirm({
-      title: isAvailable ? "Đăng ký mượn online cuốn này?" : "Đặt trước cuốn sách này?",
+      title: isAvailable ? "Đăng ký mượn online (Giữ chỗ 24h trước khi đến)?" : "Đặt trước cuốn sách này (Xếp hàng đợi)?",
       description: isAvailable
-        ? `Bạn có muốn đăng ký mượn online cuốn "${book.title}" không?\n\n👉 Sau khi đăng ký, khi đến thư viện bạn hãy tự vào kệ sách chọn lấy cuốn sách này và mang ra quầy xuất trình mã thẻ để Thủ thư quét mã duyệt mượn nhé.`
-        : `Đầu sách "${book.title}" hiện đã được các độc giả khác mượn hết (0 bản sao sẵn có trong kho).\n\nBạn có muốn đăng ký đặt trước không? Ngay khi có độc giả hoàn trả sách về thư viện, hệ thống sẽ tự động ưu tiên giữ sách và gửi thông báo mời bạn đến nhận!`,
-      confirmText: isAvailable ? "Xác nhận đăng ký mượn" : "Xác nhận đặt trước",
+        ? `Bạn đang ở nhà và thích cuốn "${book.title}"?\n\n🛡️ Hệ thống sẽ TẠM GIỮ RIÊNG 1 cuốn này cho bạn trong vòng 24 giờ để người khác không mượn mất trong thời gian bạn đến thư viện.\n\n📍 Trong vòng 24h, bạn hãy đến thư viện, vào kệ lấy cuốn sách này mang ra quầy và xuất trình Thẻ độc giả QR để Thủ thư duyệt trao sách.`
+        : `Đầu sách "${book.title}" hiện đã được các độc giả khác mượn hết (0 bản sao sẵn có trong kho).\n\nBạn có muốn đăng ký Đặt trước để xếp hàng không? Khi có độc giả hoàn trả sách về thư viện, hệ thống sẽ ưu tiên giữ sách 48h cho bạn và gửi thông báo hỏi bạn có muốn mượn không!`,
+      confirmText: isAvailable ? "Xác nhận giữ chỗ (24h)" : "Xác nhận xếp hàng",
       cancelText: "Hủy bỏ",
       onConfirm: async () => {
         try {
-          const res = await api.post("/reservations", { bookId: book.id });
-          toast.success(res.data.message || (isAvailable ? "Đã đăng ký mượn online thành công!" : "Đã ghi nhận đặt trước vào hàng đợi!"));
+          if (isAvailable) {
+            const res = await api.post("/borrow/requests", { bookId: book.id });
+            toast.success(res.data.message || "Đã giữ chỗ mượn sách online thành công trong 24 giờ!");
+          } else {
+            const res = await api.post("/reservations", { bookId: book.id });
+            toast.success(res.data.message || "Đã ghi nhận đặt trước vào hàng đợi!");
+          }
           fetchBooks();
+          fetchUserStatus();
         } catch (err: any) {
           toast.error(err.response?.data?.message || "Không thể thực hiện yêu cầu này");
         }
@@ -712,6 +736,19 @@ export default function BooksPage() {
                     </span>
                   </div>
 
+                  {user?.role !== "reader" && (() => {
+                    const bookHoldCount = myBorrowRequests.filter(r => r.book_id === b.id && r.status === 'pending').length;
+                    if (bookHoldCount <= 0) return null;
+                    return (
+                      <div className="pt-0.5">
+                        <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 font-semibold gap-1 w-full justify-center">
+                          <Clock className="h-3 w-3 text-amber-600" />
+                          Có {bookHoldCount} cuốn đang giữ chỗ 24h
+                        </Badge>
+                      </div>
+                    );
+                  })()}
+
                   <p className="font-mono text-[10px] text-muted-foreground truncate">
                     ISBN: {b.isbn || "Chưa cập nhật"}
                   </p>
@@ -725,29 +762,52 @@ export default function BooksPage() {
                     <Button 
                       size="sm" 
                       variant="outline"
-                      className="w-full text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 h-8"
+                      className="w-full text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 h-8 font-medium"
                       onClick={() => handleOpenBookDetail(b)}
                     >
-                      <Eye className="h-3.5 w-3.5" /> Xem mô tả & Chi tiết
+                      <Eye className="h-3.5 w-3.5" /> Xem chi tiết
                     </Button>
                     
-                    {b.available_copies > 0 ? (
+                    {/* Kiểm tra trạng thái đã đăng ký mượn hoặc đã đặt trước */}
+                    {myBorrowRequests.some(r => r.book_id === b.id && r.status === 'pending') ? (
+                      <Button 
+                        size="sm" 
+                        variant="outline"
+                        disabled
+                        className="w-full text-xs gap-1.5 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold h-8 cursor-default"
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> 
+                        Đã giữ chỗ 24h (Chờ nhận)
+                      </Button>
+                    ) : myReservations.some(r => r.book_id === b.id && ['waiting', 'pending', 'notified', 'ready', 'accepted'].includes(r.status)) ? (
+                      <Button 
+                        size="sm" 
+                        variant="outline"
+                        disabled
+                        className="w-full text-xs gap-1.5 bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 font-semibold h-8 cursor-default"
+                      >
+                        <Clock className="h-3.5 w-3.5 text-amber-600" /> 
+                        Đang đặt trước sách
+                      </Button>
+                    ) : b.available_copies > 0 ? (
                       <Button 
                         size="sm" 
                         className="w-full text-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs h-8"
+                        title="Đăng ký giữ chỗ cuốn sách này trong 24 giờ trước khi đến lấy"
                         onClick={() => handleRegisterBorrow(b)}
                       >
                         <BookmarkPlus className="h-3.5 w-3.5" /> 
-                        Đăng ký mượn online ({b.available_copies} cuốn sẵn)
+                        Đăng ký mượn online
                       </Button>
                     ) : (
                       <Button 
                         size="sm" 
                         className="w-full text-xs gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold shadow-xs h-8 animate-in fade-in"
+                        title="Đầu sách đã hết bản sao, bấm để xếp hàng đặt trước khi có sách hoàn trả"
                         onClick={() => handleRegisterBorrow(b)}
                       >
-                        <BookmarkPlus className="h-3.5 w-3.5" /> 
-                        Hết sách • Đặt trước (Khi có sách)
+                        <Clock className="h-3.5 w-3.5" /> 
+                        Hết sách • Đặt trước
                       </Button>
                     )}
                   </div>
@@ -756,10 +816,10 @@ export default function BooksPage() {
                     <Button 
                       size="sm" 
                       variant="outline" 
-                      className="w-full text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 h-8"
+                      className="w-full text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 h-8 font-medium"
                       onClick={() => handleOpenBookDetail(b)}
                     >
-                      <Eye className="h-3.5 w-3.5" /> Xem mô tả & Chi tiết
+                      <Eye className="h-3.5 w-3.5" /> Xem chi tiết
                     </Button>
                     <Button 
                       size="sm" 
@@ -807,6 +867,15 @@ export default function BooksPage() {
                 <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-300 text-xs">
                   Sẵn sàng: {bookCopies.filter(c => c.status === 'available').length}
                 </Badge>
+                {selectedBookForQr && (() => {
+                  const holds = myBorrowRequests.filter(r => r.book_id === selectedBookForQr.id && r.status === 'pending');
+                  if (holds.length === 0) return null;
+                  return (
+                    <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-400/40 text-xs font-semibold gap-1">
+                      <Clock className="h-3 w-3 text-amber-600" /> Giữ chỗ 24h: {holds.length}
+                    </Badge>
+                  );
+                })()}
                 <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-300 text-xs">
                   Đang mượn: {bookCopies.filter(c => c.status === 'borrowed').length}
                 </Badge>
@@ -814,6 +883,35 @@ export default function BooksPage() {
             </div>
             <p className="text-[11px] text-muted-foreground">• Mỗi bản sao sách trong kho có 1 mã QR độc lập dán trên bìa/gáy sách để phục vụ kiểm kê và mượn trả.</p>
           </div>
+
+          {selectedBookForQr && (() => {
+            const holds = myBorrowRequests.filter(r => r.book_id === selectedBookForQr.id && r.status === 'pending');
+            if (holds.length === 0) return null;
+            return (
+              <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-xs space-y-2 mt-3">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                    <Clock className="h-3.5 w-3.5 text-amber-600" /> Bạn đọc đang giữ chỗ 24h ({holds.length} yêu cầu):
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">Kho đã tự tạm trừ {holds.length} cuốn sẵn có</span>
+                </div>
+                <div className="space-y-1.5">
+                  {holds.map((r: any) => (
+                    <div key={r.id} className="flex items-center justify-between p-2 rounded-lg bg-background/90 border text-xs shadow-2xs">
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold text-foreground">👤 {r.reader_name}</span>
+                        <Badge variant="outline" className="font-mono text-[10px] bg-primary/5 text-primary border-primary/20">{r.card_number}</Badge>
+                        {r.reader_phone && <span className="text-[10px] text-muted-foreground font-mono">📞 {r.reader_phone}</span>}
+                      </div>
+                      <Badge variant="outline" className="text-[10px] font-semibold bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30">
+                        ⏱️ Còn {Math.max(1, (r.time_left_hours !== null && r.time_left_hours !== undefined) ? r.time_left_hours : 24)} giờ
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           <div className="py-2">
             {loadingQr ? (

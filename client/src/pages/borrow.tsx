@@ -8,12 +8,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { 
-  Camera, BookOpen, User, Clock, CheckCircle2, Scan, RefreshCw, 
-  Upload, QrCode, AlertTriangle, ShieldCheck, ArrowRightLeft, 
-  Search, CheckCircle, FileSpreadsheet, BookMarked,
+import {
+  Camera, BookOpen, User, Clock, CheckCircle2, Scan, RefreshCw,
+  Upload, QrCode, AlertTriangle, ShieldCheck, ArrowRightLeft,
+  Search, CheckCircle, FileSpreadsheet, BookMarked, BookmarkPlus,
   Download, Zap, CheckSquare, XCircle, UserCheck, Sparkles, X,
-  Inbox, Layers, Filter, Check
+  Inbox, Layers, Filter, Check, Banknote, CreditCard
 } from "lucide-react";
 import api from "@/services/api";
 import { toast } from "sonner";
@@ -74,6 +74,27 @@ interface ScannedReaderData {
   overdueCount?: number;
   maxBooksAllowed?: number;
   maxBooks?: number;
+  borrowRequests?: {
+    request_id: number;
+    reservation_id?: number;
+    request_date: string;
+    request_status: string;
+    book_id: number;
+    book_title: string;
+    isbn?: string;
+    cover_image?: string;
+    available_copies: number;
+  }[];
+  readyReservations?: {
+    reservation_id: number;
+    reservation_date: string;
+    reservation_status: string;
+    book_id: number;
+    book_title: string;
+    isbn?: string;
+    cover_image?: string;
+    available_copies: number;
+  }[];
   pendingRequests: {
     reservation_id: number;
     reservation_date: string;
@@ -106,6 +127,7 @@ interface ScannedReaderData {
     status: string;
     created_at: string;
     book_title?: string;
+    book_copy_qr?: string;
   }[];
   totalUnpaidFines?: number;
 }
@@ -113,17 +135,22 @@ interface ScannedReaderData {
 export default function BorrowPage() {
   const [history, setHistory] = useState<Transaction[]>([]);
   const [myReservations, setMyReservations] = useState<Reservation[]>([]);
+  const [myBorrowRequests, setMyBorrowRequests] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState("");
+  const [holdSearchTerm, setHoldSearchTerm] = useState("");
   const { confirm, ConfirmDialogComponent } = useConfirm();
   const { user } = useAuth();
-  
+
   // Librarian Scanned Reader Checkout Data
   const [scannedReaderInfo, setScannedReaderInfo] = useState<ScannedReaderData | null>(null);
   const [searchReaderInput, setSearchReaderInput] = useState("");
   const [directBookQr, setDirectBookQr] = useState("");
+  const [directBookInfo, setDirectBookInfo] = useState<any>(null);
+  const [isCheckingDirectBook, setIsCheckingDirectBook] = useState(false);
+  const [directBookCheckError, setDirectBookCheckError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState("checkout");
-  
+
   // Return form state
   const [returnBookQr, setReturnBookQr] = useState("");
 
@@ -198,15 +225,17 @@ export default function BorrowPage() {
     borrowRecordId?: number;
     copyQr?: string;
     fineId?: number;
+    isCounterDirectFine?: boolean;
+    unpaidFinesList?: any[];
   } | null>(null);
   const [isFinePaying, setIsFinePaying] = useState(false);
 
   // Reader profile info for QR
   const [readerProfile, setReaderProfile] = useState<any>(null);
 
-  // Modal to inspect a specific book copy QR code
+  // Modal to inspect a specific book copy QR code or Reader Card QR
   const [viewCopyQrDialog, setViewCopyQrDialog] = useState(false);
-  const [selectedCopyQr, setSelectedCopyQr] = useState<{ title: string; qrCode: string; readerName?: string } | null>(null);
+  const [selectedCopyQr, setSelectedCopyQr] = useState<{ title: string; qrCode: string; readerName?: string; type?: 'reader' | 'book' } | null>(null);
 
   const fetchHistory = async () => {
     setLoading(true);
@@ -220,12 +249,21 @@ export default function BorrowPage() {
     }
   };
 
+  const fetchMyBorrowRequests = async () => {
+    try {
+      const response = await api.get("/borrow/requests");
+      setMyBorrowRequests(response.data || []);
+    } catch (error) {
+      console.error("Lỗi khi tải danh sách yêu cầu mượn:", error);
+    }
+  };
+
   const fetchMyReservations = async () => {
     try {
       const response = await api.get("/reservations");
-      setMyReservations(response.data);
+      setMyReservations(response.data || []);
     } catch (error) {
-      console.error("Lỗi khi tải danh sách sách đăng ký:", error);
+      console.error("Lỗi khi tải danh sách sách đặt trước:", error);
     }
   };
 
@@ -238,8 +276,28 @@ export default function BorrowPage() {
     }
   };
 
+  const handleCancelBorrowRequest = (requestId: number, bookTitle: string) => {
+    confirm({
+      title: "Hủy giữ chỗ mượn sách online?",
+      description: `Bạn có chắc muốn hủy giữ chỗ cuốn sách "${bookTitle}" không? Nếu hủy, cuốn sách sẽ được hoàn trả lại kho cho các bạn đọc khác mượn.`,
+      confirmText: "Hủy giữ chỗ",
+      cancelText: "Giữ lại",
+      variant: "destructive",
+      onConfirm: async () => {
+        try {
+          await api.delete(`/borrow/requests/${requestId}`);
+          toast.success("Đã hủy giữ chỗ mượn sách thành công");
+          fetchMyBorrowRequests();
+        } catch (err: any) {
+          toast.error(err.response?.data?.message || "Không thể hủy giữ chỗ");
+        }
+      }
+    });
+  };
+
   useEffect(() => {
     fetchHistory();
+    fetchMyBorrowRequests();
     fetchMyReservations();
     fetchUserProfile();
   }, [user]);
@@ -253,7 +311,7 @@ export default function BorrowPage() {
             html5QrCodeRef.current.stop().catch(console.error);
           }
           html5QrCodeRef.current.clear();
-        } catch (e) {}
+        } catch (e) { }
       }
     };
   }, []);
@@ -279,29 +337,25 @@ export default function BorrowPage() {
   const loadReaderCheckoutInfo = async (cardNumber: string) => {
     const trimmed = cardNumber.trim();
     if (!trimmed) {
-      toast.error("Vui lòng nhập hoặc quét mã thẻ");
+      toast.error("Vui lòng nhập hoặc quét mã thẻ độc giả");
       return;
     }
+
+    // Kiểm tra ngay nếu người dùng nhập hoặc quét nhầm mã sách
+    const isBookCode = /^(?:QR-BK-|BK-|BOOK-|LIB-BK-)/i.test(trimmed) || trimmed.includes('-BK-');
+    if (isBookCode) {
+      toast.error(`Mã [${trimmed}] là mã định danh cuốn sách, không phải mã thẻ độc giả! Quầy tiếp nhận chỉ tra cứu thẻ độc giả (VD: LIB-RD-000003).`);
+      return;
+    }
+
     try {
       const res = await api.get(`/borrow/reader-checkout-info/${encodeURIComponent(trimmed)}`);
-      if (res.data.type === 'book_copy') {
-        toast.info(res.data.message || `Đã quét mã sách: ${res.data.bookCopy?.title}`);
-        if (scannerMode === 'return' || activeTab === 'return') {
-          setReturnBookQr(res.data.bookCopy.qr_code);
-          handleReturnSubmit(res.data.bookCopy.qr_code);
-        } else {
-          setDirectBookQr(res.data.bookCopy.qr_code);
-          toast.success(`Đã điền mã sách "${res.data.bookCopy.title}" vào ô cho mượn trực tiếp`);
-        }
-        return;
-      }
-
       setScannedReaderInfo(res.data);
       setSearchReaderInput(res.data.reader.card_number || `LIB-RD-${String(res.data.reader.id).padStart(6, '0')}`);
       setActiveTab("checkout");
       toast.success(`Đã nhận diện độc giả: ${res.data.reader.full_name} (${res.data.reader.card_number || 'ID: ' + res.data.reader.id})`);
     } catch (err: any) {
-      toast.error(err.response?.data?.message || "Không tìm thấy thông tin phù hợp với mã này");
+      toast.error(err.response?.data?.message || "Không tìm thấy thông tin độc giả phù hợp với mã này");
       setScannedReaderInfo(null);
     }
   };
@@ -333,7 +387,7 @@ export default function BorrowPage() {
     // 3. If in direct borrow scanner mode (scanning book to borrow for current reader)
     if (scannerMode === "direct_borrow") {
       setDirectBookQr(code);
-      handleDirectBorrow(undefined, code);
+      checkDirectBookCopy(code);
       return;
     }
 
@@ -346,35 +400,27 @@ export default function BorrowPage() {
       return;
     }
 
-    // 5. If in return scanner mode
-    if (scannerMode === "return") {
-      // Check if it might be a reader by querying info
-      try {
-        const checkRes = await api.get(`/borrow/reader-checkout-info/${encodeURIComponent(code)}`);
-        if (checkRes.data.type === 'reader') {
-          setScannedReaderInfo(checkRes.data);
-          setSearchReaderInput(checkRes.data.reader.card_number || code);
-          setReturnBookQr("");
-          toast.success(`Đã nhận diện độc giả: ${checkRes.data.reader.full_name} (${checkRes.data.activeBorrows.length} cuốn đang mượn)`);
-          return;
-        }
-      } catch (e) {}
+    // 5. If in reader_card or return mode: Strictly only accept reader card, reject book codes!
+    if (scannerMode === "reader_card" || scannerMode === "return") {
+      const isBookCode = /^(?:QR-BK-|BK-|BOOK-|LIB-BK-)/i.test(code) || code.includes('-BK-');
+      if (isBookCode) {
+        toast.error(`Mã [${code}] là mã định danh cuốn sách! Quầy tiếp nhận chỉ quét THẺ ĐỘC GIẢ, không quét mã sách.`);
+        return;
+      }
 
-      setReturnBookQr(code);
-      handleReturnSubmit(code);
-      return;
-    }
-
-    // 6. If scanned code is a Reader Card QR (LIB-RD-..., LIB-AD-..., LIB-LB-..., USER-..., UID-...)
-    const isReaderCard = /^(?:LIB-RD-|LIB-AD-|LIB-LB-|LIB-OW-|RD-|USER-|UID-)/i.test(code);
-    if (isReaderCard) {
       setSearchReaderInput(code);
       setReturnBookQr("");
       await loadReaderCheckoutInfo(code);
       return;
     }
 
-    // Default: Scanned Reader Card QR or Ticket QR or Book QR
+    // Default: Check if code looks like a book code and reject
+    const isBookCode = /^(?:QR-BK-|BK-|BOOK-|LIB-BK-)/i.test(code) || code.includes('-BK-');
+    if (isBookCode) {
+      toast.error(`Mã [${code}] là mã định danh cuốn sách! Quầy tiếp nhận chỉ quét THẺ ĐỘC GIẢ, không quét mã sách.`);
+      return;
+    }
+
     setSearchReaderInput(code);
     loadReaderCheckoutInfo(code);
   };
@@ -576,7 +622,7 @@ export default function BorrowPage() {
 
   // Librarian: Submit nhận trả từ modal đối soát
   const handleReturnModalSubmit = async (
-    e?: React.FormEvent, 
+    e?: React.FormEvent,
     confirmPaidFine: boolean = false,
     paymentMethod?: "transfer" | "cash"
   ) => {
@@ -671,9 +717,50 @@ export default function BorrowPage() {
     }
   };
 
+  const handleCollectReaderFinesAtCounter = () => {
+    if (!scannedReaderInfo) return;
+    const unpaidList = scannedReaderInfo.unpaidFines || [];
+    const totalAmount = scannedReaderInfo.totalUnpaidFines || unpaidList.reduce((s: number, f: any) => s + (Number(f.amount) || 0), 0);
+    const firstFine = unpaidList[0];
+
+    setVietQrPaymentInfo({
+      amount: totalAmount,
+      readerName: scannedReaderInfo.reader.full_name,
+      cardNumber: scannedReaderInfo.reader.card_number,
+      bookTitle: unpaidList.length === 1 ? (firstFine?.book_title || "Phí phạt trễ hạn") : `Thanh toán ${unpaidList.length} khoản phí phạt tồn đọng`,
+      bookCopyQr: unpaidList.length === 1 ? (firstFine?.book_copy_qr || "") : "",
+      overdueDays: 0,
+      transferNote: `PHAT ${scannedReaderInfo.reader.card_number || scannedReaderInfo.reader.id}`,
+      isCounterDirectFine: true,
+      unpaidFinesList: unpaidList
+    });
+    setVietQrFineModalOpen(true);
+  };
+
   const handleConfirmVietQrFine = async (method: "transfer" | "cash") => {
     setIsFinePaying(true);
     try {
+      if (vietQrPaymentInfo?.isCounterDirectFine) {
+        const finesToPay = vietQrPaymentInfo.unpaidFinesList || [];
+        for (const fineItem of finesToPay) {
+          await api.put(`/fines/${fineItem.id}/pay`, {
+            payment_method: method,
+            payment_channel: 'counter',
+            transaction_ref: method === 'transfer' ? `TXN-COUNTER-FINE-${fineItem.id}-${Date.now().toString().slice(-6)}` : null
+          });
+        }
+        toast.success(`Đã thu ${method === 'cash' ? 'tiền mặt' : 'chuyển khoản VietQR'} phí phạt (${vietQrPaymentInfo.amount.toLocaleString('vi-VN')}đ) thành công!`);
+        setVietQrFineModalOpen(false);
+        setVietQrPaymentInfo(null);
+        if (scannedReaderInfo?.reader?.card_number) {
+          await loadReaderCheckoutInfo(scannedReaderInfo.reader.card_number);
+        } else if (scannedReaderInfo?.reader?.id) {
+          await loadReaderCheckoutInfo(String(scannedReaderInfo.reader.id));
+        }
+        await fetchHistory();
+        return;
+      }
+
       if (user?.role === "reader") {
         let fineId = vietQrPaymentInfo?.fineId;
         if (!fineId && vietQrPaymentInfo?.borrowRecordId) {
@@ -756,6 +843,47 @@ export default function BorrowPage() {
     });
   };
 
+  // Tra cứu và kiểm tra thông tin bản sao sách mượn trực tiếp tại kệ (kiểm tra giữ chỗ 24h)
+  const checkDirectBookCopy = async (rawCode: string) => {
+    const clean = rawCode.trim();
+    if (!clean) {
+      setDirectBookInfo(null);
+      setDirectBookCheckError(null);
+      return;
+    }
+    if (/^(?:LIB-RD-|LIB-AD-|LIB-LB-|LIB-OW-|RD-|USER-|UID-)/i.test(clean)) {
+      setDirectBookInfo(null);
+      setDirectBookCheckError(`[${clean}] là mã thẻ độc giả. Vui lòng quét mã tem QR dán trên cuốn sách!`);
+      return;
+    }
+
+    setIsCheckingDirectBook(true);
+    setDirectBookCheckError(null);
+    try {
+      const res = await api.get(`/borrow/check-copy/${encodeURIComponent(clean)}`);
+      setDirectBookInfo(res.data);
+      setDirectBookCheckError(null);
+    } catch (err: any) {
+      setDirectBookInfo(null);
+      const msg = err.response?.data?.message || `Mã sách [${clean}] không tồn tại trong hệ thống!`;
+      setDirectBookCheckError(msg);
+    } finally {
+      setIsCheckingDirectBook(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!directBookQr.trim()) {
+      setDirectBookInfo(null);
+      setDirectBookCheckError(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      checkDirectBookCopy(directBookQr);
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [directBookQr]);
+
   // Librarian: Direct Borrow (Mượn trực tiếp tại quầy bằng mã sách)
   const handleDirectBorrow = async (e?: React.FormEvent, customBookQr?: string) => {
     if (e) {
@@ -764,7 +892,8 @@ export default function BorrowPage() {
     }
     const targetBookQr = (customBookQr || directBookQr).trim();
     const readerCard = scannedReaderInfo?.reader.card_number || (scannedReaderInfo?.reader.id ? String(scannedReaderInfo.reader.id) : "");
-    
+    const currentReaderId = scannedReaderInfo?.reader.id;
+
     if (!readerCard) {
       toast.error("Vui lòng quét hoặc nhập mã thẻ độc giả ở mục 1 trước khi cho mượn sách");
       return;
@@ -772,6 +901,24 @@ export default function BorrowPage() {
     if (!targetBookQr) {
       toast.error("Vui lòng nhập hoặc bật camera quét mã QR cuốn sách muốn cho mượn thêm");
       return;
+    }
+
+    // Nếu cuốn sách đã được độc giả khác giữ chỗ 24h và không còn bản sao dư trên kệ:
+    if (directBookInfo && directBookInfo.all_copies_held) {
+      const isThisReaderHolding = directBookInfo.holds?.some((h: any) => h.user_id === currentReaderId);
+      if (!isThisReaderHolding) {
+        confirm({
+          title: "⛔ Không thể cho mượn: Sách đã được giữ chỗ 24h!",
+          description: `Cuốn sách «${directBookInfo.book_title}» hiện có ${directBookInfo.hold_count} độc giả đang giữ chỗ online 24h:\n` +
+            directBookInfo.holds.map((h: any, i: number) => `  ${i + 1}. ${h.reader_name} (${h.card_number || 'ID:' + h.user_id}) - Còn ${Math.max(1, (h.time_left_hours !== null && h.time_left_hours !== undefined) ? h.time_left_hours : 24)} giờ`).join('\n') +
+            `\n\nToàn bộ ${directBookInfo.available_physical_copies} bản sao trên kệ hiện đã có bạn đọc giữ chỗ trước. Bạn không thể cho mượn trực tiếp để tránh làm mất sách của người đã giữ chỗ!\n\n👉 Vui lòng giải thích cho độc giả chọn cuốn sách khác hoặc Đặt trước sách.`,
+          confirmText: "Đã hiểu",
+          cancelText: "Đóng",
+          variant: "destructive",
+          onConfirm: () => { }
+        });
+        return;
+      }
     }
 
     confirm({
@@ -787,10 +934,27 @@ export default function BorrowPage() {
           });
           toast.success(res.data.message || "Cho mượn thêm sách thành công!");
           setDirectBookQr("");
+          setDirectBookInfo(null);
+          setDirectBookCheckError(null);
           loadReaderCheckoutInfo(readerCard);
           fetchHistory();
+          fetchMyBorrowRequests();
         } catch (err: any) {
-          toast.error(err.response?.data?.message || "Lỗi khi cho mượn sách");
+          const errData = err.response?.data;
+          if (errData?.isHeld) {
+            confirm({
+              title: "⛔ Sách đã được độc giả khác giữ chỗ 24h",
+              description: `Cuốn sách «${errData.bookTitle || targetBookQr}» hiện đã có ${errData.holdCount} bạn đọc đăng ký giữ chỗ 24h:\n` +
+                (errData.holds || []).map((h: any, i: number) => `  ${i + 1}. ${h.reader_name} (${h.card_number || 'ID:' + h.user_id}) - Còn ${Math.max(1, (h.time_left_hours !== null && h.time_left_hours !== undefined) ? h.time_left_hours : 24)} giờ`).join('\n') +
+                `\n\nToàn bộ bản sao trên kệ đã có chủ giữ chỗ trước. Vui lòng giải thích cho độc giả chọn cuốn khác!`,
+              confirmText: "Đã hiểu",
+              cancelText: "Đóng",
+              variant: "destructive",
+              onConfirm: () => { }
+            });
+          } else {
+            toast.error(errData?.message || "Lỗi khi cho mượn sách");
+          }
         }
       }
     });
@@ -844,7 +1008,7 @@ export default function BorrowPage() {
         const inputDigits = cleanDigits(rawCode);
 
         // So khớp bắt buộc đúng độc giả đang mượn cuốn sách này
-        const isMatched = 
+        const isMatched =
           (scannedCard && targetCard && scannedCard === targetCard) ||
           (scannedUser.id && tableReturnRecord.user_id && Number(scannedUser.id) === Number(tableReturnRecord.user_id)) ||
           (scannedDigits && targetDigits && scannedDigits === targetDigits) ||
@@ -864,7 +1028,7 @@ export default function BorrowPage() {
         setSearchReaderInput(res.data.reader.card_number || rawCode);
         setTableReturnError(null);
         toast.success(`✅ Đã xác thực đúng độc giả: ${res.data.reader.full_name}! Đang chuyển sang bước đối soát sách...`);
-        
+
         // Đóng Modal 1 & Tự động mở Modal 2 để quét mã sách trả
         setTableReturnPromptOpen(false);
         const currentLoan = { ...tableReturnRecord };
@@ -940,7 +1104,7 @@ export default function BorrowPage() {
         } else {
           toast.success(response.data?.message || "Đã ghi nhận trả sách thành công vào kho!");
         }
-        
+
         setReturnBookQr("");
         fetchHistory();
         if (scannedReaderInfo?.reader.card_number) {
@@ -970,11 +1134,10 @@ export default function BorrowPage() {
       const oldDebt = scannedReaderInfo?.totalUnpaidFines || 0;
       confirm({
         title: "⚠️ Thu phí phạt trễ hạn cho cuốn sách này",
-        description: `• Phí phạt trễ hạn của cuốn "${bookTitle || qrToReturn}": ${fineAmount.toLocaleString('vi-VN')}đ (${overdueDays} ngày trễ × 5.000đ/ngày).${
-          oldDebt > 0 
+        description: `• Phí phạt trễ hạn của cuốn "${bookTitle || qrToReturn}": ${fineAmount.toLocaleString('vi-VN')}đ (${overdueDays} ngày trễ × 5.000đ/ngày).${oldDebt > 0
             ? `\n• Độc giả còn có nợ phạt cũ từ các lần trước: ${oldDebt.toLocaleString('vi-VN')}đ.\n👉 Tổng nghĩa vụ cần thu nếu thanh toán tất cả: ${(oldDebt + fineAmount).toLocaleString('vi-VN')}đ.`
             : ''
-        }\n\nBạn xác nhận thu ${fineAmount.toLocaleString('vi-VN')}đ (tiền phạt của cuốn này) để hoàn tất nhận trả sách vào kho?`,
+          }\n\nBạn xác nhận thu ${fineAmount.toLocaleString('vi-VN')}đ (tiền phạt của cuốn này) để hoàn tất nhận trả sách vào kho?`,
         confirmText: `Đã thu ${fineAmount.toLocaleString('vi-VN')}đ & Nhận trả`,
         cancelText: "Hủy",
         variant: "warning",
@@ -1024,7 +1187,7 @@ export default function BorrowPage() {
               await html5QrCodeRef.current.stop();
             }
             html5QrCodeRef.current.clear();
-          } catch (e) {}
+          } catch (e) { }
         }
 
         const scanner = new Html5Qrcode("qr-reader-viewport");
@@ -1036,7 +1199,7 @@ export default function BorrowPage() {
           (decodedText) => {
             processScannedText(decodedText);
           },
-          () => {}
+          () => { }
         );
       } catch (err) {
         console.error("Camera start error:", err);
@@ -1089,7 +1252,7 @@ export default function BorrowPage() {
       } finally {
         try {
           html5QrCode.clear();
-        } catch (e) {}
+        } catch (e) { }
       }
     }
     if (fileInputRef.current) {
@@ -1138,7 +1301,7 @@ export default function BorrowPage() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => { fetchMyReservations(); fetchHistory(); }} className="gap-1.5 text-xs">
+            <Button variant="outline" size="sm" onClick={() => { fetchMyBorrowRequests(); fetchMyReservations(); fetchHistory(); }} className="gap-1.5 text-xs">
               <RefreshCw className="h-3.5 w-3.5" /> Đồng bộ
             </Button>
           </div>
@@ -1171,8 +1334,8 @@ export default function BorrowPage() {
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                <Button 
-                  size="sm" 
+                <Button
+                  size="sm"
                   className="bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-xs gap-1.5 h-8 shadow-xs"
                   onClick={() => {
                     const unpaidLoan = activeLoans.find(l => getDueStatus(l.due_date).isOverdue && !l.fine_already_paid);
@@ -1212,9 +1375,9 @@ export default function BorrowPage() {
                 </code>
               </div>
 
-              <Button 
-                size="sm" 
-                variant="outline" 
+              <Button
+                size="sm"
+                variant="outline"
                 className="w-full text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10"
                 onClick={() => handleDownloadQr("reader-card-canvas", `The-Doc-Gia-${readerCardNumber}`)}
               >
@@ -1275,61 +1438,63 @@ export default function BorrowPage() {
 
           {/* Cột giữa & phải: Danh sách Sách Đã Đăng Ký Chờ Duyệt & Sách Đang Mượn */}
           <div className="lg:col-span-2 space-y-6">
-            {/* KHU VỰC 1: SÁCH BẠN ĐÃ ĐĂNG KÝ (CHỜ THỦ THƯ DUYỆT TẠI QUẦY) */}
-            <Card className="border-amber-500/30 bg-amber-500/5">
+            {/* KHU VỰC 1: SÁCH BẠN ĐÃ ĐĂNG KÝ MƯỢN ONLINE (GIỮ CHỖ 24H CHỜ ĐẾN LẤY) */}
+            <Card className="border-primary/30 bg-primary/5">
               <CardHeader className="pb-3">
                 <div className="flex items-center justify-between">
                   <div>
-                    <CardTitle className="font-display text-base flex items-center gap-2 text-amber-700 dark:text-amber-400">
-                      <BookOpen className="h-5 w-5" /> Sách Bạn Đã Đăng Ký Mượn ({pendingRequests.length})
+                    <CardTitle className="font-display text-base flex items-center gap-2 text-primary">
+                      <BookOpen className="h-5 w-5" /> Sách Bạn Đã Đăng Ký Giữ Chỗ Online ({myBorrowRequests.length})
                     </CardTitle>
                     <CardDescription className="text-xs">
-                      Khi tới thư viện, giơ Thẻ QR của bạn để Thủ thư duyệt và trao các cuốn sách này
+                      Hệ thống đang tạm giữ riêng các cuốn này trong <strong>24 giờ</strong> để người khác không mượn mất. Bạn hãy tới thư viện, vào kệ lấy sách mang đến quầy và đưa Thẻ QR cá nhân để Thủ thư duyệt mượn.
                     </CardDescription>
                   </div>
-                  <Badge className="bg-amber-600 text-white text-[10px]">Chờ duyệt tại quầy</Badge>
+                  <Badge className="bg-primary text-primary-foreground text-[10px]">Đang giữ chỗ 24h</Badge>
                 </div>
               </CardHeader>
               <CardContent>
-                {pendingRequests.length === 0 ? (
+                {myBorrowRequests.length === 0 ? (
                   <div className="text-center py-6 border border-dashed rounded-xl bg-background/50">
                     <BookOpen className="h-8 w-8 text-muted-foreground/40 mx-auto mb-1.5" />
-                    <p className="text-xs font-medium">Bạn chưa đăng ký mượn cuốn sách nào</p>
+                    <p className="text-xs font-medium">Bạn chưa đăng ký giữ chỗ cuốn sách nào</p>
                     <p className="text-[11px] text-muted-foreground mt-0.5">
-                      Hãy vào trang <strong>Quản lý sách</strong> và bấm <em>"Đăng ký mượn cuốn này"</em> để lưu vào danh sách.
+                      Khi đang ở nhà thấy sách hay sợ người khác mượn mất, hãy vào trang <strong>Danh mục Sách & Tra cứu</strong> và bấm <em>"Đăng ký mượn online"</em> nhé!
                     </p>
                   </div>
                 ) : (
                   <div className="grid gap-3 sm:grid-cols-2">
-                    {pendingRequests.map((resv) => (
-                      <div key={resv.id} className="p-3 rounded-xl border bg-card shadow-xs flex flex-col justify-between space-y-2.5">
+                    {myBorrowRequests.map((req) => (
+                      <div key={req.id} className="p-3 rounded-xl border bg-card shadow-xs flex flex-col justify-between space-y-2.5">
                         <div className="flex items-start gap-3">
                           <div className="h-12 w-10 rounded bg-muted overflow-hidden shrink-0 border grid place-items-center">
-                            {resv.cover_image ? (
-                              <img src={resv.cover_image} alt={resv.book_title} className="h-full w-full object-cover" />
+                            {req.cover_image ? (
+                              <img src={req.cover_image} alt={req.book_title} className="h-full w-full object-cover" />
                             ) : (
                               <BookOpen className="h-4 w-4 text-muted-foreground" />
                             )}
                           </div>
                           <div className="min-w-0 flex-1">
-                            <h4 className="font-semibold text-xs truncate">{resv.book_title}</h4>
+                            <h4 className="font-semibold text-xs truncate">{req.book_title}</h4>
                             <p className="text-[10px] text-muted-foreground mt-0.5">
-                              Đăng ký: {new Date(resv.reservation_date).toLocaleDateString("vi-VN")}
+                              Đăng ký: {new Date(req.request_date).toLocaleDateString("vi-VN")}
                             </p>
-                            <Badge variant="outline" className="text-[9px] mt-1 text-amber-700 border-amber-300 bg-amber-50">
-                              ⏳ Chờ thủ thư quét thẻ duyệt
-                            </Badge>
+                            <div className="flex flex-wrap gap-1 mt-1">
+                              <Badge variant="outline" className="text-[9px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 font-semibold">
+                                ⏱️ Hạn giữ chỗ: Còn {req.time_left_hours !== null && req.time_left_hours !== undefined ? `${Math.max(1, req.time_left_hours)} giờ` : "24 giờ"}
+                              </Badge>
+                            </div>
                           </div>
                         </div>
 
                         <div className="pt-2 border-t flex justify-end">
-                          <Button 
-                            size="sm" 
-                            variant="ghost" 
+                          <Button
+                            size="sm"
+                            variant="ghost"
                             className="h-7 text-xs text-destructive hover:bg-destructive/10 gap-1 px-2"
-                            onClick={() => handleCancelReservation(resv.id, resv.book_title)}
+                            onClick={() => handleCancelBorrowRequest(req.id, req.book_title)}
                           >
-                            <XCircle className="h-3 w-3" /> Hủy yêu cầu
+                            <XCircle className="h-3 w-3" /> Hủy giữ chỗ
                           </Button>
                         </div>
                       </div>
@@ -1408,8 +1573,8 @@ export default function BorrowPage() {
                                 </Badge>
                               )}
                               {isOverdue && !loan.fine_already_paid && (
-                                <Button 
-                                  size="sm" 
+                                <Button
+                                  size="sm"
                                   className="bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-xs h-7 gap-1.5 shadow-xs"
                                   onClick={() => handleReaderPayFine(loan)}
                                 >
@@ -1490,6 +1655,18 @@ export default function BorrowPage() {
     );
   });
 
+  const filteredBorrowRequests = myBorrowRequests.filter((req: any) => {
+    if (!holdSearchTerm.trim()) return true;
+    const term = holdSearchTerm.toLowerCase();
+    return (
+      req.book_title?.toLowerCase().includes(term) ||
+      req.reader_name?.toLowerCase().includes(term) ||
+      req.card_number?.toLowerCase().includes(term) ||
+      req.reader_phone?.toLowerCase().includes(term) ||
+      String(req.id).includes(term)
+    );
+  });
+
   return (
     <div className="space-y-6">
       {/* 1. Tiêu đề trang & Thanh công cụ chuẩn Athenaeum */}
@@ -1513,7 +1690,10 @@ export default function BorrowPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={fetchHistory}
+            onClick={() => {
+              fetchHistory();
+              fetchMyBorrowRequests();
+            }}
             className="h-9 text-xs gap-1.5 shadow-2xs hover:bg-primary/5"
           >
             <RefreshCw className="h-3.5 w-3.5" /> Đồng bộ
@@ -1521,32 +1701,39 @@ export default function BorrowPage() {
 
           <Button
             size="sm"
-            onClick={() => openScannerModal("return")}
-            className="h-9 text-xs gap-1.5 font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs"
+            onClick={() => openScannerModal("reader_card")}
+            className="h-9 text-xs gap-1.5 font-semibold bg-primary hover:bg-primary/90 text-primary-foreground shadow-xs"
           >
-            <Scan className="h-3.5 w-3.5" /> Quét Trả Sách Vào Kho
+            <Camera className="h-3.5 w-3.5" /> Quét Thẻ Độc Giả
           </Button>
         </div>
       </div>
 
-      {/* 2. Thẻ chỉ số thống kê chuẩn hệ thống Athenaeum (4-Card Grid) */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      {/* 2. Thẻ chỉ số thống kê chuẩn hệ thống Athenaeum (5-Card Grid) */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
           { label: "Tổng lượt mượn", value: history.length.toString(), icon: ArrowRightLeft, sub: "Tất cả giao dịch ghi nhận" },
           { label: "Đang lưu thông", value: activeLoansCount.toString(), icon: BookMarked, sub: "Sách độc giả đang giữ" },
+          {
+            label: "Giữ chỗ online 24h",
+            value: myBorrowRequests.length.toString(),
+            icon: BookmarkPlus,
+            sub: "Chờ bạn đọc tới lấy",
+            highlight: myBorrowRequests.length > 0
+          },
           { label: "Quá hạn cần thu hồi", value: overdueLoansCount.toString(), icon: AlertTriangle, sub: "Cần nhắc nhở & tính phạt", danger: overdueLoansCount > 0 },
           { label: "Đã hoàn trả vào kho", value: returnedLoansCount.toString(), icon: CheckCircle2, sub: "Đã kiểm đếm an toàn" },
         ].map((s, idx) => (
-          <Card key={idx} className="relative overflow-hidden border shadow-xs">
-            <CardContent className="p-5">
+          <Card key={idx} className={`relative overflow-hidden border shadow-xs transition-all ${s.highlight ? 'border-amber-500/40 bg-amber-500/5 dark:bg-amber-500/10' : ''}`}>
+            <CardContent className="p-4">
               <div className="flex items-center justify-between">
-                <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">{s.label}</span>
-                <div className={`h-8 w-8 rounded-lg flex items-center justify-center ${s.danger ? 'bg-destructive/10 text-destructive' : 'bg-primary/10 text-primary'}`}>
+                <span className="text-[11px] uppercase tracking-wider text-muted-foreground font-medium">{s.label}</span>
+                <div className={`h-8 w-8 rounded-lg flex items-center justify-center ${s.danger ? 'bg-destructive/10 text-destructive' : s.highlight ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400' : 'bg-primary/10 text-primary'}`}>
                   <s.icon className="h-4 w-4" />
                 </div>
               </div>
-              <p className={`mt-2 font-display text-3xl font-semibold tracking-tight ${s.danger ? 'text-destructive' : 'text-foreground'}`}>{s.value}</p>
-              <p className="mt-1 text-xs text-muted-foreground">{s.sub}</p>
+              <p className={`mt-2 font-display text-2xl font-semibold tracking-tight ${s.danger ? 'text-destructive' : s.highlight ? 'text-amber-600 dark:text-amber-400 font-bold' : 'text-foreground'}`}>{s.value}</p>
+              <p className="mt-1 text-[11px] text-muted-foreground">{s.sub}</p>
             </CardContent>
           </Card>
         ))}
@@ -1558,10 +1745,10 @@ export default function BorrowPage() {
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div>
               <CardTitle className="font-display text-base font-bold flex items-center gap-2">
-                <QrCode className="h-4.5 w-4.5 text-primary" /> Quầy Tiếp Nhận Bạn Đọc
+                <QrCode className="h-4.5 w-4.5 text-primary" /> Quầy Tiếp Nhận Đọc Giả
               </CardTitle>
               <CardDescription className="text-xs mt-0.5">
-                Nhập hoặc quét mã thẻ bạn đọc để mở phiên làm việc, duyệt mượn và đối soát nhận trả
+                Nhập hoặc quét mã thẻ đọc giả để mở phiên làm việc, duyệt mượn và đối soát nhận trả
               </CardDescription>
             </div>
             {scannedReaderInfo && (
@@ -1679,7 +1866,8 @@ export default function BorrowPage() {
                       setSelectedCopyQr({
                         title: `Thẻ Thư Viện: ${scannedReaderInfo.reader.full_name}`,
                         qrCode: scannedReaderInfo.reader.card_number || `LIB-RD-${scannedReaderInfo.reader.id}`,
-                        readerName: scannedReaderInfo.reader.full_name
+                        readerName: scannedReaderInfo.reader.full_name,
+                        type: 'reader'
                       });
                       setViewCopyQrDialog(true);
                     }}
@@ -1711,8 +1899,8 @@ export default function BorrowPage() {
                     </strong>
                     <span className="text-[10px] text-muted-foreground">Tối đa {scannedReaderInfo.maxBooks || 5}</span>
                   </div>
-                  <Progress 
-                    value={((scannedReaderInfo.activeBorrowCount ?? scannedReaderInfo.activeBorrows.length) / (scannedReaderInfo.maxBooks || 5)) * 100} 
+                  <Progress
+                    value={((scannedReaderInfo.activeBorrowCount ?? scannedReaderInfo.activeBorrows.length) / (scannedReaderInfo.maxBooks || 5)) * 100}
                     className="h-1.5 bg-muted"
                   />
                 </div>
@@ -1768,9 +1956,14 @@ export default function BorrowPage() {
                       Độc giả còn nợ phạt chưa thanh toán: {scannedReaderInfo.totalUnpaidFines.toLocaleString('vi-VN')}đ
                     </span>
                   </div>
-                  <Badge variant="outline" className="text-[10px] text-amber-700 border-amber-300 bg-amber-50 shrink-0">
-                    Thu phạt tại quầy
-                  </Badge>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-xs font-semibold text-amber-700 border-amber-300 bg-amber-50 hover:bg-amber-100 hover:text-amber-800 gap-1 shrink-0 cursor-pointer shadow-2xs"
+                    onClick={handleCollectReaderFinesAtCounter}
+                  >
+                    <Banknote className="h-3.5 w-3.5" /> Thu phạt tại quầy
+                  </Button>
                 </div>
               ) : null}
             </CardContent>
@@ -1780,31 +1973,31 @@ export default function BorrowPage() {
           <div className="grid gap-6 lg:grid-cols-2">
             {/* CỘT 1: DUYỆT MƯỢN & TRAO SÁCH (CHECKOUT) */}
             <div className="space-y-4">
-              {/* Phân vùng 1.1: Sách đặt trước đã sẵn sàng nhận */}
-              <Card className="border-amber-500/30 shadow-xs">
-                <CardHeader className="pb-3 border-b bg-amber-500/5">
+              {/* Phân vùng 1.1: Sách độc giả đã đăng ký mượn online (tự lấy từ kệ mang tới bàn) */}
+              <Card className="border-primary/30 shadow-xs">
+                <CardHeader className="pb-3 border-b bg-primary/5">
                   <div className="flex items-center justify-between">
-                    <CardTitle className="font-display text-sm font-bold flex items-center gap-2 text-amber-700 dark:text-amber-400">
-                      <Inbox className="h-4 w-4 text-amber-600" /> Sách Đặt Trước Chờ Nhận
+                    <CardTitle className="font-display text-sm font-bold flex items-center gap-2 text-primary">
+                      <BookOpen className="h-4 w-4 text-primary" /> Sách Độc Giả Đã Đăng Ký Mượn Online
                     </CardTitle>
-                    <Badge variant="secondary" className="text-xs bg-amber-500/15 text-amber-800 dark:text-amber-300 font-semibold">
-                      {scannedReaderInfo.pendingRequests.length} yêu cầu
+                    <Badge variant="secondary" className="text-xs bg-primary/15 text-primary font-semibold">
+                      {(scannedReaderInfo.borrowRequests || []).length} yêu cầu
                     </Badge>
                   </div>
                   <CardDescription className="text-[11px]">
-                    Sách độc giả đã đăng ký online trước khi đến quầy
+                    Độc giả tự vào kệ lấy sách mang lại bàn, Thủ thư quét mã QR trên cuốn sách để đối soát và trao sách
                   </CardDescription>
                 </CardHeader>
 
                 <CardContent className="p-4">
-                  {scannedReaderInfo.pendingRequests.length === 0 ? (
-                    <div className="text-center py-6 border border-dashed rounded-xl bg-muted/10 text-xs text-muted-foreground">
-                      Độc giả không có cuốn sách đặt trước nào đang chờ nhận tại quầy.
+                  {(!scannedReaderInfo.borrowRequests || scannedReaderInfo.borrowRequests.length === 0) ? (
+                    <div className="text-center py-5 border border-dashed rounded-xl bg-muted/10 text-xs text-muted-foreground">
+                      Độc giả không có yêu cầu mượn online nào đang chờ.
                     </div>
                   ) : (
                     <div className="space-y-2.5">
-                      {scannedReaderInfo.pendingRequests.map((req) => (
-                        <div key={req.reservation_id} className="flex items-center justify-between p-3 rounded-xl border bg-card text-xs shadow-2xs gap-3">
+                      {scannedReaderInfo.borrowRequests.map((req: any) => (
+                        <div key={req.request_id || req.id} className="flex items-center justify-between p-3 rounded-xl border bg-card text-xs shadow-2xs gap-3">
                           <div className="flex items-center gap-3 min-w-0">
                             <div className="h-12 w-10 rounded bg-muted overflow-hidden shrink-0 border grid place-items-center">
                               {req.cover_image ? (
@@ -1816,19 +2009,22 @@ export default function BorrowPage() {
                             <div className="min-w-0">
                               <p className="font-semibold text-xs text-foreground truncate">{req.book_title}</p>
                               <p className="text-muted-foreground text-[11px] mt-0.5">
-                                Đặt: {new Date(req.reservation_date).toLocaleDateString("vi-VN")} • Tồn kho: <strong className="text-emerald-600">{req.available_copies} cuốn</strong>
+                                Đăng ký: {new Date(req.request_date).toLocaleDateString("vi-VN")} • Tồn kho: <strong className="text-emerald-600">{req.available_copies} cuốn</strong>
                               </p>
                             </div>
                           </div>
 
-                          <Button 
-                            size="sm" 
-                            className="gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-xs shrink-0 shadow-xs disabled:opacity-50"
-                            onClick={() => handleOpenApproveModal(req)}
+                          <Button
+                            size="sm"
+                            className="gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-xs shrink-0 shadow-xs disabled:opacity-50"
+                            onClick={() => handleOpenApproveModal({
+                              ...req,
+                              reservation_id: req.request_id || req.id
+                            })}
                             disabled={req.available_copies <= 0 || scannedReaderInfo.canBorrow === false}
                             title={scannedReaderInfo.canBorrow === false ? (scannedReaderInfo.borrowBlockReason || "Độc giả không đủ điều kiện mượn") : undefined}
                           >
-                            <CheckSquare className="h-3.5 w-3.5" /> Quét Sách & Trao
+                            <CheckSquare className="h-3.5 w-3.5" /> Quét Sách & Cho Mượn
                           </Button>
                         </div>
                       ))}
@@ -1836,6 +2032,56 @@ export default function BorrowPage() {
                   )}
                 </CardContent>
               </Card>
+
+              {/* Phân vùng 1.2: Sách đặt trước đã có sẵn tại quầy & độc giả đã xác nhận nhận */}
+              {scannedReaderInfo.readyReservations && scannedReaderInfo.readyReservations.length > 0 && (
+                <Card className="border-amber-500/30 shadow-xs">
+                  <CardHeader className="pb-3 border-b bg-amber-500/5">
+                    <div className="flex items-center justify-between">
+                      <CardTitle className="font-display text-sm font-bold flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                        <Inbox className="h-4 w-4 text-amber-600" /> Sách Đặt Trước Giữ Riêng Tại Quầy
+                      </CardTitle>
+                      <Badge variant="secondary" className="text-xs bg-amber-500/15 text-amber-800 dark:text-amber-300 font-semibold">
+                        {scannedReaderInfo.readyReservations.length} cuốn
+                      </Badge>
+                    </div>
+                    <CardDescription className="text-[11px]">
+                      Sách hết đã về kho, độc giả đã xác nhận đồng ý mượn và đang được giữ tại quầy
+                    </CardDescription>
+                  </CardHeader>
+
+                  <CardContent className="p-4 space-y-2.5">
+                    {scannedReaderInfo.readyReservations.map((resv: any) => (
+                      <div key={resv.reservation_id} className="flex items-center justify-between p-3 rounded-xl border bg-card text-xs shadow-2xs gap-3">
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="h-12 w-10 rounded bg-muted overflow-hidden shrink-0 border grid place-items-center">
+                            {resv.cover_image ? (
+                              <img src={resv.cover_image} alt={resv.book_title} className="h-full w-full object-cover" />
+                            ) : (
+                              <BookOpen className="h-4 w-4 text-muted-foreground" />
+                            )}
+                          </div>
+                          <div className="min-w-0">
+                            <p className="font-semibold text-xs text-foreground truncate">{resv.book_title}</p>
+                            <p className="text-muted-foreground text-[11px] mt-0.5">
+                              Phiếu: #RES-{resv.reservation_id} • Đã giữ chỗ tại quầy
+                            </p>
+                          </div>
+                        </div>
+
+                        <Button
+                          size="sm"
+                          className="gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold text-xs shrink-0 shadow-xs disabled:opacity-50"
+                          onClick={() => handleOpenApproveModal(resv)}
+                          disabled={scannedReaderInfo.canBorrow === false}
+                        >
+                          <CheckSquare className="h-3.5 w-3.5" /> Quét Sách & Bàn Giao
+                        </Button>
+                      </div>
+                    ))}
+                  </CardContent>
+                </Card>
+              )}
 
               {/* Phân vùng 1.2: Cho mượn trực tiếp sách độc giả tự lấy từ kệ */}
               <Card className="border-primary/20 shadow-xs">
@@ -1855,15 +2101,16 @@ export default function BorrowPage() {
 
                 <CardContent className="p-4 space-y-3">
                   <form onSubmit={(e) => handleDirectBorrow(e)} className="flex gap-2">
-                    <Input 
-                      placeholder="Quét mã QR trên gáy sách (VD: QR-BK-1-1)..." 
-                      value={directBookQr} 
-                      onChange={(e) => setDirectBookQr(e.target.value)} 
-                      className="text-xs h-9 bg-background font-mono focus-visible:ring-primary"
+                    <Input
+                      placeholder="Quét mã QR trên gáy sách (VD: QR-BK-1-1)..."
+                      value={directBookQr}
+                      onChange={(e) => setDirectBookQr(e.target.value)}
+                      className={`text-xs h-9 bg-background font-mono focus-visible:ring-primary ${directBookInfo?.all_copies_held ? 'border-destructive focus-visible:ring-destructive' : ''
+                        }`}
                       disabled={scannedReaderInfo.canBorrow === false}
                     />
-                    <Button 
-                      type="button" 
+                    <Button
+                      type="button"
                       variant="outline"
                       size="sm"
                       className="h-9 px-3 text-xs gap-1 border-primary/30 text-primary hover:bg-primary/10 shrink-0"
@@ -1872,15 +2119,121 @@ export default function BorrowPage() {
                     >
                       <Camera className="h-3.5 w-3.5" /> Quét
                     </Button>
-                    <Button 
-                      type="submit" 
-                      size="sm" 
-                      className="h-9 text-xs shrink-0 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
-                      disabled={scannedReaderInfo.canBorrow === false}
+                    <Button
+                      type="submit"
+                      size="sm"
+                      className={`h-9 text-xs shrink-0 font-semibold shadow-xs ${directBookInfo?.all_copies_held
+                          ? "bg-destructive/85 hover:bg-destructive text-white"
+                          : "bg-primary hover:bg-primary/90 text-primary-foreground"
+                        }`}
+                      disabled={scannedReaderInfo.canBorrow === false || directBookInfo?.all_copies_held}
+                      title={directBookInfo?.all_copies_held ? "Sách đã có người giữ chỗ 24h, không thể cho mượn trực tiếp" : undefined}
                     >
-                      Cho mượn
+                      {directBookInfo?.all_copies_held ? "Đã giữ chỗ 24h" : "Cho mượn"}
                     </Button>
                   </form>
+
+                  {/* Khu vực đối soát thông tin sách & Cảnh báo giữ chỗ 24h theo thời gian thực */}
+                  {isCheckingDirectBook ? (
+                    <div className="p-3 rounded-xl border bg-muted/30 text-xs text-muted-foreground flex items-center gap-2 animate-pulse">
+                      <RefreshCw className="h-3.5 w-3.5 animate-spin text-primary" />
+                      <span>Đang tra cứu thông tin sách và tình trạng giữ chỗ 24h...</span>
+                    </div>
+                  ) : directBookCheckError ? (
+                    <div className="p-3 rounded-xl border border-destructive/30 bg-destructive/5 text-destructive text-xs flex items-center gap-2">
+                      <XCircle className="h-4 w-4 shrink-0" />
+                      <span>{directBookCheckError}</span>
+                    </div>
+                  ) : directBookInfo ? (
+                    <div className="p-3.5 rounded-xl border bg-muted/20 space-y-3 animate-in fade-in duration-200">
+                      {/* Thẻ tóm tắt ấn phẩm */}
+                      <div className="flex items-center gap-3">
+                        <div className="h-14 w-11 rounded bg-muted overflow-hidden shrink-0 border grid place-items-center shadow-2xs">
+                          {directBookInfo.cover_image ? (
+                            <img src={directBookInfo.cover_image} alt={directBookInfo.book_title} className="h-full w-full object-cover" />
+                          ) : (
+                            <BookOpen className="h-4 w-4 text-muted-foreground" />
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <p className="font-bold text-xs text-foreground truncate">{directBookInfo.book_title}</p>
+                          <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground mt-0.5">
+                            <code className="font-mono bg-primary/10 text-primary px-1.5 py-0.2 rounded font-bold">
+                              {directBookInfo.qr_code}
+                            </code>
+                            {directBookInfo.author_name && <span>• ✍️ {directBookInfo.author_name}</span>}
+                            <span>• Trên kệ: <strong>{directBookInfo.available_physical_copies || 1} cuốn</strong></span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* TÌNH TRẠNG GIỮ CHỖ ONLINE 24H */}
+                      {directBookInfo.hold_count > 0 ? (
+                        directBookInfo.all_copies_held ? (
+                          // TẤT CẢ BẢN SAO TRÊN KỆ ĐÃ BỊ GIỮ CHỖ
+                          <div className="p-3.5 rounded-xl border border-destructive/50 bg-destructive/10 text-destructive text-xs space-y-2.5">
+                            <div className="flex items-center gap-1.5 font-bold text-destructive">
+                              <AlertTriangle className="h-4 w-4 shrink-0 animate-pulse" />
+                              <span>CẢNH BÁO: CUỐN SÁCH NÀY ĐÃ CÓ NGƯỜI GIỮ CHỖ ONLINE 24H!</span>
+                            </div>
+                            <p className="text-[11px] leading-relaxed font-medium">
+                              Toàn bộ <strong>{directBookInfo.available_physical_copies} cuốn</strong> hiện có trên kệ đều đã được độc giả khác giữ chỗ trước qua website trong 24 giờ.
+                              <span className="font-bold underline block mt-0.5">Không thể cho mượn trực tiếp vì sẽ làm mất sách của người đã giữ chỗ trước!</span>
+                            </p>
+
+                            {/* Danh sách người giữ chỗ */}
+                            <div className="bg-background/90 rounded-lg p-2.5 border border-destructive/30 space-y-1.5 text-[11px]">
+                              <p className="font-bold text-foreground flex items-center gap-1.5">
+                                <Clock className="h-3.5 w-3.5 text-amber-600" />
+                                Danh sách {directBookInfo.hold_count} bạn đọc đang giữ chỗ cuốn này:
+                              </p>
+                              <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                                {directBookInfo.holds.map((h: any, idx: number) => (
+                                  <div key={h.request_id || idx} className="flex items-center justify-between p-1.5 rounded bg-muted/40 text-[10px]">
+                                    <div>
+                                      <span className="font-bold text-foreground">#{idx + 1}. {h.reader_name}</span>
+                                      <span className="font-mono text-muted-foreground ml-1.5">({h.card_number})</span>
+                                      {h.reader_phone && <span className="text-muted-foreground ml-1 font-mono">📞 {h.reader_phone}</span>}
+                                    </div>
+                                    <Badge variant="outline" className="text-[9px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 font-semibold shrink-0">
+                                      ⏱️ Còn {Math.max(1, (h.time_left_hours !== null && h.time_left_hours !== undefined) ? h.time_left_hours : 24)} giờ
+                                    </Badge>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+
+                            {/* Lời thoại gợi ý cho thủ thư */}
+                            <div className="p-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-900 dark:text-amber-200 text-[11px] space-y-1">
+                              <p className="font-bold flex items-center gap-1 text-amber-800 dark:text-amber-400">
+                                💬 Lời thoại giải thích cho độc giả tại quầy:
+                              </p>
+                              <p className="italic text-[10.5px] leading-relaxed">
+                                "Chào bạn, cuốn «{directBookInfo.book_title}» hiện đã có {directBookInfo.hold_count} bạn đọc đăng ký giữ chỗ online trước và đang trong thời hạn 24 giờ đến nhận sách. Bản sao trên kệ này là để dành riêng cho bạn đọc đã hẹn trước. Bạn vui lòng chọn cuốn sách khác trên kệ, hoặc vào trang tra cứu bấm <strong>Đặt trước (Xếp hàng)</strong> để thư viện giữ riêng cho bạn ngay khi có sách hoàn trả nhé!"
+                              </p>
+                            </div>
+                          </div>
+                        ) : (
+                          // VẪN CÒN BẢN SAO DƯ NGOÀI SỐ NGƯỜI GIỮ CHỖ
+                          <div className="p-3 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-900 dark:text-amber-200 text-xs space-y-1">
+                            <div className="flex items-center gap-1.5 font-bold text-amber-800 dark:text-amber-400">
+                              <Clock className="h-3.5 w-3.5" />
+                              <span>Lưu ý: Có {directBookInfo.hold_count} độc giả đang giữ chỗ 24h</span>
+                            </div>
+                            <p className="text-[11px] leading-relaxed">
+                              Trên kệ có <strong>{directBookInfo.available_physical_copies} cuốn</strong> (Đã giữ chỗ: {directBookInfo.hold_count} cuốn, Còn dư tự do: <strong className="text-emerald-700 dark:text-emerald-400">{directBookInfo.free_copies} cuốn</strong>).
+                              Bạn vẫn có thể cho độc giả này mượn 1 cuốn còn dư mà không ảnh hưởng đến người đã giữ chỗ.
+                            </p>
+                          </div>
+                        )
+                      ) : (
+                        <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300 text-xs flex items-center gap-1.5">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                          <span>Sách sẵn sàng cho mượn trực tiếp (Không có ai đang giữ chỗ 24h).</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : null}
                 </CardContent>
               </Card>
             </div>
@@ -1952,9 +2305,9 @@ export default function BorrowPage() {
                                 {hasRenewed ? (
                                   <span className="text-[10px] text-muted-foreground italic">Đã gia hạn (1/1)</span>
                                 ) : !isOverdue ? (
-                                  <Button 
-                                    size="sm" 
-                                    variant="ghost" 
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
                                     className="h-6 text-[10px] text-muted-foreground hover:text-foreground gap-1 px-1.5"
                                     onClick={() => handleRenew(loan.id, loan.book_title)}
                                   >
@@ -1963,15 +2316,14 @@ export default function BorrowPage() {
                                 ) : null}
                               </div>
 
-                               <Button 
-                                size="sm" 
-                                className={`h-7 text-xs gap-1.5 px-3 font-semibold shadow-xs shrink-0 ${
-                                  loan.fine_already_paid
+                              <Button
+                                size="sm"
+                                className={`h-7 text-xs gap-1.5 px-3 font-semibold shadow-xs shrink-0 ${loan.fine_already_paid
                                     ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                                    : isOverdue 
-                                      ? "bg-amber-600 hover:bg-amber-700 text-white" 
+                                    : isOverdue
+                                      ? "bg-amber-600 hover:bg-amber-700 text-white"
                                       : "bg-emerald-600 hover:bg-emerald-700 text-white"
-                                }`}
+                                  }`}
                                 onClick={() => handleOpenReturnModal(loan)}
                               >
                                 {loan.fine_already_paid ? (
@@ -2000,6 +2352,160 @@ export default function BorrowPage() {
           </div>
         </div>
       )}
+
+      {/* 4. Danh Sách Sách Đang Giữ Chỗ Online 24h (Toàn Thư Viện) */}
+      <Card className="shadow-xs border border-amber-500/30 overflow-hidden">
+        <CardHeader className="pb-3 border-b bg-amber-500/5">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+            <div>
+              <div className="flex items-center gap-2">
+                <CardTitle className="font-display text-base font-bold flex items-center gap-2 text-amber-800 dark:text-amber-400">
+                  <BookmarkPlus className="h-4.5 w-4.5 text-amber-600" /> Sách Đang Giữ Chỗ Online 24h (Toàn Thư Viện)
+                </CardTitle>
+                <Badge variant="outline" className="bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 font-semibold text-xs">
+                  {myBorrowRequests.length} cuốn đang giữ chỗ
+                </Badge>
+              </div>
+              <CardDescription className="text-xs mt-0.5">
+                Các đầu sách độc giả đã đăng ký giữ chỗ trước từ xa qua website. Thư viện tạm giữ 1 bản sao trong 24 giờ để độc giả đến quầy lấy sách.
+              </CardDescription>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="relative w-full sm:w-64">
+                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                <Input
+                  placeholder="Tìm theo sách, độc giả, mã thẻ..."
+                  value={holdSearchTerm}
+                  onChange={(e) => setHoldSearchTerm(e.target.value)}
+                  className="pl-8 text-xs h-8 bg-background"
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={fetchMyBorrowRequests}
+                className="h-8 text-xs gap-1 border-amber-500/30 text-amber-700 hover:bg-amber-500/10 shrink-0"
+                title="Làm mới danh sách giữ chỗ 24h"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          </div>
+        </CardHeader>
+
+        <CardContent className="p-0">
+          {filteredBorrowRequests.length === 0 ? (
+            <div className="py-8 text-center text-xs text-muted-foreground">
+              <CheckCircle2 className="h-8 w-8 text-emerald-500/40 mx-auto mb-2" />
+              <p className="font-medium text-foreground">
+                {myBorrowRequests.length === 0
+                  ? "Hiện không có cuốn sách nào đang trong thời gian giữ chỗ 24h"
+                  : "Không tìm thấy yêu cầu giữ chỗ nào phù hợp với từ khóa"}
+              </p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                Khi độc giả bấm "Đăng ký mượn online" trên web, sách và thông tin độc giả sẽ xuất hiện tại đây.
+              </p>
+            </div>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow className="bg-amber-500/5 hover:bg-amber-500/5">
+                  <TableHead className="py-2.5 px-4 text-xs font-semibold">Mã Phiếu</TableHead>
+                  <TableHead className="py-2.5 px-4 text-xs font-semibold">Đầu Sách Giữ Chỗ</TableHead>
+                  <TableHead className="py-2.5 px-4 text-xs font-semibold">Bạn Đọc Đăng Ký</TableHead>
+                  <TableHead className="py-2.5 px-4 text-xs font-semibold">Thời Điểm Đăng Ký</TableHead>
+                  <TableHead className="py-2.5 px-4 text-xs font-semibold">Hạn Giữ Chỗ (24h)</TableHead>
+                  <TableHead className="py-2.5 px-4 text-xs font-semibold text-right">Thao Tác</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {filteredBorrowRequests.map((req: any) => {
+                  const timeLeft = req.time_left_hours !== null && req.time_left_hours !== undefined ? req.time_left_hours : 24;
+                  const isUrgent = timeLeft <= 3;
+
+                  return (
+                    <TableRow key={req.id} className="hover:bg-muted/40 transition-colors">
+                      <TableCell className="py-3 px-4 font-mono font-bold text-xs text-muted-foreground">
+                        #REQ-{req.id}
+                      </TableCell>
+                      <TableCell className="py-3 px-4">
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-10 w-8 rounded bg-muted overflow-hidden shrink-0 border grid place-items-center">
+                            {req.cover_image ? (
+                              <img src={req.cover_image} alt={req.book_title} className="h-full w-full object-cover" />
+                            ) : (
+                              <BookOpen className="h-3.5 w-3.5 text-muted-foreground" />
+                            )}
+                          </div>
+                          <div>
+                            <p className="font-semibold text-foreground text-xs">{req.book_title}</p>
+                            <div className="flex items-center gap-2 text-[10px] text-muted-foreground mt-0.5">
+                              {req.author_name && <span>✍️ {req.author_name}</span>}
+                              <span>• Kho còn: <strong className="text-emerald-600">{req.available_copies} cuốn</strong></span>
+                            </div>
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-3 px-4">
+                        <div>
+                          <p className="font-semibold text-foreground text-xs">{req.reader_name}</p>
+                          <div className="flex items-center gap-1.5 mt-0.5">
+                            <Badge variant="outline" className="font-mono text-[10px] bg-primary/5 text-primary border-primary/20">
+                              {req.card_number}
+                            </Badge>
+                            {req.reader_phone && (
+                              <span className="text-[10px] text-muted-foreground font-mono">
+                                📞 {req.reader_phone}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-3 px-4 text-xs text-muted-foreground">
+                        {new Date(req.request_date).toLocaleString("vi-VN", {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                          day: "2-digit",
+                          month: "2-digit",
+                          year: "numeric"
+                        })}
+                      </TableCell>
+                      <TableCell className="py-3 px-4">
+                        <div className="space-y-1">
+                          <Badge
+                            variant="outline"
+                            className={`text-[10px] font-semibold gap-1 ${isUrgent
+                                ? "bg-destructive/10 text-destructive border-destructive/30"
+                                : "bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30"
+                              }`}
+                          >
+                            ⏱️ Còn {Math.max(1, timeLeft)} giờ
+                          </Badge>
+                          <p className="text-[10px] text-muted-foreground">
+                            Hết hạn: {new Date(req.expires_at).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })} {new Date(req.expires_at).toLocaleDateString("vi-VN")}
+                          </p>
+                        </div>
+                      </TableCell>
+                      <TableCell className="py-3 px-4 text-right">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs gap-1 px-2.5 text-destructive border-destructive/30 hover:bg-destructive/10 hover:text-destructive font-medium"
+                          onClick={() => handleCancelBorrowRequest(req.id, req.book_title)}
+                          title="Hủy giữ chỗ và hoàn lại 1 cuốn về kho"
+                        >
+                          <XCircle className="h-3.5 w-3.5" /> Hủy giữ chỗ
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
       {/* 5. Sổ Theo Dõi Lưu Thông Toàn Thư Viện (Data Table) */}
       <Card className="shadow-xs border">
@@ -2070,13 +2576,12 @@ export default function BorrowPage() {
                 <TableHead className="py-2.5 px-4 text-xs font-semibold">Ngày Mượn</TableHead>
                 <TableHead className="py-2.5 px-4 text-xs font-semibold">Hạn Trả</TableHead>
                 <TableHead className="py-2.5 px-4 text-xs font-semibold">Trạng Thái</TableHead>
-                <TableHead className="py-2.5 px-4 text-xs font-semibold text-right">Thao Tác</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filteredHistory.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="py-10 text-center text-xs text-muted-foreground">
+                  <TableCell colSpan={6} className="py-10 text-center text-xs text-muted-foreground">
                     Không tìm thấy bản ghi giao dịch nào phù hợp với bộ lọc.
                   </TableCell>
                 </TableRow>
@@ -2096,10 +2601,15 @@ export default function BorrowPage() {
                           <code className="text-[10px] font-mono bg-primary/10 text-primary px-1.5 py-0.2 rounded font-bold">
                             {record.qr_code}
                           </code>
-                          <button 
+                          <button
                             type="button"
                             onClick={() => {
-                              setSelectedCopyQr({ title: record.book_title, qrCode: record.qr_code, readerName: record.reader_name });
+                              setSelectedCopyQr({
+                                title: record.book_title,
+                                qrCode: record.qr_code,
+                                readerName: record.reader_name,
+                                type: 'book'
+                              });
                               setViewCopyQrDialog(true);
                             }}
                             className="text-[10px] text-muted-foreground hover:text-primary underline"
@@ -2126,24 +2636,12 @@ export default function BorrowPage() {
                         )}
                       </TableCell>
                       <TableCell className="py-3 px-4">
-                        <Badge 
-                          variant={record.status === "borrowing" ? (isOverdue ? "destructive" : "default") : "outline"} 
+                        <Badge
+                          variant={record.status === "borrowing" ? (isOverdue ? "destructive" : "default") : "outline"}
                           className="text-[9px]"
                         >
                           {record.status === "borrowing" ? (isOverdue ? "Quá hạn" : "Đang mượn") : "Đã trả"}
                         </Badge>
-                      </TableCell>
-                      <TableCell className="py-3 px-4 text-right">
-                        {record.status === "borrowing" && (
-                          <Button 
-                            size="sm" 
-                            variant="outline" 
-                            className="h-6 text-[10px] px-2 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 bg-emerald-500/5 hover:bg-emerald-500/15 font-semibold" 
-                            onClick={() => handleTableReturnPrompt(record)}
-                          >
-                            Nhận trả
-                          </Button>
-                        )}
                       </TableCell>
                     </TableRow>
                   );
@@ -2168,21 +2666,19 @@ export default function BorrowPage() {
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle className="font-display flex items-center gap-2">
-              <Scan className="h-5 w-5 text-primary" /> 
-              {scannerMode === "reader_card" && "Quét Mã Thẻ Độc Giả"}
+              <Scan className="h-5 w-5 text-primary" />
+              {(scannerMode === "reader_card" || scannerMode === "return") && "Quét Mã Thẻ Độc Giả"}
               {scannerMode === "table_return_reader" && "Quét Thẻ Độc Giả Xác Thực Nhận Trả"}
               {scannerMode === "direct_borrow" && "Quét Mã QR Sách Cho Mượn Thêm"}
               {scannerMode === "approve_book" && "Quét Mã QR Sách Độc Giả Cầm Tới"}
               {scannerMode === "return_verify" && "Quét Mã QR Sách Đối Soát Vào Kho"}
-              {scannerMode === "return" && "Quét Mã QR Sách Trả / Thẻ Độc Giả"}
             </DialogTitle>
             <DialogDescription className="text-xs">
-              {scannerMode === "reader_card" && "Đưa mã QR trên thẻ độc giả vào camera để mở danh sách sách muốn mượn"}
+              {(scannerMode === "reader_card" || scannerMode === "return") && "Đưa mã QR trên thẻ độc giả vào camera để mở phiên giao dịch mượn / trả sách"}
               {scannerMode === "table_return_reader" && `Đưa mã QR trên thẻ của độc giả «${tableReturnRecord?.reader_name || ''}» (${tableReturnRecord?.card_number || ''}) vào camera`}
               {scannerMode === "direct_borrow" && `Đưa mã QR dán trên gáy/bìa cuốn sách lấy thêm vào camera để cho độc giả ${scannedReaderInfo?.reader.full_name || ''} mượn`}
               {scannerMode === "approve_book" && `Đưa tem mã QR trên cuốn sách vật lý mà độc giả ${scannedReaderInfo?.reader.full_name || ''} mang tới vào camera để đối soát`}
               {scannerMode === "return_verify" && "Đưa tem mã QR trên bìa cuốn sách vật lý vào camera để đối soát vào kho"}
-              {scannerMode === "return" && "Đưa mã QR trên bìa sách để nhận trả vào kho hoặc mã thẻ độc giả để chọn sách trả"}
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
@@ -2195,22 +2691,22 @@ export default function BorrowPage() {
                   <Upload className="h-4 w-4" /> Tải ảnh mã QR từ thiết bị
                 </Button>
                 <input type="file" ref={fileInputRef} accept="image/*" className="hidden" onChange={handleFileUpload} />
-                <Input 
+                <Input
                   placeholder={
-                    scannerMode === "reader_card" 
-                      ? "Hoặc nhập mã thẻ độc giả / mã phiếu (VD: LIB-RD-100001)..." 
+                    scannerMode === "reader_card" || scannerMode === "return"
+                      ? "Hoặc nhập mã thẻ độc giả (VD: LIB-RD-000003)..."
                       : scannerMode === "table_return_reader"
-                      ? `Hoặc nhập mã thẻ độc giả (VD: ${tableReturnRecord?.card_number || 'LIB-RD-000005'})...`
-                      : scannerMode === "direct_borrow" 
-                      ? "Hoặc nhập mã QR cuốn sách lấy thêm (VD: LIB-BK-1-1)..." 
-                      : scannerMode === "approve_book"
-                      ? "Hoặc nhập mã QR cuốn sách vật lý trên tay độc giả (VD: LIB-BK-1-1)..."
-                      : scannerMode === "return_verify"
-                      ? "Hoặc nhập mã QR trên cuốn sách trả (VD: QR-BK-1-1)..."
-                      : "Hoặc nhập mã QR sách / mã thẻ độc giả..."
+                        ? `Hoặc nhập mã thẻ độc giả (VD: ${tableReturnRecord?.card_number || 'LIB-RD-000005'})...`
+                        : scannerMode === "direct_borrow"
+                          ? "Hoặc nhập mã QR cuốn sách lấy thêm (VD: LIB-BK-1-1)..."
+                          : scannerMode === "approve_book"
+                            ? "Hoặc nhập mã QR cuốn sách vật lý trên tay độc giả (VD: LIB-BK-1-1)..."
+                            : scannerMode === "return_verify"
+                              ? "Hoặc nhập mã QR trên cuốn sách trả (VD: QR-BK-1-1)..."
+                              : "Hoặc nhập mã thẻ độc giả (VD: LIB-RD-000003)..."
                   }
-                  value={simulatedQrCode} 
-                  onChange={(e) => setSimulatedQrCode(e.target.value)} 
+                  value={simulatedQrCode}
+                  onChange={(e) => setSimulatedQrCode(e.target.value)}
                   className="text-xs font-mono"
                 />
                 <Button onClick={handleSimulatedScan} variant="secondary" className="w-full text-xs">
@@ -2281,7 +2777,7 @@ export default function BorrowPage() {
                     <span className="text-[10px] font-normal text-muted-foreground">Máy quét USB / Camera</span>
                   </label>
                   <div className="flex gap-2">
-                    <Input 
+                    <Input
                       autoFocus
                       placeholder="Bắn máy quét hoặc nhập mã QR sách (VD: LIB-BK-1-1)..."
                       value={approveBookQr}
@@ -2309,19 +2805,18 @@ export default function BorrowPage() {
                           }
                         }
                       }}
-                      className={`font-mono text-xs ${
-                        approveCheckError 
-                          ? 'border-destructive focus-visible:ring-destructive bg-destructive/5' 
-                          : approveCheckedCopy 
-                          ? 'border-emerald-500 focus-visible:ring-emerald-500 bg-emerald-50/30' 
-                          : ''
-                      }`}
+                      className={`font-mono text-xs ${approveCheckError
+                          ? 'border-destructive focus-visible:ring-destructive bg-destructive/5'
+                          : approveCheckedCopy
+                            ? 'border-emerald-500 focus-visible:ring-emerald-500 bg-emerald-50/30'
+                            : ''
+                        }`}
                     />
-                    <Button 
-                      type="button" 
-                      variant="outline" 
+                    <Button
+                      type="button"
+                      variant="outline"
                       size="sm"
-                      onClick={() => openScannerModal("approve_book")} 
+                      onClick={() => openScannerModal("approve_book")}
                       className="gap-1.5 shrink-0 text-xs"
                       title="Mở Camera để quét mã trên cuốn sách"
                     >
@@ -2365,18 +2860,18 @@ export default function BorrowPage() {
                 ) : null}
 
                 <div className="flex justify-end gap-2 pt-2 border-t">
-                  <Button 
-                    type="button" 
-                    variant="ghost" 
-                    size="sm" 
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
                     onClick={() => setApproveModalOpen(false)}
                     disabled={isApproveSubmitting}
                   >
                     Hủy
                   </Button>
-                  <Button 
-                    type="submit" 
-                    size="sm" 
+                  <Button
+                    type="submit"
+                    size="sm"
                     className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold gap-1.5 shadow-sm disabled:opacity-50"
                     disabled={isApproveSubmitting || !approveBookQr.trim() || !approveCheckedCopy || !!approveCheckError}
                   >
@@ -2568,7 +3063,7 @@ export default function BorrowPage() {
                     <span className="text-[10px] font-normal text-muted-foreground">Máy quét USB / Camera</span>
                   </label>
                   <div className="flex gap-2">
-                    <Input 
+                    <Input
                       autoFocus
                       placeholder="Bắn máy quét hoặc nhập mã QR trên cuốn sách (VD: QR-BK-1-1)..."
                       value={returnScannedQr}
@@ -2654,9 +3149,9 @@ export default function BorrowPage() {
                         💡 <em>Độc giả này CŨNG ĐANG MƯỢN cuốn «{matchedOtherLoan.book_title}». Bạn có thể chuyển sang nhận trả cuốn này ngay:</em>
                       </p>
                     </div>
-                    <Button 
-                      type="button" 
-                      size="sm" 
+                    <Button
+                      type="button"
+                      size="sm"
                       className="w-full bg-amber-600 hover:bg-amber-700 text-white font-semibold gap-1.5 h-8 text-xs shadow-xs"
                       onClick={() => handleSwitchReturnTarget(matchedOtherLoan)}
                     >
@@ -2679,18 +3174,18 @@ export default function BorrowPage() {
                 ) : null}
 
                 <div className="flex justify-end gap-2 pt-2 border-t">
-                  <Button 
-                    type="button" 
-                    variant="ghost" 
-                    size="sm" 
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
                     onClick={() => setReturnModalOpen(false)}
                     disabled={isReturnSubmitting}
                   >
                     Hủy
                   </Button>
-                  <Button 
-                    type="submit" 
-                    size="sm" 
+                  <Button
+                    type="submit"
+                    size="sm"
                     className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold gap-1.5 shadow-sm disabled:opacity-50"
                     disabled={isReturnSubmitting || !returnScannedQr.trim() || returnMatchState !== 'exact'}
                   >
@@ -2708,36 +3203,65 @@ export default function BorrowPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Copy QR Inspection Modal */}
+      {/* Copy / Reader Card QR Inspection Modal */}
       <Dialog open={viewCopyQrDialog} onOpenChange={setViewCopyQrDialog}>
         <DialogContent className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle className="font-display flex items-center gap-2 text-base">
-              <QrCode className="h-5 w-5 text-primary" /> Tem QR Định Danh Bản Sao
-            </DialogTitle>
-            <DialogDescription className="text-xs truncate">
-              {selectedCopyQr?.title}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col items-center p-4 bg-muted/20 rounded-xl border space-y-3">
-            <div className="bg-white p-3 rounded-xl border shadow-sm">
-              {selectedCopyQr?.qrCode && (
-                <QRCodeCanvas 
-                  id="inspect-copy-qr-canvas"
-                  value={selectedCopyQr.qrCode} 
-                  size={160} 
-                  level={"H"}
-                  includeMargin={true}
-                />
-              )}
-            </div>
-            <code className="px-2.5 py-1 bg-primary/10 text-primary rounded font-mono font-bold text-xs tracking-wide">
-              {selectedCopyQr?.qrCode}
-            </code>
-            <p className="text-[11px] text-muted-foreground text-center">
-              💡 Đây là tem mã QR định danh duy nhất cho cuốn sách vật lý này. Hãy đối chiếu với tem in dán trên gáy hoặc bìa sách.
-            </p>
-          </div>
+          {(() => {
+            const isReaderCard = selectedCopyQr?.type === 'reader' ||
+              selectedCopyQr?.qrCode?.startsWith('LIB-RD-') ||
+              selectedCopyQr?.qrCode?.startsWith('RD-') ||
+              selectedCopyQr?.title?.includes('Thẻ Thư Viện');
+
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="font-display flex items-center gap-2 text-base">
+                    {isReaderCard ? (
+                      <>
+                        <CreditCard className="h-5 w-5 text-primary" /> Mã QR Thẻ Độc Giả
+                      </>
+                    ) : (
+                      <>
+                        <QrCode className="h-5 w-5 text-primary" /> Tem QR Định Danh Bản Sao
+                      </>
+                    )}
+                  </DialogTitle>
+                  <DialogDescription className="text-xs truncate">
+                    {isReaderCard
+                      ? (selectedCopyQr?.readerName ? `Độc giả: ${selectedCopyQr.readerName}` : selectedCopyQr?.title)
+                      : (selectedCopyQr?.title ? `Ấn phẩm: ${selectedCopyQr.title}` : '')}
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="flex flex-col items-center p-4 bg-muted/20 rounded-xl border space-y-3">
+                  <div className="bg-white p-3 rounded-xl border shadow-sm">
+                    {selectedCopyQr?.qrCode && (
+                      <QRCodeCanvas
+                        id="inspect-copy-qr-canvas"
+                        value={selectedCopyQr.qrCode}
+                        size={160}
+                        level={"H"}
+                        includeMargin={true}
+                      />
+                    )}
+                  </div>
+                  <code className="px-3 py-1 bg-primary/10 text-primary rounded-full font-mono font-bold text-xs tracking-wide">
+                    {selectedCopyQr?.qrCode}
+                  </code>
+                  <p className="text-[11px] text-muted-foreground text-center leading-relaxed">
+                    {isReaderCard ? (
+                      <>
+                        💡 Đây là mã QR định danh thẻ thư viện của độc giả. Độc giả có thể dùng mã này trên điện thoại hoặc thẻ cứng để quét mở phiên mượn/trả sách hoặc đối soát thủ tục tại quầy.
+                      </>
+                    ) : (
+                      <>
+                        💡 Đây là tem mã QR định danh duy nhất cho cuốn sách vật lý này. Hãy đối chiếu với tem in dán trên gáy hoặc bìa sách.
+                      </>
+                    )}
+                  </p>
+                </div>
+              </>
+            );
+          })()}
         </DialogContent>
       </Dialog>
 
