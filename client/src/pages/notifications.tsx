@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
@@ -41,6 +42,7 @@ import {
   Clock,
   ShieldAlert,
   Sparkles,
+  ArrowRight,
   X
 } from "lucide-react";
 import api from "@/services/api";
@@ -60,6 +62,7 @@ interface Notification {
 export default function NotificationsPage() {
   const { user } = useAuth();
   const { confirm, ConfirmDialogComponent } = useConfirm();
+  const navigate = useNavigate();
   const [notiList, setNotiList] = useState<Notification[]>([]);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [loading, setLoading] = useState(true);
@@ -769,6 +772,43 @@ export default function NotificationsPage() {
                       <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
                         {n.message}
                       </p>
+
+                      {/* Nút thao tác nhanh theo loại thông báo */}
+                      {(n.title.toLowerCase().includes("đặt trước") || n.message.toLowerCase().includes("đặt trước")) && (
+                        <div className="mt-2.5">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate("/reservations");
+                            }}
+                            className="h-7 text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 font-semibold"
+                          >
+                            <BookmarkCheck className="h-3.5 w-3.5" />
+                            <span>Mở mục Đặt trước sách</span>
+                            <ArrowRight className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      )}
+
+                      {(n.title.toLowerCase().includes("đăng ký mượn") || n.message.toLowerCase().includes("yêu cầu mượn")) && (
+                        <div className="mt-2.5">
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              navigate("/borrow");
+                            }}
+                            className="h-7 text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 font-semibold"
+                          >
+                            <BookOpen className="h-3.5 w-3.5" />
+                            <span>Mở Sổ mượn & Thẻ QR</span>
+                            <ArrowRight className="h-3 w-3" />
+                          </Button>
+                        </div>
+                      )}
 
                       <div className="mt-2 flex items-center gap-3 text-[10px] text-muted-foreground/80">
                         <span className="flex items-center gap-1">

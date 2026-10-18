@@ -132,10 +132,83 @@ async function initOwnerAndConfigTables() {
             }
         }
 
-        console.log('✅ [INIT DB] Owner role, Maker-Checker & VietQR Bank Config tables ready!');
+        // 9. Ensure borrow_requests table exists (Yêu cầu mượn online khi sách còn sẵn - Giữ chỗ trước 24h)
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS borrow_requests (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                book_id INT NOT NULL,
+                request_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+                expires_at DATETIME NULL,
+                status ENUM('pending', 'borrowed', 'cancelled', 'expired') DEFAULT 'pending',
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+            )
+        `);
+
+        try {
+            await db.execute(
+                "ALTER TABLE borrow_requests MODIFY COLUMN status ENUM('pending', 'borrowed', 'cancelled', 'expired') DEFAULT 'pending'"
+            );
+        } catch (err) {}
+
+        try {
+            const [expCol] = await db.execute("SHOW COLUMNS FROM borrow_requests LIKE 'expires_at'");
+            if (expCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_requests ADD COLUMN expires_at DATETIME NULL");
+            }
+        } catch (err) {}
+
+        // 10. Ensure reservations table supports waitlist, notification and expiration columns
+        try {
+            await db.execute(
+                "ALTER TABLE reservations MODIFY COLUMN status ENUM('waiting', 'pending', 'notified', 'ready', 'accepted', 'fulfilled', 'completed', 'cancelled', 'expired') DEFAULT 'waiting'"
+            );
+        } catch (err) {}
+
+        try {
+            const [notifiedCol] = await db.execute("SHOW COLUMNS FROM reservations LIKE 'notified_at'");
+            if (notifiedCol.length === 0) {
+                await db.execute("ALTER TABLE reservations ADD COLUMN notified_at DATETIME NULL");
+            }
+            const [expiresCol] = await db.execute("SHOW COLUMNS FROM reservations LIKE 'expires_at'");
+            if (expiresCol.length === 0) {
+                await db.execute("ALTER TABLE reservations ADD COLUMN expires_at DATETIME NULL");
+            }
+        } catch (err) {}
+
+        // 11. Migrate any existing 'ready' reservations for available books into borrow_requests
+        try {
+            const [readyResvs] = await db.execute(`
+                SELECT r.id, r.user_id, r.book_id, r.reservation_date
+                FROM reservations r
+                JOIN books b ON r.book_id = b.id
+                WHERE r.status = 'ready' AND b.available_copies > 0
+            `);
+            for (const r of readyResvs) {
+                // Check if already in borrow_requests
+                const [exist] = await db.execute(
+                    'SELECT id FROM borrow_requests WHERE user_id = ? AND book_id = ? AND status = "pending"',
+                    [r.user_id, r.book_id]
+                );
+                if (exist.length === 0) {
+                    await db.execute(
+                        'INSERT INTO borrow_requests (user_id, book_id, request_date, status) VALUES (?, ?, ?, "pending")',
+                        [r.user_id, r.book_id, r.reservation_date]
+                    );
+                }
+                // Mark old reservation as migrated / completed
+                await db.execute('UPDATE reservations SET status = "completed" WHERE id = ?', [r.id]);
+            }
+        } catch (err) {
+            console.error('Error migrating ready reservations:', err.message);
+        }
+
+        console.log('✅ [INIT DB] Owner role, Maker-Checker, VietQR Bank Config, Borrow Requests & Reservations tables ready!');
     } catch (error) {
         console.error('⚠️ [INIT DB] Warning initializing owner/config tables:', error.message);
     }
 }
 
 module.exports = initOwnerAndConfigTables;
+

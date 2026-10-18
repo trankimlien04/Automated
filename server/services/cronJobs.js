@@ -116,6 +116,66 @@ function initCronJobs() {
             console.error('❌ [CRON ERROR] Error in morning reminders:', error);
         }
     });
+
+    // Run every 15 minutes to release expired online borrow requests (24h hold) and reservations (48h hold)
+    cron.schedule('*/15 * * * *', async () => {
+        try {
+            // 1. Release expired borrow requests (24h hold)
+            const [expiredBorrows] = await db.execute(`
+                SELECT brq.id, brq.user_id, brq.book_id, b.title as book_title
+                FROM borrow_requests brq
+                JOIN books b ON brq.book_id = b.id
+                WHERE brq.status = 'pending' AND brq.expires_at IS NOT NULL AND brq.expires_at < NOW()
+            `);
+            for (const item of expiredBorrows) {
+                await db.execute('UPDATE borrow_requests SET status = "expired" WHERE id = ?', [item.id]);
+                await db.execute('UPDATE books SET available_copies = available_copies + 1 WHERE id = ?', [item.book_id]);
+                await db.execute(
+                    'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
+                    [
+                        item.user_id,
+                        'Hết hạn giữ chỗ mượn sách online',
+                        `Thời hạn giữ chỗ 24 giờ cho cuốn sách "${item.book_title}" đã hết. Bản sao sách đã được đưa trở lại kho thư viện cho các bạn đọc khác.`
+                    ]
+                );
+            }
+
+            // 2. Release expired reservations (48h hold with no response)
+            const [expiredResvs] = await db.execute(`
+                SELECT r.id, r.user_id, r.book_id, b.title as book_title
+                FROM reservations r
+                JOIN books b ON r.book_id = b.id
+                WHERE r.status = 'notified' AND r.expires_at IS NOT NULL AND r.expires_at < NOW()
+            `);
+            for (const resv of expiredResvs) {
+                const [nextWaiters] = await db.execute(
+                    'SELECT r.id, r.user_id, u.full_name FROM reservations r JOIN users u ON r.user_id = u.id WHERE r.book_id = ? AND r.status IN ("waiting", "pending") ORDER BY r.reservation_date ASC LIMIT 1',
+                    [resv.book_id]
+                );
+                await db.execute('UPDATE reservations SET status = "expired" WHERE id = ?', [resv.id]);
+
+                if (nextWaiters.length > 0) {
+                    const nextUser = nextWaiters[0];
+                    await db.execute(
+                        'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
+                        [nextUser.id]
+                    );
+                    await db.execute(
+                        'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
+                        [
+                            nextUser.user_id,
+                            '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
+                            `Cuốn sách "${resv.book_title}" bạn đặt trước đã có sẵn tại thư viện. Thư viện đang giữ sách ưu tiên cho bạn trong vòng 48 giờ. Hãy vào mục "Đặt trước sách" để xác nhận mượn nhé!`
+                        ]
+                    );
+                } else {
+                    await db.execute('UPDATE books SET available_copies = available_copies + 1 WHERE id = ?', [resv.book_id]);
+                }
+            }
+        } catch (e) {
+            console.error('Lỗi khi quét dọn yêu cầu và đặt trước hết hạn:', e);
+        }
+    });
 }
 
 module.exports = initCronJobs;
