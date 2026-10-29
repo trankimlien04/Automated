@@ -84,7 +84,7 @@ exports.payFine = async (req, res) => {
         // Save activity log
         await db.execute(
             'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?)',
-            [processedBy, 'PAY_FINE', 'fines', id, `Thanh toán phí phạt #${id}: ${Number(fine.amount).toLocaleString('vi-VN')}đ. Phương thức: ${methodLabel} (${channelLabel})`]
+            [processedBy, 'PAY_FINE', 'fines', id, `Thanh toán phí phạt #${id}: ${Number(fine.amount).toLocaleString('vi-VN')}đ. Phương thức: ${methodLabel} (${channelLabel}). Mã đối soát: ${finalRef || 'N/A'}`]
         );
 
         // Notify user

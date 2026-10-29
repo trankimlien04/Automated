@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -31,7 +32,13 @@ import {
   Sparkles,
   Download,
   Copy,
-  Check
+  Check,
+  Clock,
+  BookmarkCheck,
+  HelpCircle,
+  XCircle,
+  ThumbsUp,
+  RotateCcw
 } from "lucide-react";
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
@@ -39,11 +46,12 @@ import { toast } from "sonner";
 import { useConfirm } from "@/hooks/use-confirm";
 import { QRCodeCanvas } from "qrcode.react";
 import { Html5Qrcode } from "html5-qrcode";
+import { LibraryMiniMapModal } from "@/components/library-mini-map-modal";
 
 interface Reservation {
   id: number;
   reservation_date: string;
-  status: "pending" | "ready" | "completed" | "cancelled";
+  status: "waiting" | "pending" | "notified" | "ready" | "accepted" | "completed" | "cancelled" | "expired";
   reader_name: string;
   card_number: string;
   reader_email?: string;
@@ -53,21 +61,33 @@ interface Reservation {
   available_copies?: number;
   total_copies?: number;
   cover_image?: string;
+  location?: string;
+  book_location?: string;
+  notified_at?: string;
+  expires_at?: string;
+  queue_position?: number;
+  time_left_hours?: number;
 }
 
-const statusMap: Record<string, { label: string; cls: string }> = {
-  pending: { label: "Đang đợi sách", cls: "bg-warning/15 text-warning border-warning/30" },
-  ready: { label: "Sẵn sàng nhận", cls: "bg-success/15 text-success border-success/20 animate-pulse font-semibold" },
-  completed: { label: "Đã hoàn thành", cls: "bg-muted text-muted-foreground border-muted-foreground/20" },
-  cancelled: { label: "Đã hủy", cls: "bg-destructive/10 text-destructive border-destructive/20" },
+const statusMap: Record<string, { label: string; cls: string; desc: string }> = {
+  waiting: { label: "Đang chờ sách về kho", cls: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30", desc: "Xếp hàng đợi khi có sách trả về" },
+  pending: { label: "Đang chờ sách về kho", cls: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30", desc: "Xếp hàng đợi khi có sách trả về" },
+  notified: { label: "Chờ độc giả xác nhận", cls: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 animate-pulse font-semibold", desc: "Sách đã về kho, giữ ưu tiên 48h" },
+  accepted: { label: "Đã xác nhận • Giữ tại quầy", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold", desc: "Độc giả đã đồng ý mượn, sách chờ tại quầy" },
+  ready: { label: "Sẵn sàng nhận tại quầy", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold", desc: "Sách đang giữ sẵn sàng tại quầy" },
+  completed: { label: "Đã giao sách", cls: "bg-muted text-muted-foreground border-muted-foreground/20", desc: "Thủ thư đã trao sách cho độc giả" },
+  cancelled: { label: "Đã hủy / Nhường lượt", cls: "bg-destructive/10 text-destructive border-destructive/20", desc: "Phiếu đặt trước đã hủy" },
+  expired: { label: "Đã hết hạn", cls: "bg-muted text-muted-foreground border-muted-foreground/20", desc: "Quá 48h chưa xác nhận" },
 };
 
 export default function ReservationsPage() {
   const [resList, setResList] = useState<Reservation[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchFilter, setSearchFilter] = useState("");
+  const [adminTab, setAdminTab] = useState<"all" | "hold" | "notified" | "waiting" | "history">("all");
   const { user } = useAuth();
   const { confirm, ConfirmDialogComponent } = useConfirm();
+  const navigate = useNavigate();
 
   // Handover QR Verification Modal State (For Librarian)
   const [handoverModalOpen, setHandoverModalOpen] = useState(false);
@@ -80,16 +100,35 @@ export default function ReservationsPage() {
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Reader's Ticket QR Modal State (For Reader)
-  const [ticketModalOpen, setTicketModalOpen] = useState(false);
-  const [ticketForReader, setTicketForReader] = useState<Reservation | null>(null);
-  const [copiedCode, setCopiedCode] = useState(false);
+  // Mini Map Wayfinding State
+  const [miniMapOpen, setMiniMapOpen] = useState(false);
+  const [miniMapTarget, setMiniMapTarget] = useState<{
+    location?: string;
+    title?: string;
+    cover?: string;
+  } | null>(null);
+
+  const handleOpenMiniMap = (item?: {
+    location?: string;
+    book_location?: string;
+    title?: string;
+    book_title?: string;
+    cover_image?: string;
+  } | null) => {
+    if (!item) return;
+    setMiniMapTarget({
+      location: item.location || item.book_location || "Phòng 01 - Kệ 01 - Ngăn 01",
+      title: item.title || item.book_title,
+      cover: item.cover_image,
+    });
+    setMiniMapOpen(true);
+  };
 
   const fetchReservations = async () => {
     setLoading(true);
     try {
       const response = await api.get("/reservations");
-      setResList(response.data);
+      setResList(response.data || []);
     } catch (error) {
       console.error("Lỗi khi tải phiếu đặt trước:", error);
       toast.error("Không thể tải danh sách đặt trước");
@@ -111,7 +150,7 @@ export default function ReservationsPage() {
             html5QrCodeRef.current.stop().catch(console.error);
           }
           html5QrCodeRef.current.clear();
-        } catch (e) {}
+        } catch (e) { }
       }
     };
   }, []);
@@ -155,18 +194,17 @@ export default function ReservationsPage() {
               await html5QrCodeRef.current.stop();
             }
             html5QrCodeRef.current.clear();
-          } catch (e) {}
+          } catch (e) { }
         }
 
         const qrScanner = new Html5Qrcode(scannerId);
         html5QrCodeRef.current = qrScanner;
 
-        // Check available video devices
         let cameras: Array<{ id: string; label: string }> = [];
         try {
           cameras = await Html5Qrcode.getCameras();
         } catch (camErr) {
-          console.warn("Could not enumerate cameras, will fallback to environment constraint:", camErr);
+          console.warn("Could not enumerate cameras:", camErr);
         }
 
         const cameraConfig = cameras && cameras.length > 0
@@ -181,7 +219,7 @@ export default function ReservationsPage() {
             toast.success("Đã quét nhận diện mã QR thành công!");
             stopCamera();
           },
-          () => {}
+          () => { }
         );
         setIsCameraStarting(false);
       } catch (err: any) {
@@ -210,7 +248,7 @@ export default function ReservationsPage() {
       .finally(() => {
         try {
           qrScanner.clear();
-        } catch (e) {}
+        } catch (e) { }
         if (fileInputRef.current) {
           fileInputRef.current.value = "";
         }
@@ -234,36 +272,6 @@ export default function ReservationsPage() {
     setBookCopyQrInput("");
   };
 
-  const handleOpenTicketModal = (resv: Reservation) => {
-    setTicketForReader(resv);
-    setCopiedCode(false);
-    setTicketModalOpen(true);
-  };
-
-  // Download QR Code Canvas as PNG for Readers
-  const handleDownloadQr = (filename: string) => {
-    const canvas = document.getElementById("reader-reservation-qr-canvas") as HTMLCanvasElement;
-    if (!canvas) {
-      toast.error("Không tìm thấy mã QR để tải xuống");
-      return;
-    }
-    const pngUrl = canvas.toDataURL("image/png");
-    const downloadLink = document.createElement("a");
-    downloadLink.href = pngUrl;
-    downloadLink.download = `${filename}.png`;
-    document.body.appendChild(downloadLink);
-    downloadLink.click();
-    document.body.removeChild(downloadLink);
-    toast.success(`Đã tải ảnh mã QR (${filename}.png) về thiết bị của bạn!`);
-  };
-
-  const handleCopyTicketCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    setCopiedCode(true);
-    toast.success("Đã sao chép mã phiếu nhận sách!");
-    setTimeout(() => setCopiedCode(false), 2000);
-  };
-
   // Verify scanned code against the selected reservation
   const isCodeMatch = () => {
     if (!selectedResv || !scannedCodeInput.trim()) return null;
@@ -271,7 +279,6 @@ export default function ReservationsPage() {
     const expectedTicket = `TICKET-RES-${selectedResv.id}`.toUpperCase();
     const expectedCard = selectedResv.card_number ? selectedResv.card_number.toUpperCase().replace(/\s+/g, "") : "";
 
-    // Match ticket formats
     if (
       input === expectedTicket ||
       input === `TICKET-${selectedResv.id}` ||
@@ -281,17 +288,14 @@ export default function ReservationsPage() {
       return true;
     }
 
-    // Match reader card number
     if (expectedCard && input === expectedCard) {
       return true;
     }
 
-    // Match email
     if (selectedResv.reader_email && scannedCodeInput.trim() === selectedResv.reader_email) {
       return true;
     }
 
-    // JSON format
     if (scannedCodeInput.trim().startsWith("{") && scannedCodeInput.trim().endsWith("}")) {
       try {
         const parsed = JSON.parse(scannedCodeInput.trim());
@@ -299,7 +303,7 @@ export default function ReservationsPage() {
         if (jsonCode === expectedTicket || (expectedCard && jsonCode === expectedCard)) {
           return true;
         }
-      } catch {}
+      } catch { }
     }
 
     return false;
@@ -311,19 +315,19 @@ export default function ReservationsPage() {
 
     const targetCode = scannedCodeInput.trim();
     if (!targetCode) {
-      toast.error("Vui lòng quét hoặc nhập mã QR của độc giả để xác thực trước khi giao sách!");
+      toast.error("Vui lòng quét hoặc nhập mã QR thẻ của độc giả để xác thực!");
       return;
     }
 
     const match = isCodeMatch();
     if (match === false) {
-      toast.error(`Mã QR quét được không khớp với độc giả "${selectedResv.reader_name}"! Tuyệt đối không được giao sách nhầm người.`);
+      toast.error(`Mã quét được không khớp với độc giả "${selectedResv.reader_name}"! Tuyệt đối không giao sách nhầm người.`);
       return;
     }
 
     const targetBookCopyQr = bookCopyQrInput.trim();
     if (!targetBookCopyQr) {
-      toast.error("Vui lòng quét hoặc nhập mã QR trên cuốn sách vật lý mà độc giả mang tới bàn!");
+      toast.error("Vui lòng quét hoặc nhập mã QR trên cuốn sách vật lý mà bạn trao cho độc giả!");
       return;
     }
 
@@ -345,10 +349,52 @@ export default function ReservationsPage() {
     }
   };
 
-  const handleCancel = (id: number) => {
+  // Reader responds: Accept or Decline hold
+  const handleRespondReservation = (id: number, action: "accept" | "decline", bookTitle: string) => {
+    if (action === "accept") {
+      confirm({
+        title: "Xác nhận đồng ý mượn cuốn sách này?",
+        description: `Bạn đồng ý mượn cuốn sách "${bookTitle}". Sách sẽ được giữ riêng tại quầy thủ thư cho bạn. Bạn chỉ cần tới quầy xuất trình Thẻ độc giả (mã QR cá nhân) để nhận sách.`,
+        confirmText: "Đồng ý mượn & Giữ sách",
+        cancelText: "Trở lại",
+        variant: "default",
+        onConfirm: async () => {
+          try {
+            const res = await api.post(`/reservations/${id}/respond`, { action: "accept" });
+            toast.success(res.data.message || "Đã xác nhận mượn sách thành công! Vui lòng tới quầy nhận sách.");
+            fetchReservations();
+          } catch (error: any) {
+            console.error("Lỗi khi xác nhận:", error);
+            toast.error(error.response?.data?.message || "Không thể xác nhận mượn sách");
+          }
+        }
+      });
+    } else {
+      confirm({
+        title: "Xác nhận nhường lượt / Không mượn?",
+        description: `Bạn có chắc muốn từ chối mượn cuốn sách "${bookTitle}" không?\n\n👉 Quyền ưu tiên giữ sách 48h sẽ được tự động chuyển ngay cho bạn đọc tiếp theo trong hàng đợi!`,
+        confirmText: "Nhường lượt cho bạn khác",
+        cancelText: "Trở lại",
+        variant: "destructive",
+        onConfirm: async () => {
+          try {
+            const res = await api.post(`/reservations/${id}/respond`, { action: "decline" });
+            toast.success(res.data.message || "Đã nhường lượt mượn thành công.");
+            fetchReservations();
+          } catch (error: any) {
+            console.error("Lỗi khi từ chối:", error);
+            toast.error(error.response?.data?.message || "Không thể thực hiện thao tác");
+          }
+        }
+      });
+    }
+  };
+
+  // Cancel reservation
+  const handleCancel = (id: number, bookTitle: string) => {
     confirm({
       title: "Xác nhận hủy đặt trước",
-      description: "Bạn có chắc chắn muốn hủy yêu cầu đặt trước đầu sách này không?",
+      description: `Bạn có chắc chắn muốn hủy đặt trước cuốn sách "${bookTitle}" không? Nếu hủy, bạn sẽ rời khỏi hàng đợi ưu tiên.`,
       confirmText: "Đồng ý hủy",
       cancelText: "Trở lại",
       variant: "destructive",
@@ -365,7 +411,17 @@ export default function ReservationsPage() {
     });
   };
 
-  const filteredReservations = resList.filter((r) => {
+  const isReader = user?.role === "reader";
+
+  // Filtered reservations for Staff view
+  const filteredStaffList = resList.filter((r) => {
+    // Admin tab filter
+    if (adminTab === "hold" && !["accepted", "ready"].includes(r.status)) return false;
+    if (adminTab === "notified" && r.status !== "notified") return false;
+    if (adminTab === "waiting" && !["waiting", "pending"].includes(r.status)) return false;
+    if (adminTab === "history" && !["completed", "cancelled", "expired"].includes(r.status)) return false;
+
+    // Search filter
     if (!searchFilter.trim()) return true;
     const q = searchFilter.toLowerCase();
     return (
@@ -376,236 +432,661 @@ export default function ReservationsPage() {
     );
   });
 
-  const totalActive = resList.filter((r) => r.status === "pending").length;
-  const totalReady = resList.filter((r) => r.status === "ready").length;
+  // Categorized lists for Reader view
+  const readerNotifiedList = resList.filter((r) => r.status === "notified");
+  const readerReadyList = resList.filter((r) => ["accepted", "ready"].includes(r.status));
+  const readerWaitingList = resList.filter((r) => ["waiting", "pending"].includes(r.status));
+  const readerHistoryList = resList.filter((r) => ["completed", "cancelled", "expired"].includes(r.status));
+
+  // Staff Metrics
+  const totalWaiting = resList.filter((r) => ["waiting", "pending"].includes(r.status)).length;
+  const totalNotified = resList.filter((r) => r.status === "notified").length;
+  const totalHold = resList.filter((r) => ["accepted", "ready"].includes(r.status)).length;
   const totalCompleted = resList.filter((r) => r.status === "completed").length;
-  const canManage = user?.role === "admin" || user?.role === "librarian";
 
   const codeMatchStatus = isCodeMatch();
 
   return (
     <div className="space-y-6">
-      {/* Metrics Row */}
-      <div className="grid gap-4 md:grid-cols-3">
-        <Card className="border-border/80 shadow-xs">
-          <CardContent className="p-5">
-            <div className="flex items-center justify-between">
-              <Calendar className="h-5 w-5 text-amber-500" />
-              <Badge variant="outline" className="text-[10px] text-amber-600 bg-amber-500/10 border-amber-500/20">
-                Đang chờ
-              </Badge>
-            </div>
-            <p className="mt-3 font-display text-3xl font-bold">{totalActive}</p>
-            <p className="text-xs text-muted-foreground font-medium mt-0.5">Đặt trước đang chờ sách về kho</p>
-          </CardContent>
-        </Card>
+      {/* ======================================================== */}
+      {/* 1. GIAO DIỆN DÀNH CHO ĐỘC GIẢ (READER VIEW) */}
+      {/* ======================================================== */}
+      {isReader ? (
+        <div className="space-y-6">
+          {/* Header & Policy Explanation Banner */}
+          <div className="rounded-2xl border border-primary/20 bg-gradient-to-r from-primary/10 via-background to-primary/5 p-5 shadow-xs">
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30 text-[11px] font-semibold">
+                    Dành cho Độc giả
+                  </Badge>
+                  <span className="text-xs text-muted-foreground">• Hệ thống hàng đợi tự động</span>
+                </div>
+                <h1 className="text-xl font-bold font-display text-foreground">
+                  Sách Bạn Đặt Trước (Hàng Đợi Chờ Sách Về Kho)
+                </h1>
+                <p className="text-xs text-muted-foreground max-w-2xl">
+                  Tính năng <strong>Đặt trước</strong> chỉ áp dụng khi sách <strong>đã được mượn hết trong kho</strong>. Khi có độc giả trả sách về thư viện, hệ thống sẽ tự động giữ sách ưu tiên cho bạn trong <strong>48 giờ</strong> và gửi thông báo hỏi bạn có muốn mượn không.
+                </p>
+              </div>
 
-        <Card className="border-emerald-500/30 bg-emerald-500/[0.03] shadow-xs">
-          <CardContent className="p-5">
-            <div className="flex items-center justify-between">
-              <Bell className="h-5 w-5 text-emerald-500 animate-bounce" />
-              <Badge variant="outline" className="text-[10px] text-emerald-600 bg-emerald-500/15 border-emerald-500/30 font-bold">
-                Cần quét QR giao
-              </Badge>
-            </div>
-            <p className="mt-3 font-display text-3xl font-bold text-emerald-600 dark:text-emerald-400">{totalReady}</p>
-            <p className="text-xs text-muted-foreground font-medium mt-0.5">Sách đã sẵn sàng tại quầy nhận</p>
-          </CardContent>
-        </Card>
-
-        <Card className="border-border/80 shadow-xs">
-          <CardContent className="p-5">
-            <div className="flex items-center justify-between">
-              <CheckCircle2 className="h-5 w-5 text-muted-foreground" />
-              <Badge variant="outline" className="text-[10px] text-muted-foreground">
-                Hoàn tất
-              </Badge>
-            </div>
-            <p className="mt-3 font-display text-3xl font-bold text-muted-foreground">{totalCompleted}</p>
-            <p className="text-xs text-muted-foreground font-medium mt-0.5">Yêu cầu đã giao sách thành công</p>
-          </CardContent>
-        </Card>
-      </div>
-
-      {/* Main Reservation Management Table */}
-      <Card className="border-border/80 shadow-xs">
-        <CardHeader className="pb-3 border-b border-border/50">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <CardTitle className="font-display text-base">Hàng đợi & Quản lý Đặt trước sách</CardTitle>
-              <CardDescription className="text-xs">
-                Xác thực mã QR độc giả trước khi bàn giao sách để đảm bảo tính chính xác và an toàn tuyệt đối.
-              </CardDescription>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => navigate("/borrow")}
+                className="h-8 text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 shrink-0"
+              >
+                <QrCode className="h-3.5 w-3.5" />
+                <span>Xem Thẻ Thư Viện Cá Nhân</span>
+                <ArrowRight className="h-3 w-3" />
+              </Button>
             </div>
 
-            <div className="relative w-full sm:w-64">
-              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
-              <Input
-                value={searchFilter}
-                onChange={(e) => setSearchFilter(e.target.value)}
-                placeholder="Tìm tên sách, độc giả, mã thẻ..."
-                className="h-8 pl-8 text-xs bg-muted/30"
-              />
+            {/* Quy trình ngắn gọn */}
+            <div className="mt-4 pt-3 border-t border-border/50 grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px] text-muted-foreground">
+              <div className="flex items-start gap-2">
+                <span className="font-bold text-primary shrink-0">1. Xếp hàng:</span>
+                <span>Khi sách hết bản sao, bạn đăng ký đặt trước và nhận số thứ tự trong hàng đợi.</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="font-bold text-amber-600 dark:text-amber-400 shrink-0">2. Giữ sách 48h:</span>
+                <span>Khi sách có người trả về, hệ thống giữ sách ưu tiên và hỏi bạn có muốn mượn không.</span>
+              </div>
+              <div className="flex items-start gap-2">
+                <span className="font-bold text-emerald-600 dark:text-emerald-400 shrink-0">3. Nhận tại quầy:</span>
+                <span>Bạn bấm <strong>[Đồng ý mượn]</strong> và đến thư viện lấy sách đem đến quầy đưa Thẻ độc giả + mã sách để thủ thư quét xác nhận giao sách.</span>
+              </div>
             </div>
           </div>
-        </CardHeader>
 
-        <CardContent className="p-0">
-          {loading ? (
-            <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-              <p className="text-xs">Đang tải danh sách đặt trước...</p>
-            </div>
-          ) : filteredReservations.length === 0 ? (
-            <div className="text-center py-16 text-muted-foreground">
-              <BookOpen className="h-10 w-10 mx-auto text-muted-foreground/50 mb-2" />
-              <p className="text-sm font-medium text-foreground">Không tìm thấy yêu cầu đặt trước nào</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                {searchFilter ? "Không có kết quả khớp với từ khóa tìm kiếm." : "Hiện không có độc giả nào đang đặt trước sách."}
-              </p>
-            </div>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className="bg-muted/40">
-                  <TableHead className="w-20">Mã phiếu</TableHead>
-                  <TableHead>Tên sách</TableHead>
-                  <TableHead>Độc giả đặt trước</TableHead>
-                  <TableHead>Ngày đăng ký</TableHead>
-                  <TableHead>Trạng thái</TableHead>
-                  <TableHead className="text-right">Thao tác & Xác thực QR</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredReservations.map((r) => (
-                  <TableRow key={r.id} className={r.status === "ready" ? "bg-emerald-500/[0.03]" : ""}>
-                    <TableCell className="font-mono text-xs font-semibold">
-                      <span className="text-primary">#RES-{r.id}</span>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2.5">
-                        <div className="h-9 w-7 shrink-0 rounded bg-muted overflow-hidden border border-border">
-                          {r.cover_image ? (
-                            <img src={r.cover_image} alt={r.book_title} className="h-full w-full object-cover" />
+          {/* KHU VỰC 1: SÁCH ĐÃ CÓ VỀ KHO - CẦN ĐỘC GIẢ PHẢN HỒI (NOTIFIED) */}
+          {readerNotifiedList.length > 0 && (
+            <Card className="border-amber-500/40 bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-transparent shadow-sm">
+              <CardHeader className="pb-3 border-b border-amber-500/20">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2.5">
+                    <div className="h-8 w-8 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 grid place-items-center animate-bounce">
+                      <Sparkles className="h-4.5 w-4.5" />
+                    </div>
+                    <div>
+                      <CardTitle className="font-display text-base text-amber-800 dark:text-amber-300">
+                        🎉 Sách Bạn Đặt Trước Đã Có Mặt Tại Thư Viện! ({readerNotifiedList.length})
+                      </CardTitle>
+                      <CardDescription className="text-xs text-amber-700/80 dark:text-amber-400/80">
+                        Đầu sách đã được hoàn trả về kho và đang ưu tiên giữ riêng cho bạn trong 48 giờ. Vui lòng xác nhận bạn có muốn mượn không.
+                      </CardDescription>
+                    </div>
+                  </div>
+                  <Badge className="bg-amber-600 text-white text-[10px] animate-pulse">Cần bạn xác nhận</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="p-4 space-y-3">
+                {readerNotifiedList.map((resv) => (
+                  <div
+                    key={resv.id}
+                    className="p-4 rounded-xl border border-amber-500/30 bg-card shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4"
+                  >
+                    <div className="flex items-start gap-3.5">
+                      <div className="h-16 w-12 rounded bg-muted overflow-hidden shrink-0 border border-border">
+                        {resv.cover_image ? (
+                          <img src={resv.cover_image} alt={resv.book_title} className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="h-full w-full grid place-items-center bg-primary/10 text-primary font-bold text-xs">
+                            {resv.book_title[0]}
+                          </div>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <h3 className="font-bold text-sm text-foreground">{resv.book_title}</h3>
+                          <Badge variant="outline" className="font-mono text-[10px] text-primary border-primary/30">
+                            #RES-{resv.id}
+                          </Badge>
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          Bạn đã đặt trước vào ngày: {new Date(resv.reservation_date).toLocaleDateString("vi-VN")}
+                        </p>
+                        <div className="flex items-center gap-2 text-xs font-semibold text-amber-700 dark:text-amber-400">
+                          <Clock className="h-3.5 w-3.5" />
+                          <span>
+                            Hạn giữ sách ưu tiên: {resv.time_left_hours !== null && resv.time_left_hours !== undefined ? `Còn ${resv.time_left_hours} giờ` : "Trong vòng 48 giờ"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono mt-1">
+                          <span>📍 Vị trí trong thư viện:</span>
+                          <span className="font-semibold text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenMiniMap({ location: resv.book_location || resv.location, title: resv.book_title, cover_image: resv.cover_image })}
+                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5"
+                            title="Xem sơ đồ chỉ đường"
+                          >
+                            🗺️ Sơ đồ
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 2 Nút hành động nổi bật */}
+                    <div className="flex items-center gap-2 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 border-border/50">
+                      <Button
+                        size="sm"
+                        onClick={() => handleRespondReservation(resv.id, "accept", resv.book_title)}
+                        className="h-8 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-xs"
+                      >
+                        <ThumbsUp className="h-3.5 w-3.5" />
+                        <span>Đồng ý mượn & Giữ sách</span>
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRespondReservation(resv.id, "decline", resv.book_title)}
+                        className="h-8 text-xs gap-1.5 text-muted-foreground hover:text-destructive hover:border-destructive/30"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        <span>Không mượn / Nhường lượt</span>
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* KHU VỰC 2: SÁCH ĐÃ XÁC NHẬN - SẴN SÀNG NHẬN TẠI QUẦY (ACCEPTED / READY) */}
+          {readerReadyList.length > 0 && (
+            <Card className="border-emerald-500/40 bg-emerald-500/[0.03] shadow-xs">
+              <CardHeader className="pb-3 border-b border-emerald-500/20">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+                    <div>
+                      <CardTitle className="font-display text-base text-emerald-800 dark:text-emerald-300">
+                        Sách Đã Xác Nhận - Sẵn Sàng Nhận Tại Quầy ({readerReadyList.length})
+                      </CardTitle>
+                      <CardDescription className="text-xs">
+                        Sách đang được giữ riêng tại quầy thủ thư. Bạn không cần tìm trên kệ, chỉ cần đến quầy xuất trình Thẻ độc giả.
+                      </CardDescription>
+                    </div>
+                  </div>
+                  <Badge className="bg-emerald-600 text-white text-[10px]">Giữ tại quầy</Badge>
+                </div>
+              </CardHeader>
+              <CardContent className="p-4 space-y-3">
+                {readerReadyList.map((resv) => (
+                  <div
+                    key={resv.id}
+                    className="p-4 rounded-xl border border-emerald-500/30 bg-card shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-3"
+                  >
+                    <div className="flex items-start gap-3.5">
+                      <div className="h-14 w-11 rounded bg-muted overflow-hidden shrink-0 border border-border">
+                        {resv.cover_image ? (
+                          <img src={resv.cover_image} alt={resv.book_title} className="h-full w-full object-cover" />
+                        ) : (
+                          <div className="h-full w-full grid place-items-center bg-primary/10 text-primary font-bold text-xs">
+                            {resv.book_title[0]}
+                          </div>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <h4 className="font-bold text-xs text-foreground">{resv.book_title}</h4>
+                          <Badge variant="outline" className="text-[9px] bg-emerald-50 text-emerald-700 border-emerald-300">
+                            Đã giữ sách
+                          </Badge>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                          Thủ thư đang giữ sẵn ấn phẩm này tại quầy lưu thông. Khi đến nhận, bạn chỉ cần mở mục <strong>Mượn / Trả qua QR</strong> để đưa Thẻ độc giả QR.
+                        </p>
+                        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground font-mono mt-1">
+                          <span>📍 Vị trí lưu kho gốc:</span>
+                          <span className="font-semibold text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenMiniMap({ location: resv.book_location || resv.location, title: resv.book_title, cover_image: resv.cover_image })}
+                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5"
+                            title="Xem sơ đồ chỉ đường"
+                          >
+                            🗺️ Sơ đồ
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0 pt-2 md:pt-0 border-t md:border-t-0">
+                      <Button
+                        size="sm"
+                        onClick={() => navigate("/borrow")}
+                        className="h-8 text-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
+                      >
+                        <QrCode className="h-3.5 w-3.5" />
+                        <span>Mở Thẻ QR Độc Giả</span>
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleCancel(resv.id, resv.book_title)}
+                        className="h-8 text-xs text-destructive hover:bg-destructive/10"
+                        title="Hủy không nhận sách này nữa"
+                      >
+                        <X className="h-3.5 w-3.5 mr-0.5" /> Hủy giữ
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          )}
+
+          {/* KHU VỰC 3: SÁCH ĐANG CHỜ TRONG HÀNG ĐỢI (WAITING / PENDING) */}
+          <Card className="border-border/80 shadow-xs">
+            <CardHeader className="pb-3 border-b border-border/50">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="font-display text-base flex items-center gap-2">
+                    <Clock className="h-5 w-5 text-amber-500" />
+                    <span>Sách Đang Trong Hàng Đợi Chờ Sách Về Kho ({readerWaitingList.length})</span>
+                  </CardTitle>
+                  <CardDescription className="text-xs">
+                    Các cuốn sách bạn yêu thích nhưng hiện đang hết bản sao. Hệ thống sẽ tự động xếp bạn vào hàng đợi và báo ngay khi có sách.
+                  </CardDescription>
+                </div>
+              </div>
+            </CardHeader>
+            <CardContent className="p-4">
+              {readerWaitingList.length === 0 ? (
+                <div className="text-center py-10 border border-dashed rounded-xl bg-muted/20">
+                  <BookOpen className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
+                  <p className="text-xs font-semibold text-foreground">Bạn chưa có cuốn sách nào trong hàng đợi</p>
+                  <p className="text-[11px] text-muted-foreground mt-0.5 max-w-sm mx-auto">
+                    Khi tìm kiếm sách trong thư viện thấy sách đã hết bản sao, bạn hãy bấm nút <em>"Hết sách • Đặt trước"</em> để xếp hàng nhé!
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => navigate("/books")}
+                    className="mt-3 h-7 text-xs gap-1 border-primary/30 text-primary hover:bg-primary/10"
+                  >
+                    <span>Khám phá danh mục sách</span>
+                    <ArrowRight className="h-3 w-3" />
+                  </Button>
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {readerWaitingList.map((resv) => (
+                    <div
+                      key={resv.id}
+                      className="p-3.5 rounded-xl border border-border bg-card shadow-xs flex flex-col justify-between space-y-3"
+                    >
+                      <div className="flex items-start gap-3">
+                        <div className="h-14 w-11 rounded bg-muted overflow-hidden shrink-0 border border-border">
+                          {resv.cover_image ? (
+                            <img src={resv.cover_image} alt={resv.book_title} className="h-full w-full object-cover" />
                           ) : (
-                            <div className="h-full w-full grid place-items-center bg-primary/10 text-primary text-[10px] font-bold">
-                              {r.book_title[0]}
+                            <div className="h-full w-full grid place-items-center bg-primary/10 text-primary font-bold text-xs">
+                              {resv.book_title[0]}
                             </div>
                           )}
                         </div>
-                        <div className="min-w-0">
-                          <p className="font-semibold text-xs text-foreground truncate max-w-[220px]">{r.book_title}</p>
-                          <p className="text-[10px] text-muted-foreground font-mono">TICKET-RES-{r.id}</p>
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <h4 className="font-semibold text-xs text-foreground truncate">{resv.book_title}</h4>
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <Badge className="bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px] font-bold">
+                              Hàng đợi: Vị trí #{resv.queue_position || 1}
+                            </Badge>
+                            <span className="text-[10px] text-muted-foreground">
+                              Đăng ký: {new Date(resv.reservation_date).toLocaleDateString("vi-VN")}
+                            </span>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">
+                            Sách hiện đang được độc giả khác mượn. Khi có người trả sách về thư viện, hệ thống sẽ ưu tiên gửi thông báo cho bạn.
+                          </p>
+                          <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-mono mt-1">
+                            <span>📍 Vị trí kệ:</span>
+                            <span className="font-medium text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
+                          </div>
                         </div>
                       </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="text-xs">
-                        <p className="font-medium text-foreground">{r.reader_name}</p>
-                        <p className="text-[10px] text-muted-foreground font-mono">
-                          {r.card_number || "Chưa cấp mã thẻ"}
-                          {r.reader_phone ? ` • ${r.reader_phone}` : ""}
-                        </p>
+
+                      <div className="pt-2 border-t border-border/50 flex justify-end">
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => handleCancel(resv.id, resv.book_title)}
+                          className="h-7 text-xs text-destructive hover:bg-destructive/10 gap-1 px-2"
+                        >
+                          <XCircle className="h-3.5 w-3.5" />
+                          <span>Hủy đặt trước</span>
+                        </Button>
                       </div>
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {new Date(r.reservation_date).toLocaleDateString("vi-VN", {
-                        day: "2-digit",
-                        month: "2-digit",
-                        year: "numeric",
-                        hour: "2-digit",
-                        minute: "2-digit"
-                      })}
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className={`text-[10px] ${statusMap[r.status]?.cls || ""}`}>
-                        {statusMap[r.status]?.label || r.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        {/* If status is ready and user is Librarian/Admin -> Quét QR Giao Sách */}
-                        {r.status === "ready" && canManage && (
-                          <Button
-                            size="sm"
-                            onClick={() => handleOpenHandoverModal(r)}
-                            className="h-7 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs font-semibold"
-                          >
-                            <QrCode className="h-3.5 w-3.5" />
-                            <span>Quét QR Giao sách</span>
-                          </Button>
-                        )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
 
-                        {/* Reader can click to show their QR Code Ticket */}
-                        {r.status === "ready" && !canManage && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            onClick={() => handleOpenTicketModal(r)}
-                            className="h-7 text-xs gap-1 border-emerald-500/40 text-emerald-600 hover:bg-emerald-500/10 font-medium"
-                          >
-                            <QrCode className="h-3.5 w-3.5" />
-                            <span>Mã QR nhận sách</span>
-                          </Button>
-                        )}
-
-                        {/* If pending, reader can also see their ticket code */}
-                        {r.status === "pending" && !canManage && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            onClick={() => handleOpenTicketModal(r)}
-                            className="h-7 text-xs gap-1 text-muted-foreground hover:text-foreground"
-                          >
-                            <QrCode className="h-3.5 w-3.5" />
-                            <span>Mã phiếu</span>
-                          </Button>
-                        )}
-
-                        {/* Cancel button */}
-                        {(r.status === "pending" || r.status === "ready") && (
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 text-xs text-destructive hover:bg-destructive/10"
-                            onClick={() => handleCancel(r.id)}
-                            title="Hủy phiếu đặt trước"
-                          >
-                            <X className="h-3.5 w-3.5 mr-0.5" /> Hủy
-                          </Button>
-                        )}
-
-                        {r.status === "completed" && (
-                          <span className="text-xs text-muted-foreground italic flex items-center gap-1">
-                            <CheckCircle2 className="h-3 w-3 text-emerald-500" /> Đã giao xong
-                          </span>
-                        )}
-
-                        {r.status === "cancelled" && (
-                          <span className="text-xs text-muted-foreground line-through">Đã hủy</span>
-                        )}
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+          {/* KHU VỰC 4: LỊCH SỬ ĐẶT TRƯỚC (COMPLETED / CANCELLED) */}
+          {readerHistoryList.length > 0 && (
+            <Card className="border-border/60 shadow-xs">
+              <CardHeader className="pb-3 border-b border-border/50">
+                <CardTitle className="font-display text-sm text-muted-foreground flex items-center gap-2">
+                  <BookmarkCheck className="h-4 w-4" />
+                  <span>Lịch Sử Đặt Trước ({readerHistoryList.length})</span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/30">
+                      <TableHead className="w-20 text-[11px]">Mã phiếu</TableHead>
+                      <TableHead className="text-[11px]">Tên sách</TableHead>
+                      <TableHead className="text-[11px]">Ngày đăng ký</TableHead>
+                      <TableHead className="text-right text-[11px]">Kết quả</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {readerHistoryList.map((r) => (
+                      <TableRow key={r.id}>
+                        <TableCell className="font-mono text-[11px] text-muted-foreground">#RES-{r.id}</TableCell>
+                        <TableCell className="font-medium text-xs text-foreground">{r.book_title}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {new Date(r.reservation_date).toLocaleDateString("vi-VN")}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Badge variant="outline" className={`text-[10px] ${statusMap[r.status]?.cls || ""}`}>
+                            {statusMap[r.status]?.label || r.status}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      ) : (
+        /* ======================================================== */
+        /* 2. GIAO DIỆN DÀNH CHO THỦ THƯ & ADMIN (STAFF VIEW) */
+        /* ======================================================== */
+        <div className="space-y-6">
+          {/* Metrics Row */}
+          <div className="grid gap-4 md:grid-cols-4">
+            <Card className="border-border/80 shadow-xs">
+              <CardContent className="p-5">
+                <div className="flex items-center justify-between">
+                  <Clock className="h-5 w-5 text-amber-500" />
+                  <Badge variant="outline" className="text-[10px] text-amber-600 bg-amber-500/10 border-amber-500/20">
+                    Chờ sách về
+                  </Badge>
+                </div>
+                <p className="mt-3 font-display text-3xl font-bold">{totalWaiting}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-0.5">Độc giả đang xếp hàng đợi</p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-blue-500/30 bg-blue-500/[0.03] shadow-xs">
+              <CardContent className="p-5">
+                <div className="flex items-center justify-between">
+                  <Bell className="h-5 w-5 text-blue-500 animate-pulse" />
+                  <Badge variant="outline" className="text-[10px] text-blue-600 bg-blue-500/15 border-blue-500/30 font-bold">
+                    Đang giữ 48h
+                  </Badge>
+                </div>
+                <p className="mt-3 font-display text-3xl font-bold text-blue-600 dark:text-blue-400">{totalNotified}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-0.5">Chờ độc giả phản hồi mượn</p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-emerald-500/30 bg-emerald-500/[0.03] shadow-xs">
+              <CardContent className="p-5">
+                <div className="flex items-center justify-between">
+                  <QrCode className="h-5 w-5 text-emerald-500" />
+                  <Badge variant="outline" className="text-[10px] text-emerald-600 bg-emerald-500/15 border-emerald-500/30 font-bold">
+                    Cần quét giao
+                  </Badge>
+                </div>
+                <p className="mt-3 font-display text-3xl font-bold text-emerald-600 dark:text-emerald-400">{totalHold}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-0.5">Sách giữ tại quầy chờ lấy</p>
+              </CardContent>
+            </Card>
+
+            <Card className="border-border/80 shadow-xs">
+              <CardContent className="p-5">
+                <div className="flex items-center justify-between">
+                  <CheckCircle2 className="h-5 w-5 text-muted-foreground" />
+                  <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                    Hoàn tất
+                  </Badge>
+                </div>
+                <p className="mt-3 font-display text-3xl font-bold text-muted-foreground">{totalCompleted}</p>
+                <p className="text-xs text-muted-foreground font-medium mt-0.5">Đã bàn giao sách thành công</p>
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* Main Reservation Management Table */}
+          <Card className="border-border/80 shadow-xs">
+            <CardHeader className="pb-3 border-b border-border/50">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <CardTitle className="font-display text-base">Hàng Đợi & Quản Lý Đặt Trước Sách</CardTitle>
+                  <CardDescription className="text-xs">
+                    Theo dõi hàng đợi của các đầu sách hết bản sao. Khi sách trả về, hệ thống tự động giữ sách 48h cho độc giả đầu hàng đợi.
+                  </CardDescription>
+                </div>
+
+                <div className="relative w-full sm:w-64">
+                  <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
+                  <Input
+                    value={searchFilter}
+                    onChange={(e) => setSearchFilter(e.target.value)}
+                    placeholder="Tìm tên sách, độc giả, mã thẻ..."
+                    className="h-8 pl-8 text-xs bg-muted/30"
+                  />
+                </div>
+              </div>
+
+              {/* Filter Tabs for Staff */}
+              <div className="flex flex-wrap gap-1.5 pt-3">
+                {[
+                  { id: "all", label: "Tất cả", count: resList.length },
+                  { id: "hold", label: "Giữ tại quầy chờ giao", count: totalHold },
+                  { id: "notified", label: "Đang chờ phản hồi (48h)", count: totalNotified },
+                  { id: "waiting", label: "Hàng đợi chờ sách về", count: totalWaiting },
+                  { id: "history", label: "Lịch sử", count: totalCompleted },
+                ].map((tab) => (
+                  <Button
+                    key={tab.id}
+                    variant={adminTab === tab.id ? "default" : "secondary"}
+                    size="sm"
+                    onClick={() => setAdminTab(tab.id as typeof adminTab)}
+                    className={`h-7 px-2.5 text-xs rounded-md ${adminTab === tab.id ? "font-semibold" : "bg-muted/60 text-muted-foreground hover:text-foreground"}`}
+                  >
+                    <span>{tab.label}</span>
+                    <span className={`ml-1.5 rounded-full px-1.5 py-0.2 text-[10px] ${adminTab === tab.id ? "bg-primary-foreground text-primary font-bold" : "bg-muted text-muted-foreground"}`}>
+                      {tab.count}
+                    </span>
+                  </Button>
+                ))}
+              </div>
+            </CardHeader>
+
+            <CardContent className="p-0">
+              {loading ? (
+                <div className="flex flex-col items-center justify-center py-16 text-muted-foreground gap-2">
+                  <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+                  <p className="text-xs">Đang tải danh sách đặt trước...</p>
+                </div>
+              ) : filteredStaffList.length === 0 ? (
+                <div className="text-center py-16 text-muted-foreground">
+                  <BookOpen className="h-10 w-10 mx-auto text-muted-foreground/50 mb-2" />
+                  <p className="text-sm font-medium text-foreground">Không tìm thấy yêu cầu đặt trước nào</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    {searchFilter ? "Không có kết quả khớp với từ khóa tìm kiếm." : "Hiện không có yêu cầu nào trong mục này."}
+                  </p>
+                </div>
+              ) : (
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/40">
+                      <TableHead className="w-20">Mã phiếu</TableHead>
+                      <TableHead>Tên sách</TableHead>
+                      <TableHead>Độc giả đặt trước</TableHead>
+                      <TableHead>Vị trí kho</TableHead>
+                      <TableHead>Ngày đăng ký / Thứ tự</TableHead>
+                      <TableHead>Trạng thái</TableHead>
+                      <TableHead className="text-right">Thao tác & Bàn giao</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredStaffList.map((r) => (
+                      <TableRow key={r.id} className={["accepted", "ready"].includes(r.status) ? "bg-emerald-500/[0.03]" : r.status === "notified" ? "bg-blue-500/[0.02]" : ""}>
+                        <TableCell className="font-mono text-xs font-semibold">
+                          <span className="text-primary">#RES-{r.id}</span>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-2.5">
+                            <div className="h-9 w-7 shrink-0 rounded bg-muted overflow-hidden border border-border">
+                              {r.cover_image ? (
+                                <img src={r.cover_image} alt={r.book_title} className="h-full w-full object-cover" />
+                              ) : (
+                                <div className="h-full w-full grid place-items-center bg-primary/10 text-primary text-[10px] font-bold">
+                                  {r.book_title[0]}
+                                </div>
+                              )}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="font-semibold text-xs text-foreground truncate max-w-[220px]">{r.book_title}</p>
+                              <p className="text-[10px] text-muted-foreground font-mono">TICKET-RES-{r.id}</p>
+                            </div>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="text-xs">
+                            <p className="font-medium text-foreground">{r.reader_name}</p>
+                            <p className="text-[10px] text-muted-foreground font-mono">
+                              {r.card_number || "Chưa cấp mã thẻ"}
+                              {r.reader_phone ? ` • ${r.reader_phone}` : ""}
+                            </p>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1 text-xs font-mono">
+                            <span className="text-muted-foreground">📍</span>
+                            <span className="font-semibold text-foreground">
+                              {r.book_location || r.location || "Phòng 01 - Kệ 01 - Ngăn 01"}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenMiniMap({ location: r.book_location || r.location, title: r.book_title, cover_image: r.cover_image })}
+                              className="text-[10px] text-primary hover:underline ml-1 font-semibold"
+                              title="Xem sơ đồ kệ trên bản đồ"
+                            >
+                              🗺️
+                            </button>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          <div>
+                            {new Date(r.reservation_date).toLocaleDateString("vi-VN", {
+                              day: "2-digit",
+                              month: "2-digit",
+                              year: "numeric"
+                            })}
+                          </div>
+                          {["waiting", "pending"].includes(r.status) && (
+                            <Badge variant="outline" className="text-[9px] mt-0.5 bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20">
+                              Hàng đợi #{r.queue_position || 1}
+                            </Badge>
+                          )}
+                          {r.status === "notified" && (
+                            <span className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold block mt-0.5">
+                              ⏱️ Còn {r.time_left_hours !== null && r.time_left_hours !== undefined ? `${r.time_left_hours}h` : "48h"}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline" className={`text-[10px] ${statusMap[r.status]?.cls || ""}`}>
+                            {statusMap[r.status]?.label || r.status}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {/* If status is accepted/ready -> Quét QR Giao Sách */}
+                            {["accepted", "ready"].includes(r.status) && (
+                              <Button
+                                size="sm"
+                                onClick={() => handleOpenHandoverModal(r)}
+                                className="h-7 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs font-semibold"
+                              >
+                                <QrCode className="h-3.5 w-3.5" />
+                                <span>Quét QR Giao sách</span>
+                              </Button>
+                            )}
+
+                            {/* If status is notified -> Thủ thư có thể chủ động chuyển lượt nếu độc giả báo không lấy */}
+                            {r.status === "notified" && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => handleRespondReservation(r.id, "decline", r.book_title)}
+                                className="h-7 text-xs gap-1 border-amber-500/30 text-amber-700 dark:text-amber-400 hover:bg-amber-500/10"
+                                title="Chuyển lượt cho độc giả tiếp theo trong hàng đợi"
+                              >
+                                <RotateCcw className="h-3 w-3" />
+                                <span>Chuyển lượt</span>
+                              </Button>
+                            )}
+
+                            {/* Cancel button */}
+                            {["waiting", "pending", "accepted", "ready"].includes(r.status) && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                className="h-7 text-xs text-destructive hover:bg-destructive/10"
+                                onClick={() => handleCancel(r.id, r.book_title)}
+                                title="Hủy phiếu đặt trước"
+                              >
+                                <X className="h-3.5 w-3.5 mr-0.5" /> Hủy
+                              </Button>
+                            )}
+
+                            {r.status === "completed" && (
+                              <span className="text-xs text-muted-foreground italic flex items-center gap-1">
+                                <CheckCircle2 className="h-3 w-3 text-emerald-500" /> Đã giao xong
+                              </span>
+                            )}
+
+                            {r.status === "cancelled" && (
+                              <span className="text-xs text-muted-foreground line-through">Đã hủy</span>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              )}
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* ======================================================== */}
-      {/* MODAL 1: XÁC THỰC QUÉT MÃ QR GIAO SÁCH (CHO THỦ THƯ) */}
+      {/* MODAL XÁC THỰC QUÉT MÃ QR GIAO SÁCH (CHO THỦ THƯ) */}
       {/* ======================================================== */}
       <Dialog open={handoverModalOpen} onOpenChange={(open) => !open && handleCloseHandoverModal()}>
-        <DialogContent className="sm:max-w-[540px]">
+        <DialogContent className="w-[95vw] sm:max-w-[540px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="font-display flex items-center gap-2 text-base">
               <QrCode className="h-5 w-5 text-emerald-600" />
               <span>Xác thực mã QR & Bàn giao sách đặt trước</span>
             </DialogTitle>
             <DialogDescription className="text-xs">
-              Thủ thư bắt buộc phải quét mã QR trên điện thoại độc giả hoặc mã thẻ thư viện để đối soát chính xác trước khi giao sách.
+              Thủ thư quét mã QR Thẻ độc giả (hoặc mã phiếu) và mã QR trên cuốn sách vật lý giữ tại quầy trước khi giao.
             </DialogDescription>
           </DialogHeader>
 
@@ -617,7 +1098,19 @@ export default function ReservationsPage() {
                   <div className="min-w-0">
                     <p className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider">Đầu sách cần giao</p>
                     <p className="font-bold text-foreground text-sm truncate mt-0.5">{selectedResv.book_title}</p>
-                    <p className="text-[11px] text-muted-foreground font-mono">Mã phiếu: TICKET-RES-{selectedResv.id}</p>
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                      <p className="text-[11px] text-muted-foreground font-mono">Phiếu: #RES-{selectedResv.id}</p>
+                      <span className="text-muted-foreground">•</span>
+                      <p className="text-[11px] font-mono font-medium text-foreground">📍 {selectedResv.book_location || selectedResv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</p>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenMiniMap({ location: selectedResv.book_location || selectedResv.location, title: selectedResv.book_title, cover_image: selectedResv.cover_image })}
+                        className="text-[10px] text-primary hover:underline font-bold flex items-center gap-0.5 ml-1"
+                        title="Xem sơ đồ chỉ đường"
+                      >
+                        🗺️ Sơ đồ
+                      </button>
+                    </div>
                   </div>
                   <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30 text-[10px] shrink-0 font-semibold">
                     Sách đã sẵn sàng
@@ -643,7 +1136,7 @@ export default function ReservationsPage() {
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold flex items-center gap-1.5 text-foreground">
                     <Camera className="h-3.5 w-3.5 text-primary" />
-                    <span>Quét mã QR từ độc giả</span>
+                    <span>Quét mã QR từ Thẻ độc giả</span>
                   </label>
                   <div className="flex items-center gap-2">
                     <Button
@@ -680,19 +1173,18 @@ export default function ReservationsPage() {
                         {isCameraStarting
                           ? "Đang kết nối..."
                           : isCameraActive
-                          ? "Tắt Camera"
-                          : "Bật Camera Quét"}
+                            ? "Tắt Camera"
+                            : "Bật Camera Quét"}
                       </span>
                     </Button>
                   </div>
                 </div>
 
-                {/* HTML5 QR Code Scanner Element (Always in DOM with proper dimensions when active) */}
+                {/* HTML5 QR Code Scanner Element */}
                 <div
                   id="handover-qr-reader"
-                  className={`overflow-hidden rounded-xl border border-dashed border-border bg-black/5 text-center transition-all ${
-                    isCameraActive ? "block min-h-[260px] w-full p-2" : "hidden"
-                  }`}
+                  className={`overflow-hidden rounded-xl border border-dashed border-border bg-black/5 text-center transition-all ${isCameraActive ? "block min-h-[240px] w-full p-2" : "hidden"
+                    }`}
                 />
                 <div id="handover-qr-reader-file-temp" className="hidden" />
 
@@ -702,7 +1194,7 @@ export default function ReservationsPage() {
                   <Input
                     value={scannedCodeInput}
                     onChange={(e) => setScannedCodeInput(e.target.value)}
-                    placeholder={`Nhập hoặc quét mã: TICKET-RES-${selectedResv.id} hoặc ${selectedResv.card_number || "Mã thẻ"}`}
+                    placeholder={`Quét thẻ độc giả (${selectedResv.card_number || "Mã thẻ"}) hoặc nhập TICKET-RES-${selectedResv.id}`}
                     className="pl-9 text-xs font-mono font-medium h-9 bg-card border-border/80"
                   />
                   {scannedCodeInput && (
@@ -736,7 +1228,7 @@ export default function ReservationsPage() {
                       <div>
                         <p className="font-bold">CẢNH BÁO: MÃ QR KHÔNG KHỚP!</p>
                         <p className="text-[11px] mt-0.5 leading-relaxed">
-                          Mã quét được [<strong>{scannedCodeInput}</strong>] không thuộc về độc giả <strong>{selectedResv.reader_name}</strong> của phiếu đặt trước này. Tuyệt đối không được giao sách cho người khác!
+                          Mã quét được [<strong>{scannedCodeInput}</strong>] không thuộc về độc giả <strong>{selectedResv.reader_name}</strong>. Tuyệt đối không giao sách nhầm người!
                         </p>
                       </div>
                     </div>
@@ -744,11 +1236,11 @@ export default function ReservationsPage() {
                 </div>
               )}
 
-              {/* Mã QR bản sao cuốn sách vật lý độc giả mang tới */}
+              {/* Mã QR bản sao cuốn sách vật lý giữ tại quầy */}
               <div className="space-y-1.5 border-t border-border/50 pt-3">
                 <label className="text-[11px] text-foreground font-semibold flex items-center justify-between">
                   <span className="flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
-                    <QrCode className="h-3.5 w-3.5" /> Mã QR trên cuốn sách vật lý độc giả mang tới (*)
+                    <QrCode className="h-3.5 w-3.5" /> Mã QR trên cuốn sách vật lý giữ tại quầy (*)
                   </span>
                   <span className="text-[10px] text-muted-foreground">Bắt buộc quét đúng sách</span>
                 </label>
@@ -780,83 +1272,14 @@ export default function ReservationsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* ======================================================== */}
-      {/* MODAL 2: XEM MÃ QR NHẬN SÁCH (CHO ĐỘC GIẢ XUẤT TRÌNH & TẢI VỀ) */}
-      {/* ======================================================== */}
-      <Dialog open={ticketModalOpen} onOpenChange={setTicketModalOpen}>
-        <DialogContent className="sm:max-w-[400px] text-center">
-          <DialogHeader>
-            <DialogTitle className="font-display text-base">Mã QR Phiếu nhận sách</DialogTitle>
-            <DialogDescription className="text-xs">
-              Xuất trình mã này tại quầy để thủ thư quét xác thực, hoặc tải ảnh về máy để tiện sử dụng khi không có mạng.
-            </DialogDescription>
-          </DialogHeader>
-
-          {ticketForReader && (
-            <div className="flex flex-col items-center py-3 space-y-4">
-              {/* QR Code Canvas */}
-              <div className="rounded-2xl border-2 border-primary/20 bg-white p-4 shadow-md">
-                <QRCodeCanvas
-                  id="reader-reservation-qr-canvas"
-                  value={`TICKET-RES-${ticketForReader.id}`}
-                  size={200}
-                  level="H"
-                  includeMargin={false}
-                />
-              </div>
-
-              {/* Ticket Details */}
-              <div className="space-y-1.5 w-full">
-                <div className="flex items-center justify-center gap-1.5">
-                  <Badge variant="outline" className="font-mono text-xs font-bold text-primary border-primary/30 px-3 py-1 bg-primary/5">
-                    TICKET-RES-{ticketForReader.id}
-                  </Badge>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={() => handleCopyTicketCode(`TICKET-RES-${ticketForReader.id}`)}
-                    className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                    title="Sao chép mã phiếu"
-                  >
-                    {copiedCode ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-                  </Button>
-                </div>
-
-                <p className="font-bold text-sm text-foreground">{ticketForReader.book_title}</p>
-                <p className="text-xs text-muted-foreground">
-                  Độc giả: <strong>{ticketForReader.reader_name}</strong> {ticketForReader.card_number ? `(${ticketForReader.card_number})` : ""}
-                </p>
-              </div>
-
-              {/* Status Alert */}
-              <div className="w-full rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-2.5 text-[11px] text-emerald-700 dark:text-emerald-300">
-                {ticketForReader.status === "ready" ? (
-                  <span>✅ Sách đã có sẵn tại quầy! Vui lòng đến nhận trong vòng 48 giờ.</span>
-                ) : (
-                  <span>⏳ Đang chờ sách được hoàn trả về kho. Hệ thống sẽ thông báo ngay khi có sách.</span>
-                )}
-              </div>
-
-              {/* Download QR Image Button for Reader */}
-              <Button
-                type="button"
-                size="sm"
-                onClick={() => handleDownloadQr(`Phieu-Nhan-Sach-RES-${ticketForReader.id}`)}
-                className="w-full text-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs"
-              >
-                <Download className="h-4 w-4" />
-                <span>Tải ảnh mã QR về máy</span>
-              </Button>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setTicketModalOpen(false)} className="w-full text-xs">
-              Đóng
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Mini Map Navigation Modal */}
+      <LibraryMiniMapModal
+        open={miniMapOpen}
+        onOpenChange={setMiniMapOpen}
+        location={miniMapTarget?.location}
+        bookTitle={miniMapTarget?.title}
+        coverImage={miniMapTarget?.cover}
+      />
 
       {ConfirmDialogComponent}
     </div>

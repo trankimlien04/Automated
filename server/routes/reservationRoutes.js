@@ -14,7 +14,11 @@ router.put('/:id/cancel', authenticateToken, reservationController.cancelReserva
 router.delete('/:id', authenticateToken, reservationController.cancelReservation);
 router.delete('/:id/cancel', authenticateToken, reservationController.cancelReservation);
 
+// Respond to reservation when book is available (reader accepts or declines)
+router.post('/:id/respond', authenticateToken, reservationController.respondReservation);
+
 // Complete a reservation (Only Admin & Librarian)
 router.put('/:id/complete', authenticateToken, requireRole(['admin', 'librarian']), reservationController.completeReservation);
 
 module.exports = router;
+
