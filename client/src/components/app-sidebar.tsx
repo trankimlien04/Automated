@@ -17,7 +17,10 @@ import {
   PenTool,
   Building2,
   Activity,
-  User
+  User,
+  Zap,
+  ArrowRightLeft,
+  FileSpreadsheet
 } from "lucide-react";
 
 import {
@@ -47,17 +50,28 @@ export function AppSidebar() {
   const pathname = location.pathname;
   const { user, logout } = useAuth();
   
-  const isActive = (url: string) => (url === "/" ? pathname === "/" : pathname.startsWith(url));
+  const currentPath = location.pathname + location.search;
+  const isActive = (url: string) => {
+    if (url === "/") return pathname === "/";
+    if (url.includes("?")) {
+      return (
+        currentPath === url ||
+        (url === "/borrow?mode=checkout" && pathname === "/borrow" && !location.search)
+      );
+    }
+    return pathname.startsWith(url);
+  };
 
   // Dynamic items based on role grouped logically
   const overview = [
     { title: "Tổng quan", url: "/", icon: LayoutDashboard, roles: ["admin", "librarian", "reader", "owner"] },
     { title: "Hồ sơ & Thẻ cá nhân", url: "/profile", icon: User, roles: ["admin", "librarian", "reader", "owner"] },
     { title: "Thống kê & Báo cáo", url: "/reports", icon: BarChart3, roles: ["admin", "librarian", "owner"] },
-    { title: "Gợi ý sách (AI)", url: "/recommendations", icon: Sparkles, roles: ["admin", "librarian", "reader", "owner"] },
+    { title: "Gợi ý sách thông minh", url: "/recommendations", icon: Sparkles, roles: ["admin", "librarian", "reader", "owner"] },
   ].filter(item => item.roles.includes(user?.role || ""));
 
   const isReader = user?.role === "reader";
+  const isOwner = user?.role === "owner";
 
   const catalog = [
     { 
@@ -72,7 +86,13 @@ export function AppSidebar() {
   ].filter(item => item.roles.includes(user?.role || ""));
 
   const operations = [
-    { title: "Mượn / Trả (QR)", url: "/borrow", icon: QrCode, roles: ["admin", "librarian", "reader"] },
+    ...(isReader ? [
+      { title: "Phiếu mượn & Biên lai", url: "/borrow", icon: QrCode, roles: ["reader"] }
+    ] : [
+      { title: "Quầy Xuất Mượn", url: "/borrow?mode=checkout", icon: Zap, roles: ["admin", "librarian"] },
+      { title: "Quầy Nhận Trả Sách", url: "/borrow?mode=return", icon: ArrowRightLeft, roles: ["admin", "librarian"] },
+      { title: "Sổ Lưu Thông & Đối Soát", url: "/borrow?mode=history", icon: FileSpreadsheet, roles: ["admin", "librarian", "owner"] },
+    ]),
     { title: "Đặt trước sách", url: "/reservations", icon: CalendarClock, roles: ["admin", "librarian", "reader", "owner"] },
     { title: "Phí phạt", url: "/fines", icon: Wallet, roles: ["admin", "librarian", "reader", "owner"] },
     { title: "Thông báo", url: "/notifications", icon: Bell, roles: ["admin", "librarian", "reader", "owner"] },
@@ -81,8 +101,13 @@ export function AppSidebar() {
   const adminSystem = [
     { title: "Quản lý độc giả", url: "/readers", icon: Users, roles: ["admin", "librarian", "owner"] },
     { title: "Quản lý tài khoản", url: "/accounts", icon: ShieldCheck, roles: ["admin", "owner"] },
-    { title: "Nhật ký hoạt động", url: "/activity-logs", icon: Activity, roles: ["admin", "owner"] },
-    { title: "Phê duyệt & Cài đặt", url: "/settings", icon: Settings, roles: ["admin", "owner"] },
+    { title: "Nhật ký hoạt động (Audit)", url: "/activity-logs", icon: Activity, roles: ["admin", "owner"] },
+    { 
+      title: isOwner ? "Phê duyệt Quy chế (Maker-Checker)" : "Đề xuất Quy chế & Cài đặt", 
+      url: "/settings", 
+      icon: Settings, 
+      roles: ["admin", "owner"] 
+    },
   ].filter(item => item.roles.includes(user?.role || ""));
 
   const renderItems = (items: any[]) => (

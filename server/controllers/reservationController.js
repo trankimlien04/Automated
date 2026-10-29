@@ -24,10 +24,20 @@ exports.createReservation = async (req, res) => {
         }
         const book = books[0];
 
-        // ĐẶT TRƯỚC CHỈ ÁP DỤNG KHI SÁCH ĐÃ HẾT BẢN SAO TRONG KHO (available_copies <= 0)
-        if (book.available_copies > 0) {
+        // ĐẶT TRƯỚC ÁP DỤNG KHI SÁCH ĐÃ HẾT BẢN SAO HOẶC TOÀN BỘ ĐÃ BỊ GIỮ CHỖ 24H
+        const { getActiveHoldsForBook } = require('./borrowController');
+        const activeHolds = await getActiveHoldsForBook(bookId);
+        const [physCopies] = await db.execute(
+            'SELECT COUNT(*) as count FROM book_copies WHERE book_id = ? AND status = "available"',
+            [bookId]
+        );
+        const availPhysCount = physCopies[0]?.count || 0;
+        const otherHolds = activeHolds.filter(h => h.user_id !== userId);
+        const freeCopies = Math.max(0, availPhysCount - otherHolds.length);
+
+        if (book.available_copies > 0 && freeCopies > 0) {
             return res.status(400).json({
-                message: `Đầu sách "${book.title}" hiện vẫn còn ${book.available_copies} cuốn sẵn có trong kho! Vui lòng chọn "Đăng ký mượn online" để thêm vào danh sách yêu cầu mượn thay vì đặt trước.`
+                message: `Đầu sách "${book.title}" hiện vẫn còn ${freeCopies} cuốn sẵn có tự do trên kệ! Vui lòng chọn "Mượn trực tiếp tại kệ" hoặc "Đăng ký online" thay vì đặt trước.`
             });
         }
 
@@ -120,7 +130,9 @@ exports.getReservations = async (req, res) => {
             SELECT r.id, r.reservation_date, r.status, r.notified_at, r.expires_at,
                    CONCAT('TICKET-RES-', r.id) as ticket_qr_code,
                    u.id as user_id, u.full_name as reader_name, u.card_number, u.email as reader_email, u.phone as reader_phone,
-                   b.title as book_title, b.id as book_id, b.cover_image, b.available_copies, b.total_copies
+                   b.title as book_title, b.id as book_id, b.cover_image, b.available_copies, b.total_copies,
+                   COALESCE(b.location, 'Phòng 01 - Kệ 01 - Ngăn 01') as book_location,
+                   COALESCE(b.location, 'Phòng 01 - Kệ 01 - Ngăn 01') as location
             FROM reservations r
             JOIN users u ON r.user_id = u.id
             JOIN books b ON r.book_id = b.id

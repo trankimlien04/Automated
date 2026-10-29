@@ -1,9 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const activityController = require('../controllers/activityController');
-const { verifyToken, isAdmin } = require('../middlewares/authMiddleware');
+const { authenticateToken, requireRole } = require('../middlewares/authMiddleware');
 
-// If authMiddleware exists, we use it or create basic route
-router.get('/', activityController.getActivityLogs);
+// Only Admin and Owner are authorized to access Audit Logs
+router.get('/', authenticateToken, requireRole(['admin', 'owner']), activityController.getActivityLogs);
 
 module.exports = router;

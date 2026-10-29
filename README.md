@@ -99,4 +99,69 @@ Hệ thống cung cấp sẵn 4 tài khoản chuẩn hóa đại diện cho 4 va
 
 ---
 
-*Tài liệu được tạo tự động cho dự án Smart Library.*
+## 🐳 Triển khai với Docker & Docker Compose (Production Ready)
+
+Hệ thống đã được đóng gói hoàn chỉnh bằng Docker đa tầng (Multi-stage build) và Nginx Reverse Proxy.
+
+### 1. Khởi chạy nhanh 1 chạm:
+* **Trên Linux / macOS / VPS Server:**
+  ```bash
+  chmod +x deploy.sh
+  ./deploy.sh
+  ```
+* **Trên Windows:**
+  Nhấp đúp vào file **`deploy.bat`** hoặc chạy lệnh:
+  ```cmd
+  deploy.bat
+  ```
+* **Hoặc bằng lệnh Docker Compose tiêu chuẩn:**
+  ```bash
+  # Sao chép file cấu hình môi trường
+  cp .env.example .env
+
+  # Build và khởi chạy ngầm tất cả container
+  docker compose up -d --build
+  ```
+
+### 2. Các dịch vụ trong Docker Compose:
+| Container | Dịch vụ | Cổng nội bộ | Cổng công khai | Ghi chú |
+| :--- | :--- | :--- | :--- | :--- |
+| `smart_library_client` | Nginx + React Vite | 80 | `80` (hoặc `APP_PORT`) | Phục vụ SPA & định tuyến ngược `/api/` |
+| `smart_library_server` | Node.js Express API | 5000 | `5000` | REST API & Tự động chạy Cron Job |
+| `smart_library_db` | MySQL 8.0 Database | 3306 | `3306` | Tự động import `database/schema.sql` |
+
+### 3. Các lệnh quản lý Docker hữu ích:
+```bash
+# Xem log thời gian thực của toàn bộ hệ thống
+docker compose logs -f
+
+# Xem trạng thái sức khỏe (Healthcheck) của các container
+docker compose ps
+
+# Dừng hệ thống
+docker compose down
+
+# Dừng và xóa toàn bộ dữ liệu database (dùng khi muốn reset sạch sẽ)
+docker compose down -v
+```
+
+---
+
+## 🔄 Tự động hóa CI/CD với GitHub Actions
+
+Tệp quy trình [`.github/workflows/ci-cd.yml`](file:///.github/workflows/ci-cd.yml) tự động thực hiện 4 giai đoạn khi có commit hoặc Pull Request:
+
+1. **`server-ci`**: Kiểm tra cú pháp, cài đặt dependencies và kiểm tra tính toàn vẹn của mã nguồn Backend trên Node.js 20.
+2. **`client-ci`**: Kiểm tra TypeScript và đóng gói bản phát hành Vite Frontend (`npm run build`).
+3. **`docker-build`**: Thiết lập Docker Buildx, kiểm tra tính hợp lệ của `docker-compose.yml` và build thử nghiệm 2 Docker images (`client` & `server`).
+4. **`deploy`**: Tự động SSH vào máy chủ VPS (khi đẩy code lên nhánh `main`/`master`) và cập nhật container không gián đoạn (Zero-Downtime Deployment).
+
+*Các biến Secrets cần cấu hình trên GitHub Repository (nếu kích hoạt auto deploy VPS):*
+- `SERVER_HOST`: IP hoặc tên miền máy chủ VPS.
+- `SERVER_USER`: Tên người dùng SSH (ví dụ: `ubuntu` hoặc `root`).
+- `SERVER_SSH_KEY`: Khóa SSH Private Key.
+- `SERVER_PORT`: Cổng SSH (mặc định 22).
+
+---
+
+*Tài liệu được cập nhật cho hệ thống Smart Library 4.0.*

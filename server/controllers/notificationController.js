@@ -219,23 +219,28 @@ exports.broadcastNotification = async (req, res) => {
     }
 };
 
-// Kích hoạt quét nghiệp vụ & gửi thông báo nhắc hạn / quá hạn / thẻ hết hạn tức thì
+// Kích hoạt quét nghiệp vụ & gửi thông báo nhắc hạn / quá hạn đa kênh (In-app + Email)
 exports.triggerManualReminders = async (req, res) => {
+    const emailService = require('../services/emailService');
+
     try {
         const today = new Date();
         const todayStr = today.toISOString().slice(0, 10);
-        let count = 0;
+        let inAppCount = 0;
+        let emailCount = 0;
 
-        // 1. Nhắc sách sắp đến hạn trong 2 ngày
+        // 1. Nhắc sách sắp đến hạn trong 2 ngày (T - 2 ngày)
         const inTwoDays = new Date();
         inTwoDays.setDate(today.getDate() + 2);
         const inTwoDaysStr = inTwoDays.toISOString().slice(0, 10);
 
         const [dueSoon] = await db.execute(`
-            SELECT br.user_id, b.title, br.due_date
+            SELECT br.user_id, br.due_date, bc.qr_code as copy_qr, b.title,
+                   u.full_name, u.email, u.card_number
             FROM borrow_records br
             JOIN book_copies bc ON br.book_copy_id = bc.id
             JOIN books b ON bc.book_id = b.id
+            JOIN users u ON br.user_id = u.id
             WHERE br.status = 'borrowing' AND br.due_date = ?
         `, [inTwoDaysStr]);
 
@@ -244,19 +249,74 @@ exports.triggerManualReminders = async (req, res) => {
                 'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
                 [
                     item.user_id,
-                    'Nhắc nhở trả sách sắp đến hạn',
-                    `Cuốn sách "${item.title}" của bạn sẽ đến hạn trả vào ngày ${new Date(item.due_date).toLocaleDateString('vi-VN')}. Vui lòng sắp xếp hoàn trả đúng hạn.`
+                    'Nhắc nhở trả sách sắp đến hạn (còn 2 ngày)',
+                    `Cuốn sách "${item.title}" của bạn sẽ đến hạn trả vào ngày ${new Date(item.due_date).toLocaleDateString('vi-VN')}. Vui lòng sắp xếp hoàn trả hoặc gia hạn trực tuyến.`
                 ]
             );
-            count++;
+            inAppCount++;
+
+            if (item.email) {
+                await emailService.sendDueReminderEmail({
+                    to: item.email,
+                    userId: item.user_id,
+                    fullName: item.full_name,
+                    cardNumber: item.card_number,
+                    bookTitle: item.title,
+                    copyQr: item.copy_qr,
+                    dueDate: item.due_date,
+                    daysLeft: 2
+                });
+                emailCount++;
+            }
         }
 
-        // 2. Cảnh báo sách quá hạn
-        const [overdue] = await db.execute(`
-            SELECT br.user_id, b.title, br.due_date
+        // 2. Hạn chót trả sách hôm nay (T - 0 ngày)
+        const [dueToday] = await db.execute(`
+            SELECT br.user_id, br.due_date, bc.qr_code as copy_qr, b.title,
+                   u.full_name, u.email, u.card_number
             FROM borrow_records br
             JOIN book_copies bc ON br.book_copy_id = bc.id
             JOIN books b ON bc.book_id = b.id
+            JOIN users u ON br.user_id = u.id
+            WHERE br.status = 'borrowing' AND br.due_date = ?
+        `, [todayStr]);
+
+        for (const item of dueToday) {
+            await db.execute(
+                'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
+                [
+                    item.user_id,
+                    '⚠️ HẠN CHÓT: Sách đến hạn trả hôm nay',
+                    `Hôm nay là ngày cuối cùng hoàn trả cuốn "${item.title}". Bạn có thể trả tại quầy hoặc thả vào Hòm trả sách tự động 24/7 để tránh bị phạt.`
+                ]
+            );
+            inAppCount++;
+
+            if (item.email) {
+                await emailService.sendDueTodayEmail({
+                    to: item.email,
+                    userId: item.user_id,
+                    fullName: item.full_name,
+                    cardNumber: item.card_number,
+                    bookTitle: item.title,
+                    copyQr: item.copy_qr,
+                    dueDate: item.due_date
+                });
+                emailCount++;
+            }
+        }
+
+        // 3. Cảnh báo sách quá hạn & phạt tiền (T + 1 hoặc lâu hơn)
+        const [configs] = await db.execute('SELECT value FROM system_configs WHERE key_name = "fine_per_day"');
+        const finePerDay = parseInt(configs.length > 0 ? configs[0].value : '5000', 10);
+
+        const [overdue] = await db.execute(`
+            SELECT br.user_id, br.due_date, bc.qr_code as copy_qr, b.title,
+                   u.full_name, u.email, u.card_number
+            FROM borrow_records br
+            JOIN book_copies bc ON br.book_copy_id = bc.id
+            JOIN books b ON bc.book_id = b.id
+            JOIN users u ON br.user_id = u.id
             WHERE br.status = 'borrowing' AND br.due_date < ?
         `, [todayStr]);
 
@@ -264,25 +324,41 @@ exports.triggerManualReminders = async (req, res) => {
             const dueDate = new Date(item.due_date);
             const diffTime = Math.abs(today - dueDate);
             const overdueDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+            const fineAmount = overdueDays * finePerDay;
 
             await db.execute(
                 'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
                 [
                     item.user_id,
-                    'Cảnh báo: Sách mượn đã quá hạn',
-                    `Cuốn sách "${item.title}" đã quá hạn trả ${overdueDays} ngày (Hạn trả: ${dueDate.toLocaleDateString('vi-VN')}). Vui lòng hoàn trả sách ngay và thanh toán phí phạt trễ hạn.`
+                    '🚨 Cảnh báo: Sách mượn đã quá hạn',
+                    `Cuốn sách "${item.title}" đã quá hạn trả ${overdueDays} ngày (Phí phạt tích lũy: ${fineAmount.toLocaleString('vi-VN')}đ). Vui lòng hoàn trả sách ngay.`
                 ]
             );
-            count++;
+            inAppCount++;
+
+            if (item.email) {
+                await emailService.sendOverdueWarningEmail({
+                    to: item.email,
+                    userId: item.user_id,
+                    fullName: item.full_name,
+                    cardNumber: item.card_number,
+                    bookTitle: item.title,
+                    copyQr: item.copy_qr,
+                    dueDate: item.due_date,
+                    overdueDays,
+                    fineAmount
+                });
+                emailCount++;
+            }
         }
 
-        // 3. Cảnh báo thẻ độc giả sắp hết hạn (trong 15 ngày)
+        // 4. Cảnh báo thẻ độc giả sắp hết hạn (trong 15 ngày)
         const in15Days = new Date();
         in15Days.setDate(today.getDate() + 15);
         const in15DaysStr = in15Days.toISOString().slice(0, 10);
 
         const [expiringUsers] = await db.execute(`
-            SELECT id, full_name, card_number, card_expiry
+            SELECT id, full_name, email, card_number, card_expiry
             FROM users
             WHERE role = 'reader' AND status = 'active' AND card_expiry BETWEEN ? AND ?
         `, [todayStr, in15DaysStr]);
@@ -296,23 +372,120 @@ exports.triggerManualReminders = async (req, res) => {
                     `Thẻ thư viện ${u.card_number} của bạn sẽ hết hạn vào ngày ${new Date(u.card_expiry).toLocaleDateString('vi-VN')}. Vui lòng liên hệ quầy thủ thư để gia hạn thẻ.`
                 ]
             );
-            count++;
+            inAppCount++;
         }
 
-        // Also notify all staff
+        // Thông báo cho toàn bộ ban quản lý
         const { notifyAllStaff } = require('../services/notificationService');
         await notifyAllStaff(
-            'Báo cáo quét nghiệp vụ hệ thống',
-            `Quá trình quét nghiệp vụ đã hoàn tất: Đã kiểm tra và gửi ${count} thông báo nhắc hạn / quá hạn / hết hạn thẻ tới các độc giả liên quan.`,
+            'Báo cáo tự động: Quét cảnh báo nhắc hạn đa kênh',
+            `Quá trình quét tự động hoàn tất: Đã phát hành ${inAppCount} thông báo hệ thống và ${emailCount} lượt email nhắc hạn/quá hạn chủ động.`,
             'info'
         );
 
         res.status(200).json({
-            message: `Đã hoàn tất quét và gửi ${count} thông báo nghiệp vụ hệ thống!`,
-            count
+            message: `Đã hoàn tất quét và phát hành ${inAppCount} thông báo in-app và ${emailCount} email nhắc hạn chủ động!`,
+            count: inAppCount + emailCount,
+            inAppCount,
+            emailCount
         });
     } catch (error) {
-        console.error('Lỗi khi quét thông báo nghiệp vụ:', error);
-        res.status(500).json({ message: 'Lỗi server' });
+        console.error('Lỗi khi quét thông báo nghiệp vụ đa kênh:', error);
+        res.status(500).json({ message: 'Lỗi server khi quét thông báo đa kênh' });
     }
 };
+
+// Lấy lịch sử phát hành thông báo đa kênh (Email / In-app Dispatch Logs)
+exports.getDispatchHistory = async (req, res) => {
+    try {
+        const isStaff = ['admin', 'librarian', 'owner'].includes(req.user.role);
+        let sql = `
+            SELECT nd.*, u.full_name as user_name, u.card_number
+            FROM notification_dispatches nd
+            LEFT JOIN users u ON nd.user_id = u.id
+        `;
+        const params = [];
+
+        if (!isStaff) {
+            sql += ` WHERE nd.user_id = ? OR nd.recipient_email = ?`;
+            params.push(req.user.id, req.user.email);
+        }
+
+        sql += ` ORDER BY nd.created_at DESC LIMIT 100`;
+
+        const [rows] = await db.execute(sql, params);
+        res.status(200).json(rows);
+    } catch (error) {
+        console.error('Lỗi khi lấy lịch sử dispatch thông báo:', error);
+        res.status(500).json({ message: 'Lỗi server khi lấy lịch sử dispatch thông báo' });
+    }
+};
+
+// Gửi thử nghiệm một email cảnh báo mẫu
+exports.testSendEmail = async (req, res) => {
+    const { targetEmail, templateType = 'due_reminder_t2' } = req.body;
+    const recipient = targetEmail || req.user.email;
+    const emailService = require('../services/emailService');
+
+    try {
+        let result;
+        const sampleBook = 'Lập trình Web Hiện Đại với React & Node.js';
+        const sampleQr = 'QR-BK-001-A';
+        const sampleDate = new Date();
+        sampleDate.setDate(sampleDate.getDate() + 2);
+
+        if (templateType === 'due_today_t0') {
+            result = await emailService.sendDueTodayEmail({
+                to: recipient,
+                userId: req.user.id,
+                fullName: req.user.full_name,
+                cardNumber: req.user.card_number || 'LIB-RD-000001',
+                bookTitle: sampleBook,
+                copyQr: sampleQr,
+                dueDate: new Date()
+            });
+        } else if (templateType === 'overdue_warning') {
+            result = await emailService.sendOverdueWarningEmail({
+                to: recipient,
+                userId: req.user.id,
+                fullName: req.user.full_name,
+                cardNumber: req.user.card_number || 'LIB-RD-000001',
+                bookTitle: sampleBook,
+                copyQr: sampleQr,
+                dueDate: new Date(Date.now() - 3 * 86400000),
+                overdueDays: 3,
+                fineAmount: 15000
+            });
+        } else if (templateType === 'drop_box_receipt') {
+            result = await emailService.sendDropBoxReceiptEmail({
+                to: recipient,
+                userId: req.user.id,
+                fullName: req.user.full_name,
+                cardNumber: req.user.card_number || 'LIB-RD-000001',
+                bookTitle: sampleBook,
+                copyQr: sampleQr,
+                droppedAt: new Date()
+            });
+        } else {
+            result = await emailService.sendDueReminderEmail({
+                to: recipient,
+                userId: req.user.id,
+                fullName: req.user.full_name,
+                cardNumber: req.user.card_number || 'LIB-RD-000001',
+                bookTitle: sampleBook,
+                copyQr: sampleQr,
+                dueDate: sampleDate,
+                daysLeft: 2
+            });
+        }
+
+        res.status(200).json({
+            message: `Đã phát hành email thử nghiệm thành công tới ${recipient}!`,
+            details: result
+        });
+    } catch (error) {
+        console.error('Lỗi khi gửi email thử nghiệm:', error);
+        res.status(500).json({ message: 'Lỗi server khi gửi email thử nghiệm' });
+    }
+};
+

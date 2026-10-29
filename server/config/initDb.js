@@ -31,16 +31,32 @@ async function initOwnerAndConfigTables() {
             )
         `);
 
-        // 3. Ensure Owner account exists
-        const [existingOwner] = await db.execute("SELECT id FROM users WHERE email = 'owner@library.com'");
-        if (existingOwner.length === 0) {
-            const ownerHash = await bcrypt.hash('123456', 10);
-            await db.execute(
-                `INSERT INTO users (full_name, email, password_hash, role, phone, card_number, card_expiry, status)
-                 VALUES (?, ?, ?, 'owner', '0909999000', 'LIB-OW-000001', '2030-12-31', 'active')`,
-                ['Trần Văn Chủ', 'owner@library.com', ownerHash]
-            );
-            console.log('👑 [INIT DB] Created default Owner account: owner@library.com / 123456');
+        // 3. Ensure Default Demo Accounts exist with valid credentials (Auto-healing)
+        const defaultAccounts = [
+            { email: 'admin@library.com', fullName: 'Administrator', pass: 'admin123', role: 'admin', phone: '0901111222', card: 'LIB-AD-000001' },
+            { email: 'librarian@library.com', fullName: 'Trần Thủ Thư', pass: '123456', role: 'librarian', phone: '0902222333', card: 'LIB-LB-000001' },
+            { email: 'reader@library.com', fullName: 'Nguyễn Minh A', pass: '123456', role: 'reader', phone: '0904444555', card: 'LIB-RD-100001' },
+            { email: 'owner@library.com', fullName: 'Trần Văn Chủ', pass: '123456', role: 'owner', phone: '0909999000', card: 'LIB-OW-000001' }
+        ];
+
+        for (const acc of defaultAccounts) {
+            const [rows] = await db.execute("SELECT id, password_hash FROM users WHERE email = ?", [acc.email]);
+            if (rows.length === 0) {
+                const passHash = await bcrypt.hash(acc.pass, 10);
+                await db.execute(
+                    `INSERT INTO users (full_name, email, password_hash, role, phone, card_number, card_expiry, status)
+                     VALUES (?, ?, ?, ?, ?, ?, '2030-12-31', 'active')`,
+                    [acc.fullName, acc.email, passHash, acc.role, acc.phone, acc.card]
+                );
+                console.log(`👤 [INIT DB] Created default account: ${acc.email} (${acc.role})`);
+            } else {
+                const isMatch = await bcrypt.compare(acc.pass, rows[0].password_hash || '').catch(() => false);
+                if (!isMatch) {
+                    const passHash = await bcrypt.hash(acc.pass, 10);
+                    await db.execute("UPDATE users SET password_hash = ? WHERE id = ?", [passHash, rows[0].id]);
+                    console.log(`🔑 [INIT DB] Reset & verified password for default account: ${acc.email}`);
+                }
+            }
         }
 
         // 4. Ensure all users have standardized card_number strictly matched with user ID
@@ -204,7 +220,152 @@ async function initOwnerAndConfigTables() {
             console.error('Error migrating ready reservations:', err.message);
         }
 
-        console.log('✅ [INIT DB] Owner role, Maker-Checker, VietQR Bank Config, Borrow Requests & Reservations tables ready!');
+        // 12. Ensure user_preferences table exists for Smart Recommendation Engine
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL UNIQUE,
+                favorite_categories JSON NULL,
+                favorite_authors JSON NULL,
+                preferred_topics TEXT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        `);
+
+        // 13. Ensure location column exists in books table (Phòng XX - Kệ YY - Ngăn ZZ)
+        try {
+            const [locCol] = await db.execute("SHOW COLUMNS FROM books LIKE 'location'");
+            if (locCol.length === 0) {
+                await db.execute("ALTER TABLE books ADD COLUMN location VARCHAR(100) DEFAULT 'Phòng 01 - Kệ 01 - Ngăn 01'");
+            }
+            // Backfill standard room locations for existing books if null or empty
+            const [booksWithoutLoc] = await db.execute("SELECT id, category_id, title FROM books WHERE location IS NULL OR location = ''");
+            for (const b of booksWithoutLoc) {
+                const roomNum = ((b.category_id || b.id) % 3) + 1;
+                const shelfNum = ((b.id * 2) % 6) + 1;
+                const rackNum = ((b.id * 3) % 4) + 1;
+                const locStr = `Phòng 0${roomNum} - Kệ 0${shelfNum} - Ngăn 0${rackNum}`;
+                await db.execute("UPDATE books SET location = ? WHERE id = ?", [locStr, b.id]);
+            }
+        } catch (locErr) {
+            console.error('⚠️ [INIT DB] Error setting up books location column:', locErr.message);
+        }
+
+        // 14. Ensure borrow_drafts and borrow_draft_items tables exist for Multi-Book Draft Transaction & QR Code
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS borrow_drafts (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                draft_code VARCHAR(50) UNIQUE NOT NULL,
+                user_id INT NOT NULL,
+                status ENUM('pending', 'approved', 'cancelled', 'expired') DEFAULT 'pending',
+                notes TEXT,
+                expires_at DATETIME NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                approved_by INT NULL,
+                approved_at DATETIME NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (approved_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+        `);
+
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS borrow_draft_items (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                draft_id INT NOT NULL,
+                book_id INT NOT NULL,
+                book_copy_id INT NULL,
+                status ENUM('pending', 'borrowed', 'unavailable') DEFAULT 'pending',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (draft_id) REFERENCES borrow_drafts(id) ON DELETE CASCADE,
+                FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE,
+                FOREIGN KEY (book_copy_id) REFERENCES book_copies(id) ON DELETE SET NULL
+            )
+        `);
+
+        // 15. Ensure Smart Book Drop columns, renewal_count & status in borrow_records
+        try {
+            await db.execute(
+                "ALTER TABLE borrow_records MODIFY COLUMN status ENUM('borrowing', 'returned', 'overdue', 'returned_drop_box') DEFAULT 'borrowing'"
+            );
+        } catch (err) {}
+
+        try {
+            const [renewCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'renewal_count'");
+            if (renewCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN renewal_count INT DEFAULT 0");
+            }
+        } catch (renewErr) {
+            console.error('⚠️ [INIT DB] Error setting up renewal_count column:', renewErr.message);
+        }
+
+        try {
+            const [dropBoxCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'is_drop_box'");
+            if (dropBoxCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN is_drop_box TINYINT(1) DEFAULT 0");
+            }
+            const [dropBoxAtCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'drop_box_at'");
+            if (dropBoxAtCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN drop_box_at DATETIME NULL");
+            }
+            const [dropBoxStatCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'drop_box_status'");
+            if (dropBoxStatCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN drop_box_status ENUM('none', 'pending_audit', 'verified_intact', 'damaged', 'missing') DEFAULT 'none'");
+            }
+            const [dropBoxNoteCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'drop_box_audit_note'");
+            if (dropBoxNoteCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN drop_box_audit_note TEXT NULL");
+            }
+            const [dropBoxAuditorCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'drop_box_audited_by'");
+            if (dropBoxAuditorCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN drop_box_audited_by INT NULL");
+            }
+            const [dropBoxAuditedAtCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'drop_box_audited_at'");
+            if (dropBoxAuditedAtCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN drop_box_audited_at DATETIME NULL");
+            }
+        } catch (dropBoxErr) {
+            console.error('⚠️ [INIT DB] Error setting up drop box columns:', dropBoxErr.message);
+        }
+
+        // 16. Ensure exit_passes table exists for Physical Security & Loss Prevention
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS exit_passes (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                pass_code VARCHAR(60) UNIQUE NOT NULL,
+                user_id INT NOT NULL,
+                book_count INT NOT NULL DEFAULT 1,
+                items_summary JSON NULL,
+                status ENUM('active', 'used', 'expired') DEFAULT 'active',
+                expires_at DATETIME NOT NULL,
+                verified_by INT NULL,
+                verified_at DATETIME NULL,
+                notes TEXT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (verified_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+        `);
+
+        // 17. Ensure notification_dispatches table exists for Multi-channel Email/SMS tracking
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS notification_dispatches (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NULL,
+                recipient_email VARCHAR(120) NOT NULL,
+                channel ENUM('email', 'zns_sms', 'in_app') DEFAULT 'email',
+                template_type VARCHAR(50) NOT NULL,
+                title VARCHAR(255) NOT NULL,
+                content_preview TEXT NULL,
+                status ENUM('sent', 'delivered', 'failed', 'simulated') DEFAULT 'sent',
+                error_message TEXT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+            )
+        `);
+
+        console.log('✅ [INIT DB] Smart Library 4.0 Suite Ready: Maker-Checker, VietQR, Smart Book Drop 24/7, Exit Passes & Multi-channel Notifications!');
     } catch (error) {
         console.error('⚠️ [INIT DB] Warning initializing owner/config tables:', error.message);
     }

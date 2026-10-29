@@ -138,12 +138,12 @@ export default function FinesPage() {
               </CardTitle>
               <p className="text-xs text-muted-foreground mt-0.5">
                 {isReader 
-                  ? "Bạn có thể thanh toán trực tuyến qua mã VietQR từ bất kỳ ngân hàng nào để thẻ thư viện không bị khóa."
-                  : "Hệ thống hỗ trợ Đa kênh: Độc giả tự nộp Online qua VietQR hoặc Thủ thư thu tiền mặt/VietQR tại quầy."}
+                  ? "Bạn có thể tạo mã VietQR động để chuyển khoản nhanh từ ứng dụng ngân hàng, giúp kích hoạt lại quyền mượn sách."
+                  : "Đa kênh thanh toán: Độc giả chuyển khoản VietQR chuẩn Napas247 hoặc nộp tiền mặt trực tiếp tại quầy lưu thông."}
               </p>
             </div>
             <Badge variant="outline" className="w-fit text-xs gap-1.5 bg-primary/5 text-primary border-primary/20 py-1 px-2.5">
-              <QrCode className="h-3.5 w-3.5" /> Thanh toán VietQR tự động
+              <QrCode className="h-3.5 w-3.5" /> Tạo mã VietQR Napas247
             </Badge>
           </div>
         </CardHeader>

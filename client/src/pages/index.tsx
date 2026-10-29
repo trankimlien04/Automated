@@ -42,6 +42,14 @@ interface DashboardData {
   }>;
 }
 
+function getTimeBasedGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 11) return "Chào buổi sáng";
+  if (hour >= 11 && hour < 14) return "Chào buổi trưa";
+  if (hour >= 14 && hour < 18) return "Chào buổi chiều";
+  return "Chào buổi tối";
+}
+
 export default function Dashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -115,7 +123,7 @@ export default function Dashboard() {
                 <Sparkles className="mr-1 h-3 w-3 animate-pulse" /> {isOwner ? "👑 Trung tâm Điều hành Giám đốc" : "Hôm nay, " + new Date().toLocaleDateString("vi-VN")}
               </Badge>
               <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight md:text-4xl">
-                {isOwner ? `Xin chào Giám đốc, ${user?.fullName}` : `Chào buổi sáng, ${user?.fullName}.`}
+                {isOwner ? `${getTimeBasedGreeting()}, Giám đốc ${user?.fullName}` : `${getTimeBasedGreeting()}, ${user?.fullName}.`}
               </h2>
               <p className="mt-1 max-w-xl text-sm text-primary-foreground/80">
                 {isOwner 
@@ -333,7 +341,7 @@ export default function Dashboard() {
               <Award className="mr-1 h-3.5 w-3.5 text-gold animate-bounce" /> Thẻ độc giả Athenaeum
             </Badge>
             <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight md:text-4xl">
-              Chào bạn, {user?.fullName}!
+              {getTimeBasedGreeting()}, {user?.fullName}!
             </h2>
             <p className="mt-1 max-w-xl text-sm text-white/80">
               Chúc bạn có những giờ phút đọc sách thú vị. Bạn đang có <strong>{activeBorrows.length}</strong> cuốn sách đang mượn và <strong>{unpaidFines.length}</strong> khoản phí phạt chưa đóng.

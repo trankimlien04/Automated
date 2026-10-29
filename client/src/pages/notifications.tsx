@@ -49,6 +49,7 @@ import api from "@/services/api";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { useConfirm } from "@/hooks/use-confirm";
+import { NotificationDispatchModal } from "@/components/notification-dispatch-modal";
 
 interface Notification {
   id: number;
@@ -77,6 +78,7 @@ export default function NotificationsPage() {
   const [broadcastAudience, setBroadcastAudience] = useState("all");
   const [sendingBroadcast, setSendingBroadcast] = useState(false);
   const [scanningReminders, setScanningReminders] = useState(false);
+  const [isDispatchModalOpen, setIsDispatchModalOpen] = useState(false);
 
   const fetchNotifications = async () => {
     setLoading(true);
@@ -486,10 +488,20 @@ export default function NotificationsPage() {
                 size="sm"
                 onClick={handleTriggerReminders}
                 disabled={scanningReminders}
-                className="text-xs gap-1.5 border-border shadow-xs hover:bg-accent"
+                className="text-xs gap-1.5 border-border shadow-xs hover:bg-accent cursor-pointer"
               >
                 <RefreshCw className={`h-3.5 w-3.5 ${scanningReminders ? "animate-spin" : ""}`} />
-                <span>Quét nghiệp vụ ngay</span>
+                <span>Quét nhắc hạn đa kênh</span>
+              </Button>
+
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsDispatchModalOpen(true)}
+                className="text-xs gap-1.5 border-indigo-400 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 shadow-xs cursor-pointer"
+              >
+                <Mail className="h-3.5 w-3.5 text-indigo-600" />
+                <span>Nhật ký Email đa kênh</span>
               </Button>
 
               <Dialog open={isBroadcastOpen} onOpenChange={setIsBroadcastOpen}>
@@ -932,6 +944,12 @@ export default function NotificationsPage() {
         </div>
       </div>
       {ConfirmDialogComponent}
+
+      {/* Smart Library 4.0: Notification Dispatches & Test Email Modal */}
+      <NotificationDispatchModal
+        open={isDispatchModalOpen}
+        onOpenChange={setIsDispatchModalOpen}
+      />
     </div>
   );
 }
