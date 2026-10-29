@@ -12,13 +12,13 @@ router.put('/profile/change-password', authenticateToken, userController.changeP
 // Get all users - Admin, Librarian and Owner can view users/readers
 router.get('/', authenticateToken, requireRole(['admin', 'librarian', 'owner']), userController.getAllUsers);
 
-// Create a new user account - Only Admin has permission to create Librarian or Reader accounts directly
-router.post('/', authenticateToken, requireRole(['admin']), userController.createUser);
+// Create a new user account - Admin and Owner have permission to create Librarian or Reader accounts directly
+router.post('/', authenticateToken, requireRole(['admin', 'owner']), userController.createUser);
 
 // Get user profile by ID
 router.get('/:id', authenticateToken, userController.getUserProfile);
 
-// Update status - Only Admin and Librarian can lock/unlock/approve accounts
-router.put('/:id/status', authenticateToken, requireRole(['admin', 'librarian']), userController.updateUserStatus);
+// Update status - Admin, Librarian and Owner can lock/unlock/approve accounts
+router.put('/:id/status', authenticateToken, requireRole(['admin', 'librarian', 'owner']), userController.updateUserStatus);
 
 module.exports = router;

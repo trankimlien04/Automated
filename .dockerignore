@@ -1,0 +1,14 @@
+.git
+.github
+*.md
+*.bat
+*.sh
+.env
+.env.local
+node_modules
+client/node_modules
+client/dist
+server/node_modules
+Kho_Sach_*.xlsx
+Mau_Nhap_*.xlsx
+Mau_Nhap_*.csv

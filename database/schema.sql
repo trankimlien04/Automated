@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS books (
     published_year YEAR,
     description TEXT,
     cover_image VARCHAR(255),
+    location VARCHAR(100) DEFAULT 'Phòng 01 - Kệ 01 - Ngăn 01',
     total_copies INT DEFAULT 0,
     available_copies INT DEFAULT 0,
     avg_rating DECIMAL(3,2) DEFAULT 0.00,
@@ -99,6 +100,7 @@ CREATE TABLE IF NOT EXISTS borrow_records (
     due_date DATE NOT NULL,
     return_date DATETIME NULL,
     status ENUM('borrowing', 'returned', 'overdue') DEFAULT 'borrowing',
+    renewal_count INT DEFAULT 0,
     processed_by INT NULL,
     note TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -220,10 +222,10 @@ INSERT INTO system_configs (key_name, value, description) VALUES
 -- admin@library.com -> admin123
 -- Tất cả các tài khoản khác -> 123456
 INSERT INTO users (id, full_name, email, password_hash, role, phone, card_number, card_expiry, status) VALUES
-(1, 'Administrator', 'admin@library.com', '$2b$10$ldh/jWZc01Ya8VHdf1HFBO.yk08WvIfLT8vkDVIGfkp6AC6CnenXm', 'admin', '0901111222', 'LIB-AD-000001', '2030-12-31', 'active'),
-(2, 'Trần Thủ Thư', 'librarian@library.com', '$2b$10$4.o7m82W01g7Zq7v9xY7m.E4cQd.5eX8u2z1v5y8A9b0c1d2e3f4g', 'librarian', '0902222333', 'LIB-LB-000001', '2028-12-31', 'active'),
-(3, 'Nguyễn Minh A', 'reader@library.com', '$2b$10$4.o7m82W01g7Zq7v9xY7m.E4cQd.5eX8u2z1v5y8A9b0c1d2e3f4g', 'reader', '0904444555', 'LIB-RD-100001', '2027-06-30', 'active'),
-(4, 'Trần Văn Chủ', 'owner@library.com', '$2b$10$4.o7m82W01g7Zq7v9xY7m.E4cQd.5eX8u2z1v5y8A9b0c1d2e3f4g', 'owner', '0909999000', 'LIB-OW-000001', '2030-12-31', 'active');
+(1, 'Administrator', 'admin@library.com', '$2b$10$fRQnoR81Pw094xVEZjOtme91Dr4DepFYvBkrl5L.FoDZ4l9ewxG2G', 'admin', '0901111222', 'LIB-AD-000001', '2030-12-31', 'active'),
+(2, 'Trần Thủ Thư', 'librarian@library.com', '$2b$10$Ok77PC58bd8dGWsIRCbyOu0d5ENEtOpGYNkXHdw6ugqOBSOyqYVc.', 'librarian', '0902222333', 'LIB-LB-000001', '2028-12-31', 'active'),
+(3, 'Nguyễn Minh A', 'reader@library.com', '$2b$10$Ok77PC58bd8dGWsIRCbyOu0d5ENEtOpGYNkXHdw6ugqOBSOyqYVc.', 'reader', '0904444555', 'LIB-RD-100001', '2027-06-30', 'active'),
+(4, 'Trần Văn Chủ', 'owner@library.com', '$2b$10$Ok77PC58bd8dGWsIRCbyOu0d5ENEtOpGYNkXHdw6ugqOBSOyqYVc.', 'owner', '0909999000', 'LIB-OW-000001', '2030-12-31', 'active');
 
 -- 2.3. ĐỀ XUẤT CẤU HÌNH MẪU (CONFIG CHANGE REQUESTS)
 INSERT INTO config_change_requests (id, key_name, current_value, proposed_value, reason, requested_by, status, reviewed_by, reviewed_at, review_note) VALUES

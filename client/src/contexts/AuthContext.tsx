@@ -6,6 +6,10 @@ interface User {
   email: string;
   role: string;
   avatar?: string;
+  card_number?: string;
+  cardNumber?: string;
+  name?: string;
+  full_name?: string;
 }
 
 interface AuthContextType {

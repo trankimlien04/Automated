@@ -27,6 +27,12 @@ router.delete('/delete-all', authenticateToken, notificationController.deleteAll
 // Trigger manual system reminders check
 router.post('/trigger-reminders', authenticateToken, notificationController.triggerManualReminders);
 
+// Get notification dispatches history (Email & Multi-channel Logs)
+router.get('/dispatch-history', authenticateToken, notificationController.getDispatchHistory);
+
+// Test send an email notification
+router.post('/test-email', authenticateToken, notificationController.testSendEmail);
+
 // Broadcast announcement / direct notification
 router.post('/broadcast', authenticateToken, notificationController.broadcastNotification);
 

@@ -6,6 +6,7 @@ import { TopBar } from "@/components/top-bar";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
+import { ErrorBoundary } from "@/components/error-boundary";
 
 // Import pages
 import LoginPage from "./pages/login";
@@ -98,89 +99,91 @@ function ProtectedRoute({ children, allowedRoles }: ProtectedRouteProps) {
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <TooltipProvider delayDuration={150}>
-        <AuthProvider>
-          <BrowserRouter>
-            <Routes>
-              {/* Public route */}
-              <Route path="/login" element={<LoginPage />} />
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <TooltipProvider delayDuration={150}>
+          <AuthProvider>
+            <BrowserRouter>
+              <Routes>
+                {/* Public route */}
+                <Route path="/login" element={<LoginPage />} />
 
-              {/* Protected routes with Role-based protection */}
-              <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
-              <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
-              <Route path="/books" element={<ProtectedRoute><BooksPage /></ProtectedRoute>} />
-              <Route path="/borrow" element={<ProtectedRoute><BorrowPage /></ProtectedRoute>} />
-              <Route path="/reservations" element={<ProtectedRoute><ReservationsPage /></ProtectedRoute>} />
-              <Route path="/fines" element={<ProtectedRoute><FinesPage /></ProtectedRoute>} />
-              <Route path="/notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
-              <Route path="/recommendations" element={<ProtectedRoute><RecommendationsPage /></ProtectedRoute>} />
-              
-              {/* Readers Page - Librarians, Admins and Owner */}
-              <Route path="/readers" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
-                  <ReadersPage />
-                </ProtectedRoute>
-              } />
+                {/* Protected routes with Role-based protection */}
+                <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+                <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
+                <Route path="/books" element={<ProtectedRoute><BooksPage /></ProtectedRoute>} />
+                <Route path="/borrow" element={<ProtectedRoute><BorrowPage /></ProtectedRoute>} />
+                <Route path="/reservations" element={<ProtectedRoute><ReservationsPage /></ProtectedRoute>} />
+                <Route path="/fines" element={<ProtectedRoute><FinesPage /></ProtectedRoute>} />
+                <Route path="/notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
+                <Route path="/recommendations" element={<ProtectedRoute><RecommendationsPage /></ProtectedRoute>} />
+                
+                {/* Readers Page - Librarians, Admins and Owner */}
+                <Route path="/readers" element={
+                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                    <ReadersPage />
+                  </ProtectedRoute>
+                } />
 
-              <Route path="/categories" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
-                  <CategoriesPage />
-                </ProtectedRoute>
-              } />
+                <Route path="/categories" element={
+                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                    <CategoriesPage />
+                  </ProtectedRoute>
+                } />
 
-              <Route path="/authors" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
-                  <AuthorsPage />
-                </ProtectedRoute>
-              } />
+                <Route path="/authors" element={
+                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                    <AuthorsPage />
+                  </ProtectedRoute>
+                } />
 
-              <Route path="/publishers" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
-                  <PublishersPage />
-                </ProtectedRoute>
-              } />
+                <Route path="/publishers" element={
+                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                    <PublishersPage />
+                  </ProtectedRoute>
+                } />
 
-              <Route path="/activity-logs" element={
-                <ProtectedRoute allowedRoles={["admin", "owner"]}>
-                  <ActivityLogsPage />
-                </ProtectedRoute>
-              } />
-              
-              {/* Accounts Page - Admins and Owner */}
-              <Route path="/accounts" element={
-                <ProtectedRoute allowedRoles={["admin", "owner"]}>
-                  <AccountsPage />
-                </ProtectedRoute>
-              } />
-              
-              {/* Reports Page - Librarians, Admins and Owner */}
-              <Route path="/reports" element={
-                <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
-                  <ReportsPage />
-                </ProtectedRoute>
-              } />
-              
-              {/* Settings Page - Admins and Owner */}
-              <Route path="/settings" element={
-                <ProtectedRoute allowedRoles={["admin", "owner"]}>
-                  <SettingsPage />
-                </ProtectedRoute>
-              } />
-              
-              <Route path="*" element={
-                <div className="flex min-h-screen items-center justify-center bg-background px-4">
-                  <div className="max-w-md text-center">
-                    <h1 className="text-7xl font-bold text-foreground">404</h1>
-                    <h2 className="mt-4 text-xl font-semibold text-foreground">Page not found</h2>
+                <Route path="/activity-logs" element={
+                  <ProtectedRoute allowedRoles={["admin", "owner"]}>
+                    <ActivityLogsPage />
+                  </ProtectedRoute>
+                } />
+                
+                {/* Accounts Page - Admins and Owner */}
+                <Route path="/accounts" element={
+                  <ProtectedRoute allowedRoles={["admin", "owner"]}>
+                    <AccountsPage />
+                  </ProtectedRoute>
+                } />
+                
+                {/* Reports Page - Librarians, Admins and Owner */}
+                <Route path="/reports" element={
+                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                    <ReportsPage />
+                  </ProtectedRoute>
+                } />
+                
+                {/* Settings Page - Admins and Owner */}
+                <Route path="/settings" element={
+                  <ProtectedRoute allowedRoles={["admin", "owner"]}>
+                    <SettingsPage />
+                  </ProtectedRoute>
+                } />
+                
+                <Route path="*" element={
+                  <div className="flex min-h-screen items-center justify-center bg-background px-4">
+                    <div className="max-w-md text-center">
+                      <h1 className="text-7xl font-bold text-foreground">404</h1>
+                      <h2 className="mt-4 text-xl font-semibold text-foreground">Page not found</h2>
+                    </div>
                   </div>
-                </div>
-              } />
-            </Routes>
-          </BrowserRouter>
-        </AuthProvider>
-      </TooltipProvider>
-    </QueryClientProvider>
+                } />
+              </Routes>
+            </BrowserRouter>
+          </AuthProvider>
+        </TooltipProvider>
+      </QueryClientProvider>
+    </ErrorBoundary>
   );
 }
 

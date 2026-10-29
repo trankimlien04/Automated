@@ -98,8 +98,8 @@ export function VietQrModal({
           </div>
           <DialogDescription className="text-xs text-muted-foreground mt-1">
             {allowCashOption 
-              ? "Lựa chọn phương thức thanh toán chuyển khoản VietQR tự động hoặc thu tiền mặt tại quầy." 
-              : "Quét mã VietQR bằng ứng dụng ngân hàng hoặc ví điện tử bất kỳ để thanh toán nhanh."}
+              ? "Lựa chọn phương thức thanh toán chuyển khoản VietQR chuẩn Napas247 hoặc nộp tiền mặt trực tiếp tại quầy." 
+              : "Quét mã VietQR bằng ứng dụng ngân hàng hoặc ví điện tử để chuyển khoản thanh toán nhanh."}
           </DialogDescription>
         </DialogHeader>
 
@@ -214,7 +214,7 @@ export function VietQrModal({
               ) : activeTab === "transfer" ? (
                 <>
                   <ShieldCheck className="h-4 w-4 mr-1.5" />
-                  {allowCashOption ? "Đã nhận chuyển khoản & Hoàn tất" : "Tôi đã chuyển khoản xong"}
+                  {allowCashOption ? "Xác nhận đối soát & Hoàn tất" : "Tôi đã chuyển khoản xong (Gửi xác nhận)"}
                 </>
               ) : (
                 <>
@@ -326,7 +326,7 @@ function TransferView({
 
         <div className="p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-800 dark:text-emerald-300 flex items-start gap-1.5">
           <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 shrink-0 mt-0.5" />
-          <span>Mã VietQR đã tự động đính kèm số tiền <strong>{amount.toLocaleString("vi-VN")}đ</strong> và nội dung. Độc giả không cần gõ tay!</span>
+          <span>Mã VietQR tự động đính kèm số tiền <strong>{amount.toLocaleString("vi-VN")}đ</strong> và nội dung chuẩn Napas247. Sau khi chuyển trên App ngân hàng, bấm nút bên dưới để gửi xác nhận gạch nợ.</span>
         </div>
       </div>
     </div>

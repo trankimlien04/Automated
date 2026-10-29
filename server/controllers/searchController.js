@@ -37,13 +37,14 @@ exports.globalSearch = async (req, res) => {
         // 1. SÁCH & ẤN PHẨM (Tất cả các vai trò đều có thể tìm sách)
         const [books] = await db.execute(`
             SELECT b.id, b.title, b.isbn, b.cover_image, b.available_copies, b.total_copies, b.published_year,
-                   a.name as author_name, c.name as category_name
+                   a.name as author_name, c.name as category_name, p.name as publisher_name
             FROM books b
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN categories c ON b.category_id = c.id
-            WHERE b.title LIKE ? OR b.isbn LIKE ? OR a.name LIKE ? OR c.name LIKE ?
+            LEFT JOIN publishers p ON b.publisher_id = p.id
+            WHERE b.title LIKE ? OR b.isbn LIKE ? OR a.name LIKE ? OR c.name LIKE ? OR p.name LIKE ?
             LIMIT 6
-        `, [searchTerm, searchTerm, searchTerm, searchTerm]);
+        `, [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]);
         results.books = books;
 
         // ==========================================

@@ -46,6 +46,7 @@ import { toast } from "sonner";
 import { useConfirm } from "@/hooks/use-confirm";
 import { QRCodeCanvas } from "qrcode.react";
 import { Html5Qrcode } from "html5-qrcode";
+import { LibraryMiniMapModal } from "@/components/library-mini-map-modal";
 
 interface Reservation {
   id: number;
@@ -60,6 +61,8 @@ interface Reservation {
   available_copies?: number;
   total_copies?: number;
   cover_image?: string;
+  location?: string;
+  book_location?: string;
   notified_at?: string;
   expires_at?: string;
   queue_position?: number;
@@ -97,6 +100,30 @@ export default function ReservationsPage() {
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Mini Map Wayfinding State
+  const [miniMapOpen, setMiniMapOpen] = useState(false);
+  const [miniMapTarget, setMiniMapTarget] = useState<{
+    location?: string;
+    title?: string;
+    cover?: string;
+  } | null>(null);
+
+  const handleOpenMiniMap = (item?: {
+    location?: string;
+    book_location?: string;
+    title?: string;
+    book_title?: string;
+    cover_image?: string;
+  } | null) => {
+    if (!item) return;
+    setMiniMapTarget({
+      location: item.location || item.book_location || "Phòng 01 - Kệ 01 - Ngăn 01",
+      title: item.title || item.book_title,
+      cover: item.cover_image,
+    });
+    setMiniMapOpen(true);
+  };
+
   const fetchReservations = async () => {
     setLoading(true);
     try {
@@ -123,7 +150,7 @@ export default function ReservationsPage() {
             html5QrCodeRef.current.stop().catch(console.error);
           }
           html5QrCodeRef.current.clear();
-        } catch (e) {}
+        } catch (e) { }
       }
     };
   }, []);
@@ -167,7 +194,7 @@ export default function ReservationsPage() {
               await html5QrCodeRef.current.stop();
             }
             html5QrCodeRef.current.clear();
-          } catch (e) {}
+          } catch (e) { }
         }
 
         const qrScanner = new Html5Qrcode(scannerId);
@@ -192,7 +219,7 @@ export default function ReservationsPage() {
             toast.success("Đã quét nhận diện mã QR thành công!");
             stopCamera();
           },
-          () => {}
+          () => { }
         );
         setIsCameraStarting(false);
       } catch (err: any) {
@@ -221,7 +248,7 @@ export default function ReservationsPage() {
       .finally(() => {
         try {
           qrScanner.clear();
-        } catch (e) {}
+        } catch (e) { }
         if (fileInputRef.current) {
           fileInputRef.current.value = "";
         }
@@ -276,7 +303,7 @@ export default function ReservationsPage() {
         if (jsonCode === expectedTicket || (expectedCard && jsonCode === expectedCard)) {
           return true;
         }
-      } catch {}
+      } catch { }
     }
 
     return false;
@@ -468,7 +495,7 @@ export default function ReservationsPage() {
               </div>
               <div className="flex items-start gap-2">
                 <span className="font-bold text-emerald-600 dark:text-emerald-400 shrink-0">3. Nhận tại quầy:</span>
-                <span>Bạn bấm <strong>[Đồng ý mượn]</strong> và đến quầy đưa Thẻ độc giả để thủ thư giao sách.</span>
+                <span>Bạn bấm <strong>[Đồng ý mượn]</strong> và đến thư viện lấy sách đem đến quầy đưa Thẻ độc giả + mã sách để thủ thư quét xác nhận giao sách.</span>
               </div>
             </div>
           </div>
@@ -525,6 +552,18 @@ export default function ReservationsPage() {
                           <span>
                             Hạn giữ sách ưu tiên: {resv.time_left_hours !== null && resv.time_left_hours !== undefined ? `Còn ${resv.time_left_hours} giờ` : "Trong vòng 48 giờ"}
                           </span>
+                        </div>
+                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono mt-1">
+                          <span>📍 Vị trí trong thư viện:</span>
+                          <span className="font-semibold text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenMiniMap({ location: resv.book_location || resv.location, title: resv.book_title, cover_image: resv.cover_image })}
+                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5"
+                            title="Xem sơ đồ chỉ đường"
+                          >
+                            🗺️ Sơ đồ
+                          </button>
                         </div>
                       </div>
                     </div>
@@ -600,6 +639,18 @@ export default function ReservationsPage() {
                         <p className="text-[11px] text-muted-foreground">
                           Thủ thư đang giữ sẵn ấn phẩm này tại quầy lưu thông. Khi đến nhận, bạn chỉ cần mở mục <strong>Mượn / Trả qua QR</strong> để đưa Thẻ độc giả QR.
                         </p>
+                        <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground font-mono mt-1">
+                          <span>📍 Vị trí lưu kho gốc:</span>
+                          <span className="font-semibold text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleOpenMiniMap({ location: resv.book_location || resv.location, title: resv.book_title, cover_image: resv.cover_image })}
+                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5"
+                            title="Xem sơ đồ chỉ đường"
+                          >
+                            🗺️ Sơ đồ
+                          </button>
+                        </div>
                       </div>
                     </div>
 
@@ -691,6 +742,10 @@ export default function ReservationsPage() {
                           <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">
                             Sách hiện đang được độc giả khác mượn. Khi có người trả sách về thư viện, hệ thống sẽ ưu tiên gửi thông báo cho bạn.
                           </p>
+                          <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-mono mt-1">
+                            <span>📍 Vị trí kệ:</span>
+                            <span className="font-medium text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
+                          </div>
                         </div>
                       </div>
 
@@ -880,6 +935,7 @@ export default function ReservationsPage() {
                       <TableHead className="w-20">Mã phiếu</TableHead>
                       <TableHead>Tên sách</TableHead>
                       <TableHead>Độc giả đặt trước</TableHead>
+                      <TableHead>Vị trí kho</TableHead>
                       <TableHead>Ngày đăng ký / Thứ tự</TableHead>
                       <TableHead>Trạng thái</TableHead>
                       <TableHead className="text-right">Thao tác & Bàn giao</TableHead>
@@ -915,6 +971,22 @@ export default function ReservationsPage() {
                               {r.card_number || "Chưa cấp mã thẻ"}
                               {r.reader_phone ? ` • ${r.reader_phone}` : ""}
                             </p>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1 text-xs font-mono">
+                            <span className="text-muted-foreground">📍</span>
+                            <span className="font-semibold text-foreground">
+                              {r.book_location || r.location || "Phòng 01 - Kệ 01 - Ngăn 01"}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenMiniMap({ location: r.book_location || r.location, title: r.book_title, cover_image: r.cover_image })}
+                              className="text-[10px] text-primary hover:underline ml-1 font-semibold"
+                              title="Xem sơ đồ kệ trên bản đồ"
+                            >
+                              🗺️
+                            </button>
                           </div>
                         </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
@@ -1007,7 +1079,7 @@ export default function ReservationsPage() {
       {/* MODAL XÁC THỰC QUÉT MÃ QR GIAO SÁCH (CHO THỦ THƯ) */}
       {/* ======================================================== */}
       <Dialog open={handoverModalOpen} onOpenChange={(open) => !open && handleCloseHandoverModal()}>
-        <DialogContent className="sm:max-w-[540px]">
+        <DialogContent className="w-[95vw] sm:max-w-[540px] max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="font-display flex items-center gap-2 text-base">
               <QrCode className="h-5 w-5 text-emerald-600" />
@@ -1026,7 +1098,19 @@ export default function ReservationsPage() {
                   <div className="min-w-0">
                     <p className="text-[11px] text-muted-foreground font-medium uppercase tracking-wider">Đầu sách cần giao</p>
                     <p className="font-bold text-foreground text-sm truncate mt-0.5">{selectedResv.book_title}</p>
-                    <p className="text-[11px] text-muted-foreground font-mono">Phiếu: #RES-{selectedResv.id}</p>
+                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                      <p className="text-[11px] text-muted-foreground font-mono">Phiếu: #RES-{selectedResv.id}</p>
+                      <span className="text-muted-foreground">•</span>
+                      <p className="text-[11px] font-mono font-medium text-foreground">📍 {selectedResv.book_location || selectedResv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</p>
+                      <button
+                        type="button"
+                        onClick={() => handleOpenMiniMap({ location: selectedResv.book_location || selectedResv.location, title: selectedResv.book_title, cover_image: selectedResv.cover_image })}
+                        className="text-[10px] text-primary hover:underline font-bold flex items-center gap-0.5 ml-1"
+                        title="Xem sơ đồ chỉ đường"
+                      >
+                        🗺️ Sơ đồ
+                      </button>
+                    </div>
                   </div>
                   <Badge className="bg-emerald-500/15 text-emerald-600 border-emerald-500/30 text-[10px] shrink-0 font-semibold">
                     Sách đã sẵn sàng
@@ -1089,8 +1173,8 @@ export default function ReservationsPage() {
                         {isCameraStarting
                           ? "Đang kết nối..."
                           : isCameraActive
-                          ? "Tắt Camera"
-                          : "Bật Camera Quét"}
+                            ? "Tắt Camera"
+                            : "Bật Camera Quét"}
                       </span>
                     </Button>
                   </div>
@@ -1099,9 +1183,8 @@ export default function ReservationsPage() {
                 {/* HTML5 QR Code Scanner Element */}
                 <div
                   id="handover-qr-reader"
-                  className={`overflow-hidden rounded-xl border border-dashed border-border bg-black/5 text-center transition-all ${
-                    isCameraActive ? "block min-h-[240px] w-full p-2" : "hidden"
-                  }`}
+                  className={`overflow-hidden rounded-xl border border-dashed border-border bg-black/5 text-center transition-all ${isCameraActive ? "block min-h-[240px] w-full p-2" : "hidden"
+                    }`}
                 />
                 <div id="handover-qr-reader-file-temp" className="hidden" />
 
@@ -1188,6 +1271,15 @@ export default function ReservationsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Mini Map Navigation Modal */}
+      <LibraryMiniMapModal
+        open={miniMapOpen}
+        onOpenChange={setMiniMapOpen}
+        location={miniMapTarget?.location}
+        bookTitle={miniMapTarget?.title}
+        coverImage={miniMapTarget?.cover}
+      />
 
       {ConfirmDialogComponent}
     </div>
