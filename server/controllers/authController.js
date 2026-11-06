@@ -99,7 +99,9 @@ exports.login = async (req, res) => {
                 fullName: user.full_name,
                 email: user.email,
                 role: user.role,
-                avatar: user.avatar_url
+                avatar: user.avatar_url,
+                cardNumber: user.card_number,
+                card_number: user.card_number
             }
         });
     } catch (error) {

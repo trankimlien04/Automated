@@ -20,7 +20,8 @@ import {
   User,
   Zap,
   ArrowRightLeft,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Inbox
 } from "lucide-react";
 
 import {
@@ -54,10 +55,10 @@ export function AppSidebar() {
   const isActive = (url: string) => {
     if (url === "/") return pathname === "/";
     if (url.includes("?")) {
-      return (
-        currentPath === url ||
-        (url === "/borrow?mode=checkout" && pathname === "/borrow" && !location.search)
-      );
+      return currentPath === url;
+    }
+    if (url === "/borrow") {
+      return pathname === "/borrow" && !location.search;
     }
     return pathname.startsWith(url);
   };
@@ -87,11 +88,12 @@ export function AppSidebar() {
 
   const operations = [
     ...(isReader ? [
-      { title: "Phiếu mượn & Biên lai", url: "/borrow", icon: QrCode, roles: ["reader"] }
+      { title: "Phiếu mượn & Thẻ đọc", url: "/borrow", icon: QrCode, roles: ["reader"] }
     ] : [
-      { title: "Quầy Xuất Mượn", url: "/borrow?mode=checkout", icon: Zap, roles: ["admin", "librarian"] },
-      { title: "Quầy Nhận Trả Sách", url: "/borrow?mode=return", icon: ArrowRightLeft, roles: ["admin", "librarian"] },
-      { title: "Sổ Lưu Thông & Đối Soát", url: "/borrow?mode=history", icon: FileSpreadsheet, roles: ["admin", "librarian", "owner"] },
+      { title: "Quầy Đa Năng Thông Minh", url: "/borrow", icon: Zap, roles: ["admin", "librarian", "owner"] },
+      { title: "Sổ Lưu Thông & Lịch Sử", url: "/borrow?mode=history", icon: FileSpreadsheet, roles: ["admin", "librarian", "owner"] },
+      { title: "Hòm Trả Sách 24/7", url: "/borrow?mode=dropbox", icon: Inbox, roles: ["admin", "librarian", "owner"] },
+      { title: "Trạm Kiosk & An Ninh", url: "/borrow?mode=kiosk", icon: ArrowRightLeft, roles: ["admin", "owner"] },
     ]),
     { title: "Đặt trước sách", url: "/reservations", icon: CalendarClock, roles: ["admin", "librarian", "reader", "owner"] },
     { title: "Phí phạt", url: "/fines", icon: Wallet, roles: ["admin", "librarian", "reader", "owner"] },

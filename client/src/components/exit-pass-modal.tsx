@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } f
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { QRCodeCanvas } from "qrcode.react";
-import { FileCheck, Clock, AlertTriangle, BookOpen, Copy, Check, QrCode } from "lucide-react";
+import { FileCheck, Clock, AlertTriangle, BookOpen, Copy, Check, QrCode, Printer, CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 
 interface ExitPassModalProps {
@@ -124,13 +124,13 @@ export function ExitPassModal({ open, onOpenChange, passData }: ExitPassModalPro
               </Button>
             </div>
 
-            {/* Countdown Badge */}
+            {/* Countdown / Validity Badge */}
             <div className="mt-2.5">
-              {timeLeft.isExpired ? (
-                <Badge variant="destructive" className="px-3 py-1 text-xs flex items-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5" />
-                  Biên lai đã hoàn tất đối soát
-                </Badge>
+              {timeLeft.isExpired || passData.status === "used" || passData.status === "expired" || (passData as any)?.isExpired ? (
+                <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-xs font-semibold">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-slate-500" />
+                  Đã hoàn tất đối soát • Đã lưu trữ số hóa
+                </div>
               ) : (
                 <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-amber-50 text-amber-900 border border-amber-300 text-xs font-semibold">
                   <Clock className="w-3.5 h-3.5 text-amber-600 animate-pulse" />
@@ -198,12 +198,23 @@ export function ExitPassModal({ open, onOpenChange, passData }: ExitPassModalPro
           </div>
         </div>
 
-        <DialogFooter className="p-4 bg-muted/30 border-t flex sm:justify-between items-center gap-2">
-          <span className="text-[11px] text-muted-foreground hidden sm:inline">
-            Smart Library Management • Biên lai số
-          </span>
+        <DialogFooter className="p-4 bg-muted/30 border-t flex flex-col sm:flex-row sm:justify-between items-center gap-2">
+          <div className="flex items-center gap-2 w-full sm:w-auto">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => window.print()}
+              className="text-xs gap-1.5 cursor-pointer w-full sm:w-auto"
+            >
+              <Printer className="w-3.5 h-3.5" /> In biên lai
+            </Button>
+            <span className="text-[11px] text-muted-foreground hidden sm:inline">
+              Smart Library Management • Biên lai số
+            </span>
+          </div>
           <Button
-            className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+            className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
             onClick={() => onOpenChange(false)}
           >
             Đã hiểu & Đóng biên lai
