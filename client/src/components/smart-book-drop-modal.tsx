@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Inbox, Camera, CheckCircle2, BookOpen
+  Inbox, Camera, CheckCircle2, BookOpen, Upload
 } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/services/api";
@@ -29,6 +29,26 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
   const [checkingCopy, setCheckingCopy] = useState(false);
   const [copyPreview, setCopyPreview] = useState<any | null>(null);
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files.length > 0) {
+      const file = event.target.files[0];
+      const scanner = new Html5Qrcode("dropbox-qr-file-temp");
+      try {
+        const decodedText = await scanner.scanFile(file, true);
+        setBookQrInput(decodedText.trim());
+        toast.success(`Đã nhận diện mã QR: ${decodedText.trim()}`);
+      } catch (err) {
+        toast.error("Không tìm thấy mã QR hợp lệ trong ảnh này");
+      } finally {
+        try { scanner.clear(); } catch (e) {}
+      }
+    }
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
 
   useEffect(() => {
     if (open) {
@@ -247,10 +267,29 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
                     variant={isCameraActive ? "destructive" : "outline"}
                     onClick={isCameraActive ? stopCamera : startCamera}
                     className="gap-1.5 shrink-0"
+                    title="Mở camera quét"
                   >
                     <Camera className="w-4 h-4" />
                     {isCameraActive ? "Tắt" : "Quét"}
                   </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => fileInputRef.current?.click()}
+                    className="gap-1.5 shrink-0 text-xs"
+                    title="Tải ảnh QR từ máy tính/điện thoại"
+                  >
+                    <Upload className="w-4 h-4 text-sky-600" />
+                    <span>Tải ảnh</span>
+                  </Button>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    accept="image/*"
+                    className="hidden"
+                    onChange={handleFileUpload}
+                  />
+                  <div id="dropbox-qr-file-temp" className="hidden" />
                 </div>
               </div>
 

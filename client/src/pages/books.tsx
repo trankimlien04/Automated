@@ -13,7 +13,7 @@ import {
   Info, Eye, Calendar, Building, FileText, Clock, Compass, Layers, 
   ArrowRightLeft, FolderTree, ChevronDown, ChevronRight, ChevronLeft, ChevronsLeft, ChevronsRight, Sparkles, MapPin, 
   Grid3X3, ArrowUpRight, X, SlidersHorizontal, Check, ExternalLink, Copy,
-  Camera, ShieldCheck, Zap, User
+  Camera, ShieldCheck, Zap, User, RotateCcw
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import api from "@/services/api";
@@ -743,6 +743,36 @@ export default function BooksPage() {
     });
   };
 
+  const handleRemoveDraftItem = (itemId: number, bookTitle: string) => {
+    confirm({
+      title: "Xóa sách khỏi phiếu mượn?",
+      description: `Bạn có chắc muốn xóa cuốn «${bookTitle}» khỏi phiếu mượn này? Suất giữ chỗ sẽ được trả lại cho kho thư viện.`,
+      confirmText: "Xóa cuốn này",
+      cancelText: "Giữ lại",
+      variant: "destructive",
+      onConfirm: async () => {
+        try {
+          await api.delete(`/borrow/drafts/items/${itemId}`);
+          toast.success(`Đã xóa cuốn «${bookTitle}» khỏi phiếu mượn`);
+          await fetchUserStatus();
+          await fetchBooks();
+        } catch (err: any) {
+          toast.error(err.response?.data?.message || "Không thể xóa sách khỏi phiếu");
+        }
+      }
+    });
+  };
+
+  const handleUnverifyDraftItem = async (itemId: number, bookTitle: string) => {
+    try {
+      await api.post(`/borrow/drafts/items/${itemId}/unverify`);
+      toast.success(`Đã gỡ mã đối soát cuốn «${bookTitle}». Bạn có thể quét lại mã bản sao khác!`);
+      await fetchUserStatus();
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || "Không thể hủy đối soát");
+    }
+  };
+
   const handleDownloadDraftQr = (code: string) => {
     const canvas = document.getElementById("canvas-my-draft-qr") as HTMLCanvasElement;
     if (!canvas) return;
@@ -1016,7 +1046,7 @@ export default function BooksPage() {
                 <Button
                   type="button"
                   className="flex-1 md:flex-initial gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-xs h-9 shadow-xs"
-                  onClick={() => navigate("/borrow")}
+                  onClick={() => navigate("/borrow?scan=shelf")}
                 >
                   <Camera className="h-4 w-4" />
                   📱 Mở Máy Quét Tại Kệ
@@ -2947,7 +2977,7 @@ export default function BooksPage() {
                           className="h-7 text-[11px] gap-1 text-primary border-primary/40 hover:bg-primary/10 mt-1"
                           onClick={() => {
                             setIsDraftQrModalOpen(false);
-                            navigate("/borrow");
+                            navigate("/borrow?scan=shelf");
                           }}
                         >
                           <Camera className="h-3 w-3" /> Mở camera quét tại kệ
@@ -3096,20 +3126,40 @@ export default function BooksPage() {
                             >
                               <Compass className="h-3.5 w-3.5" />
                             </Button>
-                            {!isVerified && (
+                            {!isVerified ? (
                               <Button
                                 size="sm"
                                 variant="secondary"
-                                className="h-7 text-[11px] gap-1 px-2 font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200"
+                                className="h-7 text-[11px] gap-1 px-2 font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200 cursor-pointer"
                                 onClick={() => {
                                   setIsDraftQrModalOpen(false);
-                                  navigate("/borrow");
+                                  navigate("/borrow?scan=shelf");
                                 }}
                                 title="Mở máy quét trên điện thoại để quét mã cuốn sách này"
                               >
                                 <Camera className="h-3 w-3" /> Quét
                               </Button>
+                            ) : (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-[11px] gap-1 px-2 font-medium text-amber-700 hover:bg-amber-500/10 border-amber-300 cursor-pointer"
+                                onClick={() => handleUnverifyDraftItem(item.item_id || item.id, item.book_title)}
+                                title="Quét lộn sách hoặc muốn đổi bản sao khác? Bấm để gỡ mã và quét lại"
+                              >
+                                <RotateCcw className="h-3 w-3 text-amber-600" /> Quét lại
+                              </Button>
                             )}
+
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 w-7 p-0 text-destructive/70 hover:text-destructive hover:bg-destructive/10 cursor-pointer shrink-0"
+                              onClick={() => handleRemoveDraftItem(item.item_id || item.id, item.book_title)}
+                              title="Xóa cuốn sách này khỏi phiếu mượn"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
                           </div>
                         </div>
                       );
@@ -3137,7 +3187,7 @@ export default function BooksPage() {
                       className="flex-1 sm:flex-initial text-xs gap-1.5 bg-primary text-primary-foreground font-semibold"
                       onClick={() => {
                         setIsDraftQrModalOpen(false);
-                        navigate("/borrow");
+                        navigate("/borrow?scan=shelf");
                       }}
                     >
                       <Camera className="h-3.5 w-3.5" />

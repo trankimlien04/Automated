@@ -23,8 +23,9 @@ router.post('/drop-box-return', authenticateToken, borrowController.dropBoxRetur
 router.get('/drop-box-items', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.getDropBoxItems);
 router.post('/drop-box-audit', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.auditDropBoxItem);
 
-// Physical Security & Loss Prevention: Exit Passes (Vé thông hành ra cửa)
+// Physical Security & Loss Prevention: Exit Passes (Vé thông hành ra cửa / Biên lai mượn)
 router.get('/exit-passes/my-active', authenticateToken, borrowController.getMyActiveExitPass);
+router.get('/exit-passes/my-history', authenticateToken, borrowController.getMyExitPassesHistory);
 router.get('/exit-passes/active-list', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.getActiveExitPassesList);
 router.post('/exit-passes/verify', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.verifyExitPass);
 router.post('/exit-passes/clear', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.clearExitPass);
@@ -52,6 +53,7 @@ router.post('/drafts/scan-direct', authenticateToken, borrowController.addDirect
 router.get('/drafts/my-active', authenticateToken, borrowController.getMyActiveDraft);
 router.get('/drafts/pending-list', authenticateToken, requireRole(['admin', 'librarian']), borrowController.getPendingDraftsList);
 router.delete('/drafts/items/:itemId', authenticateToken, borrowController.removeDraftItem);
+router.post('/drafts/items/:itemId/unverify', authenticateToken, borrowController.unverifyDraftItem);
 router.get('/drafts/:code', authenticateToken, borrowController.getBorrowDraftByCode);
 router.post('/drafts/:code/verify-copy', authenticateToken, borrowController.verifyDraftItemCopy);
 router.post('/drafts/:code/approve', authenticateToken, requireRole(['admin', 'librarian']), borrowController.approveBorrowDraft);
