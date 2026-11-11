@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,8 +12,8 @@ import {
   CheckCircle2, BookmarkPlus, FileSpreadsheet, Upload, FileDown, AlertCircle, 
   Info, Eye, Calendar, Building, FileText, Clock, Compass, Layers, 
   ArrowRightLeft, FolderTree, ChevronDown, ChevronRight, ChevronLeft, ChevronsLeft, ChevronsRight, Sparkles, MapPin, 
-  Grid3X3, ArrowUpRight, X, SlidersHorizontal, Check, ExternalLink, Copy,
-  Camera, ShieldCheck, Zap, User, RotateCcw
+  Grid3X3, ArrowUpRight, ArrowRight, X, SlidersHorizontal, Check, ExternalLink, Copy,
+  Camera, ShieldCheck, Zap, User, RotateCcw, Minus, Scan
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import api from "@/services/api";
@@ -22,7 +22,28 @@ import { toast } from "sonner";
 import { useConfirm } from "@/hooks/use-confirm";
 import { QRCodeCanvas } from "qrcode.react";
 import BookReviews from "@/components/book-reviews";
-import { LibraryMiniMapModal } from "@/components/library-mini-map-modal";
+import {
+  LibraryMiniMapModal,
+  loadLibraryLayoutConfig,
+  saveLibraryLayoutConfig,
+  type LibraryLayoutConfig,
+  pad2,
+} from "@/components/library-mini-map-modal";
+import { SmartShelfAuditModal } from "@/components/smart-shelf-audit-modal";
+import { runSmartBookSearch, type SmartMatchMeta } from "@/lib/smart-search";
+import { optimizeMultiBookPickPath } from "@/lib/pick-path";
+
+export interface SmartWaitPrediction {
+  estimated_wait_days: number;
+  expected_available_date: string;
+  expected_date_vn: string;
+  earliest_due_date: string;
+  earliest_due_date_vn: string;
+  waiting_ahead_count: number;
+  queue_position: number;
+  active_borrowed_count: number;
+  summary_text: string;
+}
 
 interface Book {
   id: number;
@@ -42,10 +63,14 @@ interface Book {
   location?: string;
   avg_rating?: string | number;
   review_count?: number;
+  waiting_queue_count?: number;
+  wait_prediction?: SmartWaitPrediction | null;
+  _smartMatch?: SmartMatchMeta;
 }
 
 export default function BooksPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [booksList, setBooksList] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
   const { user } = useAuth();
@@ -55,7 +80,14 @@ export default function BooksPage() {
   const [activeViewTab, setActiveViewTab] = useState<"catalog" | "rooms" | "categories">("catalog");
 
   // Filters for catalog
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(() => searchParams.get("search") || "");
+
+  useEffect(() => {
+    const paramSearch = searchParams.get("search");
+    if (paramSearch !== null && paramSearch !== q) {
+      setQ(paramSearch);
+    }
+  }, [searchParams]);
   const [selectedCategoryFilter, setSelectedCategoryFilter] = useState("all");
   const [selectedRoomFilter, setSelectedRoomFilter] = useState("all");
   const [selectedShelfFilter, setSelectedShelfFilter] = useState("all");
@@ -89,8 +121,22 @@ export default function BooksPage() {
   const [selectedCategory, setSelectedCategory] = useState("");
   const [newIsbn, setNewIsbn] = useState("");
   const [newCopies, setNewCopies] = useState(1);
+  const [newBookRoom, setNewBookRoom] = useState("Phòng 01");
+  const [newBookShelf, setNewBookShelf] = useState("Kệ 01");
+  const [newBookRack, setNewBookRack] = useState("Ngăn 01");
   const [newLocation, setNewLocation] = useState("");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+
+  // Library Spatial Layout Config (Rooms, Shelves per Room, Racks per Shelf)
+  const [layoutConfig, setLayoutConfig] = useState<LibraryLayoutConfig>(() =>
+    loadLibraryLayoutConfig()
+  );
+
+  useEffect(() => {
+    const handler = () => setLayoutConfig(loadLibraryLayoutConfig());
+    window.addEventListener("athenaeum-layout-updated", handler);
+    return () => window.removeEventListener("athenaeum-layout-updated", handler);
+  }, []);
 
   // Excel Batch Import States
   const [isExcelDialogOpen, setIsExcelDialogOpen] = useState(false);
@@ -122,6 +168,15 @@ export default function BooksPage() {
     author?: string;
     cover?: string;
   } | null>(null);
+
+  // Smart Shelf Inventory Audit State (Kiểm kê kho sách nhanh bằng quét QR hàng loạt)
+  const [shelfAuditOpen, setShelfAuditOpen] = useState(false);
+  const [shelfAuditLocation, setShelfAuditLocation] = useState("Phòng 01 - Kệ 01 - Ngăn 01");
+
+  const handleOpenShelfAudit = (loc?: string) => {
+    setShelfAuditLocation(loc || "Phòng 01 - Kệ 01 - Ngăn 01");
+    setShelfAuditOpen(true);
+  };
 
   // Reader's active borrow requests and reservations state
   const [myBorrowRequests, setMyBorrowRequests] = useState<any[]>([]);
@@ -208,28 +263,33 @@ export default function BooksPage() {
     }
   };
 
-  // Spatial aggregation: Room -> Categories & Shelves
+  // Spatial aggregation: Room -> Categories, Shelves & Racks (Merged with layoutConfig)
   const spatialRooms = useMemo(() => {
     const map = new Map<string, {
+      roomNum: number;
       roomName: string;
       booksCount: number;
       copiesCount: number;
       availableCopiesCount: number;
     }>();
 
-    // Default library rooms
-    ["Phòng 01", "Phòng 02", "Phòng 03"].forEach(r => {
-      map.set(r, { roomName: r, booksCount: 0, copiesCount: 0, availableCopiesCount: 0 });
-    });
+    // Pre-populate rooms from layoutConfig (at least 3 default rooms)
+    const maxConfiguredRoom = Math.max(3, layoutConfig.maxRoom || 3);
+    for (let r = 1; r <= maxConfiguredRoom; r++) {
+      const rName = `Phòng ${pad2(r)}`;
+      map.set(rName, { roomNum: r, roomName: rName, booksCount: 0, copiesCount: 0, availableCopiesCount: 0 });
+    }
 
     booksList.forEach(b => {
       const parsed = parseLocation(b.location);
+      const rMatch = parsed.room.match(/\d+/);
+      const rNum = rMatch ? Math.max(1, parseInt(rMatch[0], 10)) : 1;
       if (!map.has(parsed.room)) {
-        map.set(parsed.room, { roomName: parsed.room, booksCount: 0, copiesCount: 0, availableCopiesCount: 0 });
+        map.set(parsed.room, { roomNum: rNum, roomName: parsed.room, booksCount: 0, copiesCount: 0, availableCopiesCount: 0 });
       }
     });
 
-    const result = Array.from(map.keys()).map(roomName => {
+    const result = Array.from(map.values()).map(({ roomNum, roomName }) => {
       const roomBooks = booksList.filter(b => parseLocation(b.location).room === roomName);
 
       // Categories in this room
@@ -242,8 +302,9 @@ export default function BooksPage() {
         catMap.set(catName, existing);
       });
 
-      // Shelves in this room
+      // Shelves in this room (pre-populate from layoutConfig.shelvesPerRoom[roomNum] or default 6)
       const shelfMap = new Map<string, {
+        shelfNum: number;
         shelfName: string;
         books: Book[];
         categories: Set<string>;
@@ -251,10 +312,26 @@ export default function BooksPage() {
         availableCopies: number;
       }>();
 
+      const configuredMaxShelf = Math.max(6, layoutConfig.shelvesPerRoom[roomNum] || 6);
+      for (let s = 1; s <= configuredMaxShelf; s++) {
+        const sName = `Kệ ${pad2(s)}`;
+        shelfMap.set(sName, {
+          shelfNum: s,
+          shelfName: sName,
+          books: [],
+          categories: new Set(),
+          totalCopies: 0,
+          availableCopies: 0,
+        });
+      }
+
       roomBooks.forEach(b => {
         const shelfName = parseLocation(b.location).shelf;
+        const sMatch = shelfName.match(/\d+/);
+        const sNum = sMatch ? Math.max(1, parseInt(sMatch[0], 10)) : 1;
         if (!shelfMap.has(shelfName)) {
           shelfMap.set(shelfName, {
+            shelfNum: sNum,
             shelfName,
             books: [],
             categories: new Set(),
@@ -271,15 +348,36 @@ export default function BooksPage() {
 
       const sortedShelves = Array.from(shelfMap.values())
         .sort((a, b) => a.shelfName.localeCompare(b.shelfName, undefined, { numeric: true }))
-        .map(s => ({
-          shelfName: s.shelfName,
-          books: s.books.sort((x, y) => parseLocation(x.location).rack.localeCompare(parseLocation(y.location).rack, undefined, { numeric: true })),
-          categories: Array.from(s.categories),
-          totalCopies: s.totalCopies,
-          availableCopies: s.availableCopies,
-        }));
+        .map(s => {
+          // Compute max rack on this shelf
+          let maxRack = Math.max(5, layoutConfig.racksPerShelf[`${roomNum}_${s.shelfNum}`] || 5);
+          s.books.forEach(bk => {
+            const rkMatch = parseLocation(bk.location).rack.match(/\d+/);
+            const rkNum = rkMatch ? parseInt(rkMatch[0], 10) : 1;
+            if (rkNum > maxRack) maxRack = rkNum;
+          });
+
+          const racks: Array<{ rackNum: number; rackName: string; bookCount: number }> = [];
+          for (let rk = 1; rk <= maxRack; rk++) {
+            const rkName = `Ngăn ${pad2(rk)}`;
+            const count = s.books.filter(bk => parseLocation(bk.location).rack === rkName).length;
+            racks.push({ rackNum: rk, rackName: rkName, bookCount: count });
+          }
+
+          return {
+            shelfNum: s.shelfNum,
+            shelfName: s.shelfName,
+            books: s.books.sort((x, y) => parseLocation(x.location).rack.localeCompare(parseLocation(y.location).rack, undefined, { numeric: true })),
+            categories: Array.from(s.categories),
+            totalCopies: s.totalCopies,
+            availableCopies: s.availableCopies,
+            maxRack,
+            racks,
+          };
+        });
 
       return {
+        roomNum,
         roomName,
         booksCount: roomBooks.length,
         copiesCount: roomBooks.reduce((acc, b) => acc + (b.total_copies || 0), 0),
@@ -290,7 +388,135 @@ export default function BooksPage() {
     });
 
     return result.sort((a, b) => a.roomName.localeCompare(b.roomName, undefined, { numeric: true }));
-  }, [booksList]);
+  }, [booksList, layoutConfig]);
+
+  // Librarian Handlers for Adding / Removing Rooms, Shelves, and Racks directly
+  const handleAddRoomToLibrary = () => {
+    const currentMaxRoom = spatialRooms.reduce((m, r) => Math.max(m, r.roomNum), layoutConfig.maxRoom || 3);
+    const nextRoomNum = currentMaxRoom + 1;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      maxRoom: nextRoomNum,
+      shelvesPerRoom: {
+        ...layoutConfig.shelvesPerRoom,
+        [nextRoomNum]: 6,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.success(`Đã thêm Phòng ${pad2(nextRoomNum)} (kèm 6 kệ sách mặc định) vào sơ đồ thư viện!`);
+  };
+
+  const handleRemoveEmptyRoom = (roomNum: number, roomName: string, booksCount: number) => {
+    if (booksCount > 0) {
+      toast.error(`${roomName} đang có ${booksCount} đầu sách, không thể xóa!`);
+      return;
+    }
+    if (roomNum <= 3) {
+      toast.error("Không thể xóa 3 phòng tiêu chuẩn mặc định của thư viện (Phòng 01 - Phòng 03).");
+      return;
+    }
+    const currentMax = spatialRooms.length;
+    const nextMax = Math.max(3, currentMax - 1);
+    const nextShelvesPerRoom = { ...layoutConfig.shelvesPerRoom };
+    delete nextShelvesPerRoom[roomNum];
+    delete nextShelvesPerRoom[currentMax];
+
+    const nextRacksPerShelf = { ...layoutConfig.racksPerShelf };
+    Object.keys(nextRacksPerShelf).forEach((k) => {
+      if (k.startsWith(`${roomNum}_`) || k.startsWith(`${currentMax}_`)) {
+        delete nextRacksPerShelf[k];
+      }
+    });
+
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      maxRoom: nextMax,
+      shelvesPerRoom: nextShelvesPerRoom,
+      racksPerShelf: nextRacksPerShelf,
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.info(`Đã xóa ${roomName} khỏi sơ đồ thư viện.`);
+  };
+
+  const handleAddShelfToRoom = (roomNum: number, roomName: string, currentShelfCount: number) => {
+    const nextShelfNum = currentShelfCount + 1;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      shelvesPerRoom: {
+        ...layoutConfig.shelvesPerRoom,
+        [roomNum]: nextShelfNum,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.success(`Đã thêm Kệ ${pad2(nextShelfNum)} vào ${roomName}! Sơ đồ dẫn đường đã tự động cập nhật.`);
+  };
+
+  const handleRemoveLastShelfFromRoom = (roomNum: number, roomName: string, lastShelf: { shelfNum: number; shelfName: string; books: Book[] }) => {
+    if (lastShelf.books.length > 0) {
+      toast.error(`${lastShelf.shelfName} đang có ${lastShelf.books.length} đầu sách, không thể xóa!`);
+      return;
+    }
+    if (lastShelf.shelfNum <= 6) {
+      toast.error("Mỗi phòng có tối thiểu 6 kệ tiêu chuẩn (Kệ 01 - Kệ 06).");
+      return;
+    }
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      shelvesPerRoom: {
+        ...layoutConfig.shelvesPerRoom,
+        [roomNum]: lastShelf.shelfNum - 1,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.info(`Đã thu gọn ${lastShelf.shelfName} khỏi ${roomName}.`);
+  };
+
+  const handleAddRackToShelf = (roomNum: number, roomName: string, shelfNum: number, shelfName: string, currentMaxRack: number) => {
+    const nextRackNum = currentMaxRack + 1;
+    const key = `${roomNum}_${shelfNum}`;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      racksPerShelf: {
+        ...layoutConfig.racksPerShelf,
+        [key]: nextRackNum,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.success(`Đã thêm Ngăn ${pad2(nextRackNum)} vào ${shelfName} (${roomName})! Sơ đồ kệ đã tự động cập nhật.`);
+  };
+
+  const handleRemoveTopRackFromShelf = (
+    roomNum: number,
+    shelfNum: number,
+    shelfName: string,
+    currentMaxRack: number,
+    topRackBookCount: number
+  ) => {
+    if (topRackBookCount > 0) {
+      toast.error(`Ngăn ${pad2(currentMaxRack)} đang có ${topRackBookCount} đầu sách, không thể xóa!`);
+      return;
+    }
+    if (currentMaxRack <= 5) {
+      toast.error("Mỗi kệ có tối thiểu 5 ngăn tiêu chuẩn (Ngăn 01 - Ngăn 05).");
+      return;
+    }
+    const key = `${roomNum}_${shelfNum}`;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      racksPerShelf: {
+        ...layoutConfig.racksPerShelf,
+        [key]: currentMaxRack - 1,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.info(`Đã thu gọn Ngăn ${pad2(currentMaxRack)} khỏi ${shelfName}.`);
+  };
 
   // Category Matrix aggregation: Category -> Primary Room & Shelves Distribution
   const categoryMatrix = useMemo(() => {
@@ -394,49 +620,97 @@ export default function BooksPage() {
   // List of rooms for filters
   const availableRooms = useMemo(() => {
     const set = new Set<string>();
+    const maxR = Math.max(3, layoutConfig.maxRoom || 3);
+    for (let r = 1; r <= maxR; r++) set.add(`Phòng ${pad2(r)}`);
     booksList.forEach(b => {
       const p = parseLocation(b.location);
       if (p.room) set.add(p.room);
     });
-    ["Phòng 01", "Phòng 02", "Phòng 03"].forEach(r => set.add(r));
     return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [booksList]);
+  }, [booksList, layoutConfig]);
 
   // List of shelves for filters
   const availableShelves = useMemo(() => {
     const set = new Set<string>();
+    let maxS = 6;
+    Object.values(layoutConfig.shelvesPerRoom || {}).forEach(v => {
+      if (v > maxS) maxS = v;
+    });
+    for (let s = 1; s <= maxS; s++) set.add(`Kệ ${pad2(s)}`);
     booksList.forEach(b => {
       const p = parseLocation(b.location);
       if (selectedRoomFilter === "all" || p.room === selectedRoomFilter) {
         if (p.shelf) set.add(p.shelf);
       }
     });
-    if (set.size === 0) {
-      ["Kệ 01", "Kệ 02", "Kệ 03", "Kệ 04", "Kệ 05"].forEach(s => set.add(s));
-    }
     return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  }, [booksList, selectedRoomFilter]);
+  }, [booksList, selectedRoomFilter, layoutConfig]);
 
-  // Filter books by search keyword, category, room, and shelf
-  const filtered = booksList.filter((b) => {
-    const term = q.toLowerCase();
-    const matchesQuery = !term || [b.title, b.isbn, b.author_name, b.category_name, b.location]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase()
-      .includes(term);
+  // Dynamic options for Relocation & Add Book (auto-expands when new Rooms, Shelves, or Racks exist)
+  const dynamicRoomOptions = useMemo(() => {
+    const set = new Set<string>();
+    const maxR = Math.max(3, layoutConfig.maxRoom || 3);
+    for (let r = 1; r <= maxR; r++) set.add(`Phòng ${pad2(r)}`);
+    booksList.forEach(b => {
+      const p = parseLocation(b.location);
+      if (p.room) set.add(p.room);
+    });
+    if (relocateRoom) set.add(relocateRoom);
+    if (newBookRoom) set.add(newBookRoom);
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [booksList, relocateRoom, newBookRoom, layoutConfig]);
 
-    const matchesCategory =
-      selectedCategoryFilter === "all" ||
-      (b.category_id && b.category_id.toString() === selectedCategoryFilter) ||
-      (b.category_name && b.category_name === selectedCategoryFilter);
+  const dynamicShelfOptions = useMemo(() => {
+    const set = new Set<string>();
+    let maxS = 6;
+    Object.values(layoutConfig.shelvesPerRoom || {}).forEach(v => {
+      if (v > maxS) maxS = v;
+    });
+    for (let s = 1; s <= maxS; s++) set.add(`Kệ ${pad2(s)}`);
+    booksList.forEach(b => {
+      const p = parseLocation(b.location);
+      if (p.shelf) set.add(p.shelf);
+    });
+    if (relocateShelf) set.add(relocateShelf);
+    if (newBookShelf) set.add(newBookShelf);
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [booksList, relocateShelf, newBookShelf, layoutConfig]);
 
-    const parsed = parseLocation(b.location);
-    const matchesRoom = selectedRoomFilter === "all" || parsed.room === selectedRoomFilter;
-    const matchesShelf = selectedShelfFilter === "all" || parsed.shelf === selectedShelfFilter;
+  const dynamicRackOptions = useMemo(() => {
+    const set = new Set<string>();
+    let maxRk = 5;
+    Object.values(layoutConfig.racksPerShelf || {}).forEach(v => {
+      if (v > maxRk) maxRk = v;
+    });
+    for (let rk = 1; rk <= maxRk; rk++) set.add(`Ngăn ${pad2(rk)}`);
+    booksList.forEach(b => {
+      const p = parseLocation(b.location);
+      if (p.rack) set.add(p.rack);
+    });
+    if (relocateRack) set.add(relocateRack);
+    if (newBookRack) set.add(newBookRack);
+    return Array.from(set).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  }, [booksList, relocateRack, newBookRack, layoutConfig]);
 
-    return matchesQuery && matchesCategory && matchesRoom && matchesShelf;
-  });
+  // Filter books by category, room, shelf, and Smart Fuzzy + Semantic Search Engine
+  const smartSearchState = useMemo(() => {
+    const preFiltered = booksList.filter((b) => {
+      const matchesCategory =
+        selectedCategoryFilter === "all" ||
+        (b.category_id && b.category_id.toString() === selectedCategoryFilter) ||
+        (b.category_name && b.category_name === selectedCategoryFilter);
+
+      const parsed = parseLocation(b.location);
+      const matchesRoom = selectedRoomFilter === "all" || parsed.room === selectedRoomFilter;
+      const matchesShelf = selectedShelfFilter === "all" || parsed.shelf === selectedShelfFilter;
+
+      return matchesCategory && matchesRoom && matchesShelf;
+    });
+
+    return runSmartBookSearch(preFiltered, q);
+  }, [booksList, q, selectedCategoryFilter, selectedRoomFilter, selectedShelfFilter]);
+
+  const filtered = smartSearchState.items;
 
   // Reset to page 1 whenever filters change
   useEffect(() => {
@@ -672,7 +946,17 @@ export default function BooksPage() {
     setLoading(true);
     try {
       const response = await api.get("/books");
-      setBooksList(response.data || []);
+      const rawBooks = Array.isArray(response.data) ? response.data : [];
+      const normalizedBooks = rawBooks.map((b: Book) => {
+        const total = Math.max(0, Number(b.total_copies) || 0);
+        const avail = Math.min(total, Math.max(0, Number(b.available_copies) || 0));
+        return {
+          ...b,
+          total_copies: total,
+          available_copies: avail,
+        };
+      });
+      setBooksList(normalizedBooks);
     } catch (error) {
       console.error("Lỗi khi tải sách:", error);
       toast.error("Không thể kết nối tới server để tải sách");
@@ -834,13 +1118,102 @@ export default function BooksPage() {
     }
 
     confirm({
-      title: isAvailable 
-        ? "Đăng ký mượn online (Giữ chỗ 24h & Nhận mã QR)?" 
+      title: isAvailable
+        ? "Đăng ký mượn online (Sinh Phiếu mượn nháp 24h)?"
         : "Đặt trước cuốn sách này (Xếp hàng đợi)?",
-      description: isAvailable
-        ? `Bạn đang muốn mượn cuốn "${book.title}"?\n\n🛡️ BƯỚC 1 - GIỮ CHỖ 24H: Hệ thống tạm giữ riêng 1 cuốn này cho bạn trong 24h để đảm bảo có sẵn sách khi bạn tới thư viện.\n\n📍 Vị trí sách: ${book.location || "Phòng 01 - Kệ 01 - Ngăn 01"}.\n\n📱 BƯỚC 2 - TỰ LẤY & QUÉT TẠI KỆ: Khi đến thư viện, bạn tự đến kệ lấy sách và dùng điện thoại quét mã QR trên sách để tự đối soát và kích hoạt Mã Nhận Sách.\n\n⚡ BƯỚC 3 - DUYỆT 1-CHẠM TẠI QUẦY: Bạn mang sách ra quầy xuất trình Mã Nhận Sách cho Thủ thư quét 1 lần (1 giây) là xong toàn bộ!`
-        : `Đầu sách "${book.title}" hiện đã được các độc giả khác mượn hết (0 bản sao sẵn có trong kho).\n\nBạn có muốn đăng ký Đặt trước để xếp hàng không? Khi có độc giả hoàn trả sách về thư viện, hệ thống sẽ ưu tiên giữ sách 48h cho bạn và gửi thông báo!`,
-      confirmText: isAvailable ? "Xác nhận & Giữ chỗ ngay" : "Xác nhận xếp hàng",
+      description: isAvailable ? (
+        <div className="space-y-3 text-left mt-1">
+          <div className="p-2.5 rounded-xl bg-primary/5 border border-primary/20 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-foreground truncate">{book.title}</p>
+              <p className="text-[11px] text-muted-foreground">
+                📍 Vị trí kệ: <strong className="text-foreground">{book.location || "Phòng 01 - Kệ 01 - Ngăn 01"}</strong>
+              </p>
+            </div>
+            <Badge className="bg-emerald-600 text-white text-[10px] shrink-0">
+              Còn {book.available_copies} cuốn
+            </Badge>
+          </div>
+
+          <div className="space-y-2 text-xs">
+            <div className="flex items-start gap-2.5 p-2 rounded-lg bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/70 dark:border-indigo-800/40">
+              <span className="h-5 w-5 rounded-full bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+              <div>
+                <p className="font-semibold text-indigo-950 dark:text-indigo-200">Tạo Phiếu mượn nháp & Khóa giữ chỗ 1 bản sao (24h)</p>
+                <p className="text-[11px] text-muted-foreground">Hệ thống tự động khóa giữ riêng 1 suất bản sao trên kệ trong 24 giờ và sinh <strong>Phiếu mượn nháp</strong> cho bạn.</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2.5 p-2 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/40">
+              <span className="h-5 w-5 rounded-full bg-amber-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+              <div>
+                <p className="font-semibold text-amber-950 dark:text-amber-200">Đến kệ tự lấy sách & Quét Tem Sách Tại Kệ</p>
+                <p className="text-[11px] text-muted-foreground">Khi tới thư viện, bạn đến kệ lấy sách và bấm <strong>"Quét Tem Sách Tại Kệ"</strong> để ghi nhận mã bản sao vào phiếu nháp.</p>
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2.5 p-2 rounded-lg bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/70 dark:border-emerald-800/40">
+              <span className="h-5 w-5 rounded-full bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+              <div>
+                <p className="font-semibold text-emerald-950 dark:text-emerald-200">Tới quầy Thủ thư đối soát → Chuyển sang Phiếu mượn</p>
+                <p className="text-[11px] text-muted-foreground">Đưa mã <strong>Phiếu mượn nháp</strong> hoặc <strong>Thẻ độc giả</strong> để Thủ thư quét đối soát chuyển sang <strong>Phiếu mượn chính thức</strong> (hạn 14 ngày).</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3 text-left mt-1">
+          <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-foreground truncate">{book.title}</p>
+              <p className="text-[11px] text-muted-foreground">
+                📍 Vị trí kệ: <strong className="text-foreground">{book.location || "Phòng 01 - Kệ 01 - Ngăn 01"}</strong>
+              </p>
+            </div>
+            <Badge variant="outline" className="border-rose-500/40 bg-rose-500/10 text-rose-700 dark:text-rose-300 text-[10px] shrink-0 font-bold">
+              0/{book.total_copies} cuốn trên kệ
+            </Badge>
+          </div>
+
+          {book.wait_prediction ? (
+            <div className="rounded-xl border-2 border-amber-500/45 bg-gradient-to-br from-amber-500/15 via-orange-500/5 to-transparent p-3 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="inline-flex items-center gap-1.5 text-xs font-extrabold text-amber-900 dark:text-amber-200">
+                  <Sparkles className="h-3.5 w-3.5 text-amber-600" />
+                  Dự Báo Ngày Có Sách (Smart Wait-Time Predictor)
+                </span>
+                <Badge className="bg-amber-600 text-white text-[10px] font-bold">
+                  Vị trí #{book.wait_prediction.queue_position}
+                </Badge>
+              </div>
+              <p className="text-xs font-semibold text-foreground leading-relaxed">
+                ⏳ Dự kiến có sách sau{" "}
+                <strong className="text-amber-700 dark:text-amber-300 underline">
+                  ~{book.wait_prediction.estimated_wait_days} ngày nữa
+                </strong>{" "}
+                (vào khoảng <strong>{book.wait_prediction.expected_date_vn}</strong>)
+              </p>
+              <div className="grid grid-cols-2 gap-2 pt-1 text-[11px]">
+                <div className="p-2 rounded-lg bg-background/80 border border-amber-500/25">
+                  <span className="text-muted-foreground block text-[10px]">Bản sao hoàn trả sớm nhất:</span>
+                  <span className="font-bold text-foreground">{book.wait_prediction.earliest_due_date_vn}</span>
+                </div>
+                <div className="p-2 rounded-lg bg-background/80 border border-amber-500/25">
+                  <span className="text-muted-foreground block text-[10px]">Thứ tự của bạn nếu đặt ngay:</span>
+                  <span className="font-bold text-amber-700 dark:text-amber-300">
+                    Đứng thứ #{book.wait_prediction.queue_position} trong hàng chờ
+                  </span>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          <p className="text-xs text-muted-foreground leading-relaxed">
+            Ngay khi độc giả đang mượn hoàn trả bản sao về thư viện, hệ thống sẽ <strong>ưu tiên giữ sách riêng 48h</strong> cho bạn và gửi thông báo tự động!
+          </p>
+        </div>
+      ),
+      confirmText: isAvailable ? "Xác nhận & Giữ chỗ 24h" : "Xác nhận xếp hàng",
       cancelText: "Hủy bỏ",
       onConfirm: async () => {
         try {
@@ -871,9 +1244,11 @@ export default function BooksPage() {
       return;
     }
 
+    const finalNewLocation = newLocation.trim() || `${newBookRoom} - ${newBookShelf} - ${newBookRack}`;
+
     confirm({
       title: "Xác nhận thêm mới đầu sách",
-      description: `Bạn có đồng ý thêm đầu sách "${newTitle}" với ${newCopies} bản sao vào hệ thống không?`,
+      description: `Bạn có đồng ý thêm đầu sách "${newTitle}" (${newCopies} bản sao) tại vị trí "${finalNewLocation}" không?`,
       confirmText: "Đồng ý",
       cancelText: "Hủy",
       onConfirm: async () => {
@@ -884,7 +1259,7 @@ export default function BooksPage() {
             publisher_id: selectedPublisher ? parseInt(selectedPublisher) : null,
             category_id: selectedCategory ? parseInt(selectedCategory) : null,
             isbn: newIsbn,
-            location: newLocation.trim() || undefined,
+            location: finalNewLocation,
             total_copies: newCopies,
             published_year: new Date().getFullYear(),
             description: "Mô tả sách thư viện",
@@ -991,51 +1366,50 @@ export default function BooksPage() {
         </Card>
       </div>
 
-      {/* Active Borrow Transaction QR Banner for Readers */}
-      {user?.role === "reader" && myActiveDraft && (
-        <div className={`relative overflow-hidden rounded-2xl border-2 transition-all p-4 sm:p-5 shadow-xs ${
-          myActiveDraft.all_verified 
-            ? "border-emerald-500 bg-gradient-to-r from-emerald-500/20 via-emerald-500/10 to-primary/10" 
-            : "border-primary/40 bg-gradient-to-r from-primary/15 via-accent/10 to-primary/5"
-        }`}>
+      {/* Active Borrow Draft Banner for Readers */}
+      {user?.role === "reader" && myActiveDraft && (() => {
+        const bannerPickPath = optimizeMultiBookPickPath(myActiveDraft.items || []);
+        return (
+        <div className="relative overflow-hidden rounded-2xl border border-indigo-500/40 bg-gradient-to-r from-indigo-500/10 via-card to-emerald-500/10 p-4 shadow-xs space-y-3">
           <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-            <div className="flex items-start gap-3.5">
-              <div className={`p-3 rounded-2xl text-white shadow-md shrink-0 ${
-                myActiveDraft.all_verified ? "bg-emerald-600 animate-pulse" : "bg-primary"
-              }`}>
-                {myActiveDraft.all_verified ? <Zap className="h-6 w-6" /> : <QrCode className="h-6 w-6" />}
+            <div className="flex items-start sm:items-center gap-3.5">
+              <div className="p-2.5 rounded-xl bg-indigo-600 text-white shadow-xs shrink-0">
+                <QrCode className="h-5 w-5" />
               </div>
               <div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <h3 className="font-display font-bold text-base text-foreground">
-                    {myActiveDraft.all_verified 
-                      ? "🎉 Mã Nhận Sách 1-Chạm Đã Sẵn Sàng!" 
-                      : "Phiếu Mượn Online - Đang Chờ Đối Soát Tại Kệ"}
+                  <h3 className="font-display font-bold text-sm sm:text-base text-indigo-800 dark:text-indigo-300">
+                    Phiếu Mượn Nháp (Giữ Chỗ Online 24h & Lộ Trình Đi Lấy Sách Tối Ưu)
                   </h3>
-                  <Badge className={`font-mono text-xs ${
-                    myActiveDraft.all_verified ? "bg-emerald-600 text-white" : "bg-primary text-primary-foreground"
-                  }`}>
+                  <Badge className="font-mono text-xs bg-indigo-600 text-white">
                     {myActiveDraft.draft_code}
                   </Badge>
-                  {myActiveDraft.all_verified ? (
-                    <Badge className="bg-emerald-600 text-white text-xs gap-1">
-                      <CheckCircle2 className="h-3 w-3" /> Đã đối soát {myActiveDraft.verified_count || myActiveDraft.items?.length}/{myActiveDraft.items?.length || 1} sách
-                    </Badge>
-                  ) : (
-                    <Badge variant="outline" className="border-amber-500/60 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-xs gap-1">
-                      <Clock className="h-3 w-3" />
-                      Tiến độ tại kệ: {myActiveDraft.verified_count || 0}/{myActiveDraft.items?.length || 1} cuốn
-                    </Badge>
-                  )}
-                  <Badge variant="outline" className="border-border text-muted-foreground text-xs">
-                    Còn {myActiveDraft.time_left_hours != null ? `${myActiveDraft.time_left_hours}h` : '24h'}
+                  <Badge
+                    variant="outline"
+                    className={`text-xs gap-1 font-semibold ${
+                      myActiveDraft.all_verified
+                        ? "bg-emerald-50 text-emerald-700 border-emerald-300"
+                        : "bg-amber-50 text-amber-800 border-amber-300"
+                    }`}
+                  >
+                    {myActiveDraft.all_verified
+                      ? `✓ Đã quét tại kệ (${myActiveDraft.verified_count || 0}/${myActiveDraft.total_count || myActiveDraft.items?.length || 1} cuốn)`
+                      : `Chờ quét tại kệ (${myActiveDraft.verified_count || 0}/${myActiveDraft.total_count || myActiveDraft.items?.length || 1} cuốn)`}
+                  </Badge>
+                  <Badge variant="outline" className="border-amber-400 bg-amber-50 text-amber-800 text-xs gap-1">
+                    <Clock className="h-3 w-3 text-amber-600" />
+                    Còn {myActiveDraft.time_left_hours != null ? `${myActiveDraft.time_left_hours} giờ` : "24 giờ"}
                   </Badge>
                 </div>
                 <p className="text-xs text-muted-foreground mt-1 max-w-2xl leading-relaxed">
                   {myActiveDraft.all_verified ? (
-                    <span>Bạn đã nhặt và tự đối soát đủ <strong>{myActiveDraft.items?.length || 1} cuốn sách</strong>. Hãy mang sách ra quầy và xuất trình Mã QR này để Thủ thư quét 1 lần (1 giây) xác nhận nhận sách mang về ngay lập tức!</span>
+                    <>
+                      Bạn đã tự lấy sách và quét tem tại kệ. Hãy tới quầy xuất trình <strong>Mã Phiếu mượn nháp</strong> hoặc <strong>Thẻ độc giả</strong> để Thủ thư quét đối soát chuyển sang <strong>Phiếu mượn chính thức</strong>!
+                    </>
                   ) : (
-                    <span>Bạn đang giữ chỗ <strong>{myActiveDraft.items?.length || 1} cuốn sách</strong>. Vui lòng tự đến các kệ lấy sách, mở camera quét mã QR dán trên sách để tự đối soát (Bước 2), sau đó xuất trình Mã Nhận Sách cho Thủ thư (Bước 3).</span>
+                    <>
+                      Hệ thống đã khóa giữ riêng <strong>{bannerPickPath.orderedItems.length || 1} suất bản sao</strong> trong 24 giờ và tự động sắp xếp <strong>Lộ trình đi lấy sách tối ưu</strong> (Phòng gần sảnh → Kệ thấp đến cao → Ngăn dưới lên trên).
+                    </>
                   )}
                 </p>
               </div>
@@ -1045,39 +1419,80 @@ export default function BooksPage() {
               {!myActiveDraft.all_verified && (
                 <Button
                   type="button"
-                  className="flex-1 md:flex-initial gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold text-xs h-9 shadow-xs"
+                  className="flex-1 md:flex-initial gap-1.5 font-semibold text-xs h-9 shadow-xs bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
                   onClick={() => navigate("/borrow?scan=shelf")}
                 >
                   <Camera className="h-4 w-4" />
-                  📱 Mở Máy Quét Tại Kệ
+                  Quét Tem Sách Tại Kệ
                 </Button>
               )}
               <Button
                 type="button"
-                className={`flex-1 md:flex-initial gap-2 font-semibold text-xs h-9 shadow-xs ${
-                  myActiveDraft.all_verified 
-                    ? "bg-emerald-600 hover:bg-emerald-700 text-white" 
-                    : "bg-muted text-foreground hover:bg-muted/80"
-                }`}
+                className="flex-1 md:flex-initial gap-1.5 font-semibold text-xs h-9 shadow-xs bg-indigo-600 hover:bg-indigo-700 text-white cursor-pointer"
                 onClick={() => setIsDraftQrModalOpen(true)}
               >
                 <QrCode className="h-4 w-4" />
-                {myActiveDraft.all_verified ? "Xem Mã Xuất Kho 1-Chạm" : `Xem Phiếu & Vị Trí (${myActiveDraft.items?.length || 1} sách)`}
+                Xem Lộ Trình & Phiếu Nháp ({bannerPickPath.orderedItems.length || 1} cuốn)
               </Button>
               <Button
                 type="button"
                 variant="outline"
-                className="gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10 text-xs h-9"
+                className="gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10 text-xs h-9 cursor-pointer"
                 onClick={() => handleCancelDraft(myActiveDraft.id)}
-                title="Hủy phiếu mượn online này nếu không muốn mượn nữa"
+                title="Hủy phiếu mượn nháp này nếu không muốn mượn nữa"
               >
                 <X className="h-4 w-4" />
                 Hủy phiếu
               </Button>
             </div>
           </div>
+
+          {bannerPickPath.orderedItems.length > 0 && (
+            <div className="flex items-center gap-1.5 overflow-x-auto pt-2 border-t border-indigo-500/20 text-[11px]">
+              <Badge className="bg-emerald-600 hover:bg-emerald-600 text-white text-[10px] shrink-0 gap-1">
+                <Compass className="h-3 w-3" /> Lộ trình tối ưu:
+              </Badge>
+              <span className="px-2 py-0.5 rounded-md bg-background border font-semibold shrink-0">
+                🏁 Sảnh chính
+              </span>
+              {bannerPickPath.orderedItems.map((item: any) => {
+                const loc = item._pickPath.parsedLocation;
+                const isVerified = Boolean(item.book_copy_id);
+                return (
+                  <div key={`banner-stop-${item.item_id || item.book_id || item._pickPath.stepOrder}`} className="flex items-center gap-1 shrink-0">
+                    <ArrowRight className="h-3 w-3 text-emerald-600 shrink-0" />
+                    <button
+                      type="button"
+                      onClick={() => handleOpenMiniMap({ location: item.location, title: item.book_title, cover: item.cover_image })}
+                      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-left transition-colors cursor-pointer ${
+                        isVerified
+                          ? "bg-indigo-600 text-white border-indigo-600"
+                          : "bg-background hover:bg-emerald-50 border-emerald-500/40 text-foreground"
+                      }`}
+                      title={`Chặng ${item._pickPath.stepOrder}: ${item.book_title} (${loc.formatted}) — Bấm mở bản đồ 2D`}
+                    >
+                      <span className={`font-bold text-[10px] ${isVerified ? "text-white" : "text-emerald-700"}`}>
+                        #{item._pickPath.stepOrder}
+                      </span>
+                      <span className="font-semibold whitespace-nowrap">
+                        {loc.roomLabel} • {loc.shelfLabel} • {loc.rackLabel}
+                      </span>
+                      <span className={`truncate max-w-[110px] ${isVerified ? "text-indigo-100" : "text-muted-foreground"}`}>
+                        ({item.book_title})
+                      </span>
+                    </button>
+                  </div>
+                );
+              })}
+              <ArrowRight className="h-3 w-3 text-indigo-600 shrink-0" />
+              <span className="px-2 py-0.5 rounded-md bg-indigo-500/10 border border-indigo-500/30 font-semibold text-indigo-700 dark:text-indigo-300 shrink-0">
+                💁 Quầy Thủ thư
+              </span>
+            </div>
+          )}
         </div>
-      )}
+        );
+      })()}
 
       {/* Main View Mode Switcher: 3 Chế Độ Quản Lý & Tra Cứu */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-muted/40 p-1.5 rounded-2xl border border-border/70 backdrop-blur-xs">
@@ -1125,17 +1540,28 @@ export default function BooksPage() {
           </Button>
         </div>
 
-        <div className="flex items-center justify-between sm:justify-end gap-2 text-xs text-muted-foreground px-2">
+        <div className="flex items-center justify-between sm:justify-end gap-2 text-xs text-muted-foreground px-2 flex-wrap">
           <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-foreground/80">
             <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
             Ký hiệu: Phòng - Kệ - Ngăn
           </span>
+          {canManage && (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => handleOpenShelfAudit("Phòng 01 - Kệ 01 - Ngăn 01")}
+              className="h-7 text-[11px] gap-1.5 px-2.5 font-semibold bg-emerald-600 hover:bg-emerald-700 text-white shadow-2xs cursor-pointer"
+              title="Kiểm kê kho sách nhanh bằng quét QR hàng loạt (Smart Shelf Inventory Audit)"
+            >
+              <Scan className="h-3.5 w-3.5" /> Kiểm kê kệ QR
+            </Button>
+          )}
           <Button
             type="button"
             variant="outline"
             size="sm"
             onClick={() => handleOpenMiniMap({ location: "Phòng 01 - Kệ 01 - Ngăn 01" })}
-            className="h-7 text-[11px] gap-1 px-2.5 font-medium border-primary/30 text-primary hover:bg-primary/10"
+            className="h-7 text-[11px] gap-1 px-2.5 font-medium border-primary/30 text-primary hover:bg-primary/10 cursor-pointer"
           >
             <Compass className="h-3.5 w-3.5" /> Mở Mini Map Tổng
           </Button>
@@ -1155,8 +1581,21 @@ export default function BooksPage() {
                   value={q} 
                   onChange={(e) => setQ(e.target.value)} 
                   placeholder="Tìm theo tên sách, tác giả, thể loại, ISBN, vị trí…" 
-                  className="pl-9 text-sm h-10" 
+                  className="pl-9 pr-9 text-sm h-10" 
                 />
+                {q && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setQ("");
+                      setCurrentPage(1);
+                    }}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground rounded-full p-0.5 cursor-pointer"
+                    title="Xóa từ khóa tìm kiếm"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                )}
               </div>
 
               {/* Filter controls row */}
@@ -1300,15 +1739,113 @@ export default function BooksPage() {
                               </Select>
                             </div>
                           </div>
-                          <div>
-                            <label className="text-xs font-medium text-muted-foreground">Vị trí lưu kho (Phòng - Kệ - Ngăn)</label>
-                            <Input 
-                              placeholder="VD: Phòng 01 - Kệ 02 - Ngăn 04" 
-                              value={newLocation} 
-                              onChange={(e) => setNewLocation(e.target.value)} 
-                              className="text-sm mt-1" 
-                            />
-                            <p className="text-[11px] text-muted-foreground mt-0.5">Ký hiệu phòng, kệ, ngăn giúp độc giả và thủ thư tìm sách nhanh chóng.</p>
+                          <div className="space-y-2 pt-1 border-t">
+                            <label className="text-xs font-semibold text-foreground block">
+                              Vị trí lưu kho (Chọn hoặc Thêm Phòng • Kệ • Ngăn)
+                            </label>
+                            <div className="grid grid-cols-3 gap-2">
+                              {/* Room Picker */}
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] text-muted-foreground">Phòng</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const maxNum = dynamicRoomOptions.reduce((m, r) => {
+                                        const n = parseInt(r.match(/\d+/)?.[0] || "0", 10);
+                                        return Math.max(m, n);
+                                      }, 3);
+                                      const nextNum = maxNum + 1;
+                                      const nextLabel = `Phòng ${pad2(nextNum)}`;
+                                      setNewBookRoom(nextLabel);
+                                      handleAddRoomToLibrary();
+                                    }}
+                                    className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                                  >
+                                    + Thêm phòng
+                                  </button>
+                                </div>
+                                <Select value={newBookRoom} onValueChange={setNewBookRoom}>
+                                  <SelectTrigger className="text-xs mt-1 h-9">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {dynamicRoomOptions.map((rm) => (
+                                      <SelectItem key={rm} value={rm}>{rm}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+
+                              {/* Shelf Picker */}
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] text-muted-foreground">Kệ sách</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const maxNum = dynamicShelfOptions.reduce((m, s) => {
+                                        const n = parseInt(s.match(/\d+/)?.[0] || "0", 10);
+                                        return Math.max(m, n);
+                                      }, 6);
+                                      const nextNum = maxNum + 1;
+                                      const nextLabel = `Kệ ${pad2(nextNum)}`;
+                                      setNewBookShelf(nextLabel);
+                                      toast.info(`Đã thêm & chọn ${nextLabel}`);
+                                    }}
+                                    className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                                  >
+                                    + Thêm kệ
+                                  </button>
+                                </div>
+                                <Select value={newBookShelf} onValueChange={setNewBookShelf}>
+                                  <SelectTrigger className="text-xs mt-1 h-9">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {dynamicShelfOptions.map((sh) => (
+                                      <SelectItem key={sh} value={sh}>{sh}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+
+                              {/* Rack Picker */}
+                              <div>
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[11px] text-muted-foreground">Ngăn (Tầng)</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const maxNum = dynamicRackOptions.reduce((m, rk) => {
+                                        const n = parseInt(rk.match(/\d+/)?.[0] || "0", 10);
+                                        return Math.max(m, n);
+                                      }, 5);
+                                      const nextNum = maxNum + 1;
+                                      const nextLabel = `Ngăn ${pad2(nextNum)}`;
+                                      setNewBookRack(nextLabel);
+                                      toast.info(`Đã thêm & chọn ${nextLabel}`);
+                                    }}
+                                    className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                                  >
+                                    + Thêm ngăn
+                                  </button>
+                                </div>
+                                <Select value={newBookRack} onValueChange={setNewBookRack}>
+                                  <SelectTrigger className="text-xs mt-1 h-9">
+                                    <SelectValue />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    {dynamicRackOptions.map((rk) => (
+                                      <SelectItem key={rk} value={rk}>{rk}</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </div>
+                            </div>
+                            <p className="text-[11px] text-muted-foreground">
+                              Vị trí sẽ lưu: <strong className="text-primary font-mono">{newBookRoom} - {newBookShelf} - {newBookRack}</strong>
+                            </p>
                           </div>
                           <Button type="submit" className="w-full mt-2 font-semibold">Lưu & Sinh Mã QR Bản Sao</Button>
                         </form>
@@ -1536,9 +2073,22 @@ export default function BooksPage() {
                           )}
                         </div>
                         <span className={b.available_copies > 0 ? "text-emerald-600 font-semibold text-[11px]" : "text-destructive font-semibold text-[11px]"}>
-                          {b.available_copies > 0 ? `Còn ${b.available_copies}/${b.total_copies} cuốn` : "Đã hết sách"}
+                          {b.available_copies > 0 ? `Còn ${b.available_copies}/${b.total_copies} cuốn` : `Hết sách (0/${b.total_copies} cuốn)`}
                         </span>
                       </div>
+
+                      {/* Smart Wait-Time Predictor Box when book is out of stock */}
+                      {b.available_copies <= 0 && b.wait_prediction && (
+                        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-[11px] space-y-0.5">
+                          <div className="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1">
+                            <Clock className="h-3 w-3 text-amber-600 shrink-0" />
+                            <span>Dự kiến có sách sau ~{b.wait_prediction.estimated_wait_days} ngày nữa</span>
+                          </div>
+                          <p className="text-[10px] text-amber-900/85 dark:text-amber-200/85 leading-snug">
+                            Bản sao sớm nhất sẽ hoàn trả vào <strong>{b.wait_prediction.earliest_due_date_vn}</strong> • Bạn đứng thứ <strong>#{b.wait_prediction.queue_position}</strong> trong hàng chờ
+                          </p>
+                        </div>
+                      )}
 
                       {user?.role !== "reader" && (() => {
                         const bookHoldCount = myBorrowRequests.filter(r => r.book_id === b.id && r.status === 'pending').length;
@@ -1818,21 +2368,50 @@ export default function BooksPage() {
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
                 <h3 className="font-display font-bold text-base sm:text-lg flex items-center gap-2 text-foreground">
-                  <Building className="h-5 w-5 text-primary" /> Sơ Đồ Không Gian Lưu Kho Thư Viện
+                  <Building className="h-5 w-5 text-primary" /> Sơ Đồ Không Gian Lưu Kho Thư Viện (Phòng • Kệ • Ngăn)
                 </h3>
                 <p className="text-xs text-muted-foreground mt-1 leading-relaxed max-w-2xl">
-                  Quản lý tổng quan từng <strong>Phòng</strong> trong thư viện: Phòng gồm những <strong>thể loại nào</strong>, 
-                  phân bổ trên từng <strong>kệ sách</strong> ra sao, và đầu sách nào đang nằm ở ngăn tương ứng.
+                  Quản lý trực tiếp từng <strong>Phòng</strong>, thêm/bớt <strong>Kệ sách</strong> trong từng phòng và thêm/bớt <strong>Ngăn (Tầng)</strong> trên từng kệ. Mọi thay đổi sẽ tự động đồng bộ ngay lập tức với <strong>Sơ đồ Mini Map dẫn đường</strong> của độc giả.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                {canManage && (
+                  <>
+                    <Button
+                      type="button"
+                      size="sm"
+                      onClick={handleAddRoomToLibrary}
+                      className="text-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold shadow-xs cursor-pointer"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Thêm Phòng Mới ({`Phòng ${pad2(spatialRooms.length + 1)}`})
+                    </Button>
+                    {spatialRooms.length > 3 && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => {
+                          const lastRm = spatialRooms[spatialRooms.length - 1];
+                          if (lastRm) {
+                            handleRemoveEmptyRoom(lastRm.roomNum, lastRm.roomName, lastRm.booksCount);
+                          }
+                        }}
+                        className="text-xs gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10 font-semibold cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                        Xóa Phòng {pad2(spatialRooms.length)}
+                      </Button>
+                    )}
+                  </>
+                )}
                 <Button
                   type="button"
                   variant="outline"
                   size="sm"
                   onClick={() => handleOpenMiniMap({ location: "Phòng 01 - Kệ 01 - Ngăn 01" })}
-                  className="text-xs gap-1.5 border-primary/40 text-primary hover:bg-primary/10 font-semibold"
+                  className="text-xs gap-1.5 border-primary/40 text-primary hover:bg-primary/10 font-semibold cursor-pointer"
                 >
                   <Compass className="h-4 w-4" /> Mở Sơ Đồ Chỉ Đường 2D
                 </Button>
@@ -1842,231 +2421,372 @@ export default function BooksPage() {
 
           {/* Rooms Grid */}
           <div className="space-y-6">
-            {spatialRooms.map((room) => (
-              <Card key={room.roomName} className="border-border/80 shadow-xs overflow-hidden">
-                {/* Room Card Header */}
-                <CardHeader className="bg-muted/30 border-b pb-4 pt-4">
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                    <div className="flex items-center gap-3">
-                      <div className="h-10 w-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary font-bold text-base">
-                        🏢
-                      </div>
-                      <div>
-                        <div className="flex items-center gap-2">
-                          <CardTitle className="font-display text-lg">{room.roomName}</CardTitle>
-                          <Badge variant="outline" className="text-xs font-mono bg-background">
-                            {room.booksCount} đầu sách • {room.copiesCount} bản sao
-                          </Badge>
+            {spatialRooms.map((room) => {
+              const lastShelfInRoom = room.shelves[room.shelves.length - 1];
+
+              return (
+                <Card key={room.roomName} className="border-border/80 shadow-xs overflow-hidden">
+                  {/* Room Card Header */}
+                  <CardHeader className="bg-muted/30 border-b pb-4 pt-4">
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <div className="h-10 w-10 rounded-xl bg-primary/10 flex items-center justify-center text-primary font-bold text-base">
+                          🏢
                         </div>
-                        <CardDescription className="text-xs mt-0.5">
-                          {room.shelves.length} kệ sách đang hoạt động • {room.availableCopiesCount} bản sao sẵn sàng cho mượn
-                        </CardDescription>
+                        <div>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <CardTitle className="font-display text-lg">{room.roomName}</CardTitle>
+                            <Badge variant="outline" className="text-xs font-mono bg-background">
+                              {room.shelves.length} kệ • {room.booksCount} đầu sách ({room.copiesCount} bản sao)
+                            </Badge>
+                          </div>
+                          <CardDescription className="text-xs mt-0.5">
+                            {room.shelves.length} dãy kệ đang hoạt động • {room.availableCopiesCount} bản sao sẵn sàng cho mượn
+                          </CardDescription>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
+                        {canManage && (
+                          <>
+                            {room.shelves.length > 6 && lastShelfInRoom && (
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="sm"
+                                onClick={() => handleRemoveLastShelfFromRoom(room.roomNum, room.roomName, lastShelfInRoom)}
+                                className="text-xs gap-1 h-8 text-muted-foreground hover:text-destructive cursor-pointer"
+                                title={`Xóa kệ trống cuối cùng (${lastShelfInRoom.shelfName})`}
+                              >
+                                <Minus className="h-3.5 w-3.5" /> Bớt kệ
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => handleAddShelfToRoom(room.roomNum, room.roomName, room.shelves.length)}
+                              className="text-xs gap-1.5 h-8 bg-primary/10 text-primary hover:bg-primary/20 border border-primary/30 font-semibold cursor-pointer"
+                            >
+                              <Plus className="h-3.5 w-3.5" />
+                              Thêm Kệ ({`Kệ ${pad2(room.shelves.length + 1)}`})
+                            </Button>
+                            {room.roomNum > 3 && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleRemoveEmptyRoom(room.roomNum, room.roomName, room.booksCount)}
+                                className="text-xs gap-1 h-8 border-destructive/40 text-destructive hover:bg-destructive/10 cursor-pointer"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" /> Xóa {room.roomName}
+                              </Button>
+                            )}
+                          </>
+                        )}
+
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleOpenMiniMap({ location: `${room.roomName} - Kệ 01 - Ngăn 01` })}
+                          className="text-xs gap-1.5 h-8 border-primary/30 text-primary hover:bg-primary/10 cursor-pointer"
+                        >
+                          <Compass className="h-3.5 w-3.5" /> Xem Sơ Đồ Phòng
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setSelectedRoomFilter(room.roomName);
+                            setSelectedShelfFilter("all");
+                            setSelectedCategoryFilter("all");
+                            setActiveViewTab("catalog");
+                          }}
+                          className="text-xs gap-1 h-8 text-muted-foreground hover:text-foreground cursor-pointer"
+                        >
+                          Xem tất cả sách <ChevronRight className="h-3.5 w-3.5" />
+                        </Button>
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 self-end sm:self-auto">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        onClick={() => handleOpenMiniMap({ location: `${room.roomName} - Kệ 01 - Ngăn 01` })}
-                        className="text-xs gap-1.5 h-8 border-primary/30 text-primary hover:bg-primary/10"
-                      >
-                        <Compass className="h-3.5 w-3.5" /> Xem Vị Trí Phòng
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          setSelectedRoomFilter(room.roomName);
-                          setSelectedShelfFilter("all");
-                          setSelectedCategoryFilter("all");
-                          setActiveViewTab("catalog");
-                        }}
-                        className="text-xs gap-1 h-8 text-muted-foreground hover:text-foreground"
-                      >
-                        Xem tất cả sách <ChevronRight className="h-3.5 w-3.5" />
-                      </Button>
+                    {/* Categories Pills in this Room */}
+                    <div className="pt-3 border-t mt-3">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="text-xs font-semibold text-foreground/80 mr-1 flex items-center gap-1">
+                          📌 Các thể loại có trong {room.roomName}:
+                        </span>
+                        {room.categories.length === 0 ? (
+                          <span className="text-xs text-muted-foreground italic">Chưa có sách xếp vào phòng này</span>
+                        ) : (
+                          room.categories.map((cat) => (
+                            <Badge
+                              key={cat.name}
+                              variant="secondary"
+                              onClick={() => handleFilterByRoomCategory(room.roomName, cat.name)}
+                              className="cursor-pointer hover:bg-primary/20 hover:text-primary transition-all text-xs py-1 px-2.5 gap-1.5 font-medium border border-border/70"
+                              title={`Nhấn để xem các sách thuộc thể loại "${cat.name}" trong ${room.roomName}`}
+                            >
+                              <span>🏷️ {cat.name}</span>
+                              <span className="text-[10px] px-1 py-0.2 rounded-full bg-background/80 font-bold">
+                                {cat.count} cuốn
+                              </span>
+                            </Badge>
+                          ))
+                        )}
+                      </div>
                     </div>
-                  </div>
+                  </CardHeader>
 
-                  {/* Categories Pills in this Room */}
-                  <div className="pt-3 border-t mt-3">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-xs font-semibold text-foreground/80 mr-1 flex items-center gap-1">
-                        📌 Các thể loại có trong {room.roomName}:
-                      </span>
-                      {room.categories.length === 0 ? (
-                        <span className="text-xs text-muted-foreground italic">Chưa có sách xếp vào phòng này</span>
-                      ) : (
-                        room.categories.map((cat) => (
-                          <Badge
-                            key={cat.name}
-                            variant="secondary"
-                            onClick={() => handleFilterByRoomCategory(room.roomName, cat.name)}
-                            className="cursor-pointer hover:bg-primary/20 hover:text-primary transition-all text-xs py-1 px-2.5 gap-1.5 font-medium border border-border/70"
-                            title={`Nhấn để xem các sách thuộc thể loại "${cat.name}" trong ${room.roomName}`}
-                          >
-                            <span>🏷️ {cat.name}</span>
-                            <span className="text-[10px] px-1 py-0.2 rounded-full bg-background/80 font-bold">
-                              {cat.count} cuốn
-                            </span>
-                          </Badge>
-                        ))
-                      )}
+                  {/* Shelves Breakdown in this Room */}
+                  <CardContent className="p-4 sm:p-5 space-y-4">
+                    <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground">
+                      <span>DANH SÁCH CÁC KỆ SÁCH & NGĂN TRONG {room.roomName.toUpperCase()}</span>
+                      <span>{room.shelves.length} KỆ HOẠT ĐỘNG</span>
                     </div>
-                  </div>
-                </CardHeader>
 
-                {/* Shelves Breakdown in this Room */}
-                <CardContent className="p-4 sm:p-5 space-y-4">
-                  <div className="flex items-center justify-between text-xs font-semibold text-muted-foreground">
-                    <span>DANH SÁCH CÁC KỆ SÁCH TRONG {room.roomName.toUpperCase()}</span>
-                    <span>{room.shelves.length} KỆ HOẠT ĐỘNG</span>
-                  </div>
+                    {room.shelves.length === 0 ? (
+                      <div className="text-center py-8 text-xs text-muted-foreground border border-dashed rounded-xl">
+                        Phòng này hiện chưa có kệ sách nào.
+                      </div>
+                    ) : (
+                      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                        {room.shelves.map((shelf) => {
+                          const shelfKey = `${room.roomName}_${shelf.shelfName}`;
+                          const isExpanded = !!expandedShelves[shelfKey];
+                          const topRackObj = shelf.racks[shelf.racks.length - 1];
 
-                  {room.shelves.length === 0 ? (
-                    <div className="text-center py-8 text-xs text-muted-foreground border border-dashed rounded-xl">
-                      Phòng này hiện chưa có kệ sách nào được gán dữ liệu.
-                    </div>
-                  ) : (
-                    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                      {room.shelves.map((shelf) => {
-                        const shelfKey = `${room.roomName}_${shelf.shelfName}`;
-                        const isExpanded = !!expandedShelves[shelfKey];
-
-                        return (
-                          <div 
-                            key={shelf.shelfName} 
-                            className="rounded-xl border bg-card/60 hover:bg-card transition-all p-3.5 space-y-2.5 shadow-2xs flex flex-col justify-between"
-                          >
-                            <div>
-                              {/* Shelf title & actions */}
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex items-center gap-2">
-                                  <div className="p-2 rounded-lg bg-primary/10 text-primary">
-                                    <Layers className="h-4 w-4" />
-                                  </div>
-                                  <div>
-                                    <h4 className="font-semibold text-sm text-foreground flex items-center gap-1.5">
-                                      {shelf.shelfName}
-                                    </h4>
-                                    <p className="text-[11px] text-muted-foreground">
-                                      {shelf.books.length} đầu sách ({shelf.totalCopies} bản sao)
-                                    </p>
-                                  </div>
-                                </div>
-
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => handleOpenMiniMap({ 
-                                    location: `${room.roomName} - ${shelf.shelfName} - Ngăn 01`,
-                                    title: `Kệ: ${shelf.shelfName}`,
-                                    author: `${room.roomName} • Thư viện Athenaeum`
-                                  })}
-                                  className="h-7 text-[11px] px-2 text-primary hover:bg-primary/10 gap-1 shrink-0"
-                                  title="Xem vị trí kệ này trên Mini Map"
-                                >
-                                  <Compass className="h-3 w-3" /> Map
-                                </Button>
-                              </div>
-
-                              {/* Categories on this shelf */}
-                              <div className="flex flex-wrap gap-1 pt-1.5">
-                                {shelf.categories.map((cName) => (
-                                  <Badge key={cName} variant="outline" className="text-[10px] py-0 px-1.5 bg-muted/50">
-                                    {cName}
-                                  </Badge>
-                                ))}
-                              </div>
-                            </div>
-
-                            {/* Books preview & Expandable list */}
-                            <div className="pt-2 border-t text-xs space-y-2">
-                              <div className="flex items-center justify-between">
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => toggleShelfExpanded(shelfKey)}
-                                  className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground gap-1 -ml-2"
-                                >
-                                  {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
-                                  <span>{isExpanded ? "Thu gọn danh sách sách" : `Xem ${shelf.books.length} sách trên kệ`}</span>
-                                </Button>
-
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => handleFilterByRoomShelf(room.roomName, shelf.shelfName)}
-                                  className="h-7 text-[11px] px-2 border-border/80 hover:bg-muted"
-                                >
-                                  Lọc xem ở lưới
-                                </Button>
-                              </div>
-
-                              {/* Expanded list of books on this shelf */}
-                              {isExpanded && (
-                                <div className="space-y-1.5 pt-1 max-h-48 overflow-y-auto pr-1">
-                                  {shelf.books.map((b) => (
-                                    <div 
-                                      key={b.id} 
-                                      className="p-2 rounded-lg bg-muted/40 hover:bg-muted/70 text-xs flex items-center justify-between gap-2 border border-border/40 transition-colors"
-                                    >
-                                      <div className="truncate flex-1">
-                                        <p 
-                                          className="font-medium text-foreground truncate cursor-pointer hover:text-primary"
-                                          onClick={() => handleOpenBookDetail(b)}
-                                          title={b.title}
-                                        >
-                                          {b.title}
-                                        </p>
-                                        <p className="text-[10px] text-muted-foreground truncate">
-                                          {parseLocation(b.location).rack} • Còn {b.available_copies}/{b.total_copies} cuốn
-                                        </p>
-                                      </div>
-
-                                      <div className="flex items-center gap-1 shrink-0">
-                                        {canManage && (
-                                          <Button
-                                            type="button"
-                                            variant="ghost"
-                                            size="sm"
-                                            onClick={() => handleOpenRelocate(b)}
-                                            className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
-                                            title="Đổi vị trí sách này"
-                                          >
-                                            <ArrowRightLeft className="h-3 w-3" />
-                                          </Button>
-                                        )}
-                                        <Button
-                                          type="button"
-                                          variant="ghost"
-                                          size="sm"
-                                          onClick={() => handleOpenMiniMap(b)}
-                                          className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
-                                          title="Định vị sách"
-                                        >
-                                          <Compass className="h-3 w-3" />
-                                        </Button>
-                                      </div>
+                          return (
+                            <div 
+                              key={shelf.shelfName} 
+                              className="rounded-xl border bg-card/60 hover:bg-card transition-all p-3.5 space-y-2.5 shadow-2xs flex flex-col justify-between"
+                            >
+                              <div className="space-y-2">
+                                {/* Shelf title & actions */}
+                                <div className="flex items-start justify-between gap-2">
+                                  <div className="flex items-center gap-2">
+                                    <div className="p-2 rounded-lg bg-primary/10 text-primary">
+                                      <Layers className="h-4 w-4" />
                                     </div>
-                                  ))}
+                                    <div>
+                                      <h4 className="font-semibold text-sm text-foreground flex items-center gap-1.5">
+                                        <span>{shelf.shelfName}</span>
+                                        <Badge variant="secondary" className="text-[10px] font-mono px-1.5 py-0">
+                                          {shelf.maxRack} ngăn
+                                        </Badge>
+                                      </h4>
+                                      <p className="text-[11px] text-muted-foreground">
+                                        {shelf.books.length} đầu sách ({shelf.totalCopies} bản sao)
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {canManage && (
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        onClick={() =>
+                                          handleOpenShelfAudit(`${room.roomName} - ${shelf.shelfName} - Ngăn 01`)
+                                        }
+                                        className="h-7 text-[11px] px-2 border-emerald-500/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/10 gap-1 shrink-0 cursor-pointer font-semibold"
+                                        title={`Kiểm kê nhanh ${shelf.shelfName} (${room.roomName}) bằng quét QR hàng loạt`}
+                                      >
+                                        <Scan className="h-3 w-3 text-emerald-600" /> Kiểm kê QR
+                                      </Button>
+                                    )}
+                                    <Button
+                                      type="button"
+                                      variant="ghost"
+                                      size="sm"
+                                      onClick={() => handleOpenMiniMap({ 
+                                        location: `${room.roomName} - ${shelf.shelfName} - Ngăn 01`,
+                                        title: `Kệ: ${shelf.shelfName} (${shelf.maxRack} ngăn)`,
+                                        author: `${room.roomName} • Thư viện Athenaeum`
+                                      })}
+                                      className="h-7 text-[11px] px-2 text-primary hover:bg-primary/10 gap-1 shrink-0 cursor-pointer"
+                                      title="Xem vị trí kệ này trên Mini Map"
+                                    >
+                                      <Compass className="h-3 w-3" /> Map
+                                    </Button>
+                                  </div>
                                 </div>
-                              )}
+
+                                {/* Visual Racks (Ngăn) List & Librarian + Thêm Ngăn Button */}
+                                <div className="p-2.5 rounded-lg bg-muted/40 border border-border/60 space-y-2">
+                                  <div className="flex items-center justify-between gap-1">
+                                    <span className="text-[11px] font-semibold text-foreground/80">
+                                      Các ngăn trên {shelf.shelfName}:
+                                    </span>
+                                    {canManage && (
+                                      <div className="flex items-center gap-1">
+                                        {shelf.maxRack > 5 && topRackObj && (
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              handleRemoveTopRackFromShelf(
+                                                room.roomNum,
+                                                shelf.shelfNum,
+                                                shelf.shelfName,
+                                                shelf.maxRack,
+                                                topRackObj.bookCount
+                                              )
+                                            }
+                                            className="text-[10px] px-1.5 py-0.5 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors cursor-pointer"
+                                            title={`Xóa ngăn trống trên cùng (Ngăn ${pad2(shelf.maxRack)})`}
+                                          >
+                                            - Bớt
+                                          </button>
+                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() =>
+                                            handleAddRackToShelf(
+                                              room.roomNum,
+                                              room.roomName,
+                                              shelf.shelfNum,
+                                              shelf.shelfName,
+                                              shelf.maxRack
+                                            )
+                                          }
+                                          className="text-[10px] font-bold px-2 py-0.5 rounded bg-primary/15 text-primary hover:bg-primary/25 transition-colors cursor-pointer flex items-center gap-0.5"
+                                          title="Thêm tầng ngăn mới lên kệ này"
+                                        >
+                                          <Plus className="h-2.5 w-2.5" /> Thêm Ngăn ({`Ngăn ${pad2(shelf.maxRack + 1)}`})
+                                        </button>
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  <div className="flex flex-wrap gap-1">
+                                    {shelf.racks.map((rk) => (
+                                      <button
+                                        key={rk.rackNum}
+                                        type="button"
+                                        onClick={() =>
+                                          handleOpenMiniMap({
+                                            location: `${room.roomName} - ${shelf.shelfName} - ${rk.rackName}`,
+                                            title: `${room.roomName} • ${shelf.shelfName} • ${rk.rackName}`,
+                                            author: `${rk.bookCount} đầu sách đang xếp tại ngăn này`,
+                                          })
+                                        }
+                                        className={`text-[10px] font-mono px-2 py-0.5 rounded border transition-all cursor-pointer ${
+                                          rk.bookCount > 0
+                                            ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold hover:bg-emerald-500/20"
+                                            : "bg-background text-muted-foreground border-border/70 hover:border-primary/40 hover:text-foreground"
+                                        }`}
+                                        title={`Bấm để xem ${rk.rackName} trên sơ đồ Mini Map`}
+                                      >
+                                        {rk.rackName} ({rk.bookCount})
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+
+                                {/* Categories on this shelf */}
+                                {shelf.categories.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 pt-0.5">
+                                    {shelf.categories.map((cName) => (
+                                      <Badge key={cName} variant="outline" className="text-[10px] py-0 px-1.5 bg-muted/50">
+                                        {cName}
+                                      </Badge>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              {/* Books preview & Expandable list */}
+                              <div className="pt-2 border-t text-xs space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => toggleShelfExpanded(shelfKey)}
+                                    className="h-7 px-2 text-[11px] text-muted-foreground hover:text-foreground gap-1 -ml-2 cursor-pointer"
+                                  >
+                                    {isExpanded ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                                    <span>{isExpanded ? "Thu gọn danh sách sách" : `Xem ${shelf.books.length} sách trên kệ`}</span>
+                                  </Button>
+
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => handleFilterByRoomShelf(room.roomName, shelf.shelfName)}
+                                    className="h-7 text-[11px] px-2 border-border/80 hover:bg-muted cursor-pointer"
+                                  >
+                                    Lọc xem ở lưới
+                                  </Button>
+                                </div>
+
+                                {/* Expanded list of books on this shelf */}
+                                {isExpanded && (
+                                  <div className="space-y-1.5 pt-1 max-h-48 overflow-y-auto pr-1">
+                                    {shelf.books.length === 0 ? (
+                                      <p className="text-[11px] text-muted-foreground italic py-2 text-center">
+                                        Kệ này chưa có sách. Thủ thư có thể thêm sách mới hoặc điều chuyển sách vào đây.
+                                      </p>
+                                    ) : (
+                                      shelf.books.map((b) => (
+                                        <div 
+                                          key={b.id} 
+                                          className="p-2 rounded-lg bg-muted/40 hover:bg-muted/70 text-xs flex items-center justify-between gap-2 border border-border/40 transition-colors"
+                                        >
+                                          <div className="truncate flex-1">
+                                            <p 
+                                              className="font-medium text-foreground truncate cursor-pointer hover:text-primary"
+                                              onClick={() => handleOpenBookDetail(b)}
+                                              title={b.title}
+                                            >
+                                              {b.title}
+                                            </p>
+                                            <p className="text-[10px] text-muted-foreground truncate">
+                                              {parseLocation(b.location).rack} • Còn {b.available_copies}/{b.total_copies} cuốn
+                                            </p>
+                                          </div>
+
+                                          <div className="flex items-center gap-1 shrink-0">
+                                            {canManage && (
+                                              <Button
+                                                type="button"
+                                                variant="ghost"
+                                                size="sm"
+                                                onClick={() => handleOpenRelocate(b)}
+                                                className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
+                                                title="Đổi vị trí sách này"
+                                              >
+                                                <ArrowRightLeft className="h-3 w-3" />
+                                              </Button>
+                                            )}
+                                            <Button
+                                              type="button"
+                                              variant="ghost"
+                                              size="sm"
+                                              onClick={() => handleOpenMiniMap(b)}
+                                              className="h-6 w-6 p-0 text-muted-foreground hover:text-primary"
+                                              title="Định vị sách"
+                                            >
+                                              <Compass className="h-3 w-3" />
+                                            </Button>
+                                          </div>
+                                        </div>
+                                      ))
+                                    )}
+                                  </div>
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            ))}
+                          );
+                        })}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
           </div>
         </div>
       )}
@@ -2294,51 +3014,102 @@ export default function BooksPage() {
                   <div className="grid grid-cols-3 gap-2">
                     {/* Room Picker */}
                     <div>
-                      <label className="text-xs font-medium text-muted-foreground">Phòng</label>
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium text-muted-foreground">Phòng</label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const maxNum = dynamicRoomOptions.reduce((m, r) => {
+                              const n = parseInt(r.match(/\d+/)?.[0] || "0", 10);
+                              return Math.max(m, n);
+                            }, 3);
+                            const nextNum = maxNum + 1;
+                            const nextLabel = `Phòng ${nextNum < 10 ? `0${nextNum}` : nextNum}`;
+                            setRelocateRoom(nextLabel);
+                            toast.info(`Đã thêm & chọn ${nextLabel}`);
+                          }}
+                          className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                          title="Thêm phòng mới tiếp theo"
+                        >
+                          + Thêm phòng
+                        </button>
+                      </div>
                       <Select value={relocateRoom} onValueChange={setRelocateRoom}>
                         <SelectTrigger className="text-xs mt-1">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="Phòng 01">Phòng 01</SelectItem>
-                          <SelectItem value="Phòng 02">Phòng 02</SelectItem>
-                          <SelectItem value="Phòng 03">Phòng 03</SelectItem>
-                          <SelectItem value="Phòng 04">Phòng 04</SelectItem>
+                          {dynamicRoomOptions.map((rm) => (
+                            <SelectItem key={rm} value={rm}>{rm}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
 
                     {/* Shelf Picker */}
                     <div>
-                      <label className="text-xs font-medium text-muted-foreground">Kệ sách</label>
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium text-muted-foreground">Kệ sách</label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const maxNum = dynamicShelfOptions.reduce((m, s) => {
+                              const n = parseInt(s.match(/\d+/)?.[0] || "0", 10);
+                              return Math.max(m, n);
+                            }, 6);
+                            const nextNum = maxNum + 1;
+                            const nextLabel = `Kệ ${nextNum < 10 ? `0${nextNum}` : nextNum}`;
+                            setRelocateShelf(nextLabel);
+                            toast.info(`Đã thêm & chọn ${nextLabel} (Sơ đồ sẽ tự động mở rộng)`);
+                          }}
+                          className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                          title="Thêm kệ mới tiếp theo"
+                        >
+                          + Thêm kệ
+                        </button>
+                      </div>
                       <Select value={relocateShelf} onValueChange={setRelocateShelf}>
                         <SelectTrigger className="text-xs mt-1">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="Kệ 01">Kệ 01</SelectItem>
-                          <SelectItem value="Kệ 02">Kệ 02</SelectItem>
-                          <SelectItem value="Kệ 03">Kệ 03</SelectItem>
-                          <SelectItem value="Kệ 04">Kệ 04</SelectItem>
-                          <SelectItem value="Kệ 05">Kệ 05</SelectItem>
-                          <SelectItem value="Kệ 06">Kệ 06</SelectItem>
+                          {dynamicShelfOptions.map((sh) => (
+                            <SelectItem key={sh} value={sh}>{sh}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
 
                     {/* Rack Picker */}
                     <div>
-                      <label className="text-xs font-medium text-muted-foreground">Ngăn (Tầng)</label>
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-medium text-muted-foreground">Ngăn (Tầng)</label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const maxNum = dynamicRackOptions.reduce((m, rk) => {
+                              const n = parseInt(rk.match(/\d+/)?.[0] || "0", 10);
+                              return Math.max(m, n);
+                            }, 5);
+                            const nextNum = maxNum + 1;
+                            const nextLabel = `Ngăn ${nextNum < 10 ? `0${nextNum}` : nextNum}`;
+                            setRelocateRack(nextLabel);
+                            toast.info(`Đã thêm & chọn ${nextLabel} (Sơ đồ kệ sẽ tự động thêm tầng)`);
+                          }}
+                          className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                          title="Thêm ngăn mới tiếp theo"
+                        >
+                          + Thêm ngăn
+                        </button>
+                      </div>
                       <Select value={relocateRack} onValueChange={setRelocateRack}>
                         <SelectTrigger className="text-xs mt-1">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="Ngăn 01">Ngăn 01 (T1)</SelectItem>
-                          <SelectItem value="Ngăn 02">Ngăn 02 (T2)</SelectItem>
-                          <SelectItem value="Ngăn 03">Ngăn 03 (T3)</SelectItem>
-                          <SelectItem value="Ngăn 04">Ngăn 04 (T4)</SelectItem>
-                          <SelectItem value="Ngăn 05">Ngăn 05 (T5)</SelectItem>
+                          {dynamicRackOptions.map((rk) => (
+                            <SelectItem key={rk} value={rk}>{rk}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
                     </div>
@@ -2346,7 +3117,7 @@ export default function BooksPage() {
 
                   {/* Result Preview */}
                   <div className="p-2.5 rounded-lg bg-muted border text-center">
-                    <p className="text-[11px] text-muted-foreground">Ký hiệu vị trí mới sẽ lưu:</p>
+                    <p className="text-[11px] text-muted-foreground">Ký hiệu vị trí mới sẽ lưu (Sơ đồ dẫn đường tự động cập nhật):</p>
                     <p className="font-mono font-bold text-sm text-primary mt-0.5">
                       📍 {relocateRoom} - {relocateShelf} - {relocateRack}
                     </p>
@@ -2419,11 +3190,11 @@ export default function BooksPage() {
                   Tổng: {bookCopies.length} bản sao
                 </Badge>
                 <Badge variant="outline" className="bg-emerald-500/10 text-emerald-600 border-emerald-300 text-xs">
-                  Sẵn sàng trên kệ: {bookCopies.filter(c => c.status === 'available').length}
+                  Sẵn sàng tự do: {Math.max(0, bookCopies.filter(c => c.status === 'available').length - activeBookHolds.length)}
                 </Badge>
                 {activeBookHolds.length > 0 && (
                   <Badge variant="outline" className="bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-400/50 text-xs font-semibold gap-1">
-                    <Clock className="h-3 w-3 text-amber-600" /> Giữ chỗ online: {activeBookHolds.length}
+                    <Clock className="h-3 w-3 text-amber-600" /> Đang giữ chỗ (24h/48h): {activeBookHolds.length}
                   </Badge>
                 )}
                 <Badge variant="outline" className="bg-amber-500/10 text-amber-600 border-amber-300 text-xs">
@@ -2432,24 +3203,31 @@ export default function BooksPage() {
               </div>
             </div>
 
-            {/* Hold Banner if readers registered holds online */}
+            {/* Hold Banner if readers registered holds online or reservation holds */}
             {activeBookHolds.length > 0 && (
               <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-900 dark:text-amber-200">
                 <div className="flex items-center gap-1.5 font-semibold text-xs text-amber-800 dark:text-amber-300">
                   <Clock className="h-3.5 w-3.5 text-amber-600 shrink-0" />
-                  <span>Đang có {activeBookHolds.length} độc giả đăng ký giữ chỗ 24h online (chưa đến lấy sách tại kệ):</span>
+                  <span>Đang có {activeBookHolds.length} suất giữ chỗ ưu tiên (Phiếu mượn nháp 24h / Đặt trước có sách 48h):</span>
                 </div>
                 <div className="mt-2 space-y-1.5 pl-2 text-[11px]">
                   {activeBookHolds.map((h: any, idx: number) => (
                     <div key={idx} className="flex flex-wrap items-center gap-2 bg-background/60 p-1.5 rounded-md border border-amber-300/40">
-                      <span className="font-semibold text-foreground">• {h.full_name || h.user_name || "Độc giả"}</span>
+                      <span className="font-semibold text-foreground">• {h.reader_name || h.full_name || h.user_name || "Độc giả"}</span>
                       <span className="text-muted-foreground font-mono">({h.card_number || "---"})</span>
                       <Badge variant="outline" className="text-[10px] py-0 px-1.5 h-4 border-amber-400 text-amber-700 bg-amber-50 dark:bg-amber-950/40">
-                        {h.time_left_hours != null ? `Còn ${h.time_left_hours}h` : "Giữ 24h"}
+                        {h.time_left_hours != null ? `Còn ${h.time_left_hours}h` : h.hold_type === "reservation" ? "Giữ 48h" : "Giữ 24h"}
                       </Badge>
-                      <span className="text-muted-foreground italic text-[10px]">
-                        (Chưa chọn bản sao cụ thể — khi độc giả đến thư viện sẽ tự lấy & quét 1 trong các bản sao sẵn sàng)
-                      </span>
+                      {h.copy_qr_code ? (
+                        <Badge className="bg-indigo-600 text-white text-[10px] py-0 px-1.5 h-4 font-mono">
+                          🔒 Khóa riêng bản sao: {h.copy_qr_code}
+                        </Badge>
+                      ) : null}
+                      {h.draft_code && (
+                        <span className="text-muted-foreground font-mono text-[10px]">
+                          [{h.hold_type === "reservation" ? `Giữ ưu tiên Đặt trước: ${h.draft_code}` : `Phiếu mượn nháp: ${h.draft_code}`}]
+                        </span>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2725,10 +3503,34 @@ export default function BooksPage() {
                     <div className="bg-muted/40 p-2.5 rounded-lg border">
                       <span className="text-muted-foreground block text-[10px]">Bản sao sẵn có:</span>
                       <span className={selectedBookForDetail.available_copies > 0 ? "font-bold text-emerald-600" : "font-bold text-destructive"}>
-                        {selectedBookForDetail.available_copies > 0 ? `Còn ${selectedBookForDetail.available_copies} cuốn` : "Hết sách sẵn có"}
+                        {selectedBookForDetail.available_copies > 0 ? `Còn ${selectedBookForDetail.available_copies} cuốn` : `Hết sách (0/${selectedBookForDetail.total_copies} cuốn)`}
                       </span>
                     </div>
                   </div>
+
+                  {/* Smart Wait-Time Predictor in Book Detail Modal when out of stock */}
+                  {selectedBookForDetail.available_copies <= 0 && selectedBookForDetail.wait_prediction && (
+                    <div className="rounded-xl border-2 border-amber-500/45 bg-amber-500/10 p-3 text-xs space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                          <Clock className="h-3.5 w-3.5 text-amber-600" />
+                          Dự Báo Ngày Có Sách Khi Đặt Trước:
+                        </span>
+                        <Badge className="bg-amber-600 text-white text-[10px]">
+                          Hàng chờ #{selectedBookForDetail.wait_prediction.queue_position}
+                        </Badge>
+                      </div>
+                      <p className="text-foreground font-medium leading-relaxed">
+                        Dự kiến có sách sau{" "}
+                        <strong className="text-amber-700 dark:text-amber-300">
+                          ~{selectedBookForDetail.wait_prediction.estimated_wait_days} ngày nữa
+                        </strong>{" "}
+                        (Bản sao sớm nhất sẽ hoàn trả vào{" "}
+                        <strong>{selectedBookForDetail.wait_prediction.earliest_due_date_vn}</strong> • Bạn đứng thứ{" "}
+                        <strong>#{selectedBookForDetail.wait_prediction.queue_position}</strong> trong hàng chờ).
+                      </p>
+                    </div>
+                  )}
 
                   {/* Location Information & Mini Map */}
                   <div className="bg-muted/40 border border-border/70 rounded-xl p-3 text-xs space-y-2">
@@ -2877,339 +3679,303 @@ export default function BooksPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Transaction QR Modal for Online Borrow Registration (Giữ chỗ 24h & Đối soát tại kệ) */}
+      {/* Transaction QR Modal for Online Borrow Registration (Phiếu mượn nháp - Giữ chỗ 24h) */}
       <Dialog open={isDraftQrModalOpen} onOpenChange={setIsDraftQrModalOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto p-0 gap-0 rounded-2xl border-border/80">
+        <DialogContent className="sm:max-w-[620px] w-[95vw] max-h-[90vh] overflow-y-auto p-0 gap-0 rounded-2xl border border-indigo-500/30 shadow-2xl">
           {myActiveDraft ? (
             <div>
-              {/* Header */}
-              <div className={`p-5 border-b transition-all ${
-                myActiveDraft.all_verified 
-                  ? "bg-gradient-to-r from-emerald-500/20 via-emerald-500/10 to-primary/10" 
-                  : "bg-gradient-to-r from-primary/10 via-amber-500/10 to-primary/5"
-              }`}>
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex items-center gap-3">
-                    <div className={`p-2.5 rounded-xl text-white shadow-md ${
-                      myActiveDraft.all_verified ? "bg-emerald-600 animate-pulse" : "bg-primary"
-                    }`}>
-                      {myActiveDraft.all_verified ? <Zap className="h-6 w-6" /> : <QrCode className="h-6 w-6" />}
-                    </div>
-                    <div>
-                      <DialogTitle className={`text-base sm:text-lg font-bold ${
-                        myActiveDraft.all_verified ? "text-emerald-700 dark:text-emerald-300" : "text-foreground"
-                      }`}>
-                        {myActiveDraft.all_verified 
-                          ? "Mã Nhận Sách 1-Chạm (Sẵn Sàng Ra Quầy Nhận Sách)" 
-                          : "Phiếu Mượn Online - Bước 2: Tự Đối Soát Tại Kệ"}
-                      </DialogTitle>
-                      <DialogDescription className="text-xs text-muted-foreground mt-0.5">
-                        {myActiveDraft.all_verified
-                          ? `Đã đối soát đủ ${myActiveDraft.verified_count || myActiveDraft.items?.length}/${myActiveDraft.items?.length || 1} sách. Xuất trình mã này cho Thủ thư quét 1 lần tại quầy.`
-                          : `Đã đối soát: ${myActiveDraft.verified_count || 0}/${myActiveDraft.items?.length || 1} cuốn. Hãy tự đến kệ sách lấy sách và quét mã đối soát trước khi ra quầy.`}
-                      </DialogDescription>
-                    </div>
+              {/* Header (pr-10 avoids colliding with the Dialog close X button) */}
+              <div className="px-5 py-4 pr-10 border-b bg-gradient-to-r from-indigo-500/12 via-emerald-500/8 to-primary/5">
+                <div className="flex items-start gap-3">
+                  <div className="p-2.5 rounded-xl bg-indigo-600 text-white shadow-sm shrink-0 mt-0.5">
+                    <QrCode className="h-5 w-5" />
                   </div>
-                  <div className="flex flex-col items-end gap-1.5 shrink-0">
-                    <Badge variant="outline" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-500/40 text-xs py-1">
-                      <Clock className="h-3.5 w-3.5 mr-1 text-emerald-600" />
-                      Còn {myActiveDraft.time_left_hours != null ? `${myActiveDraft.time_left_hours} giờ` : '24 giờ'}
-                    </Badge>
-                    {myActiveDraft.all_verified ? (
-                      <Badge className="bg-emerald-600 text-white text-[10px] font-bold">
-                        ⚡ 1-CHẠM SẴN SÀNG
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2 mb-1">
+                      <Badge className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5">
+                        🔒 PHIẾU MƯỢN NHÁP (CHỜ ĐỐI SOÁT)
                       </Badge>
-                    ) : (
-                      <Badge variant="outline" className="border-amber-400 text-amber-700 bg-amber-50 dark:bg-amber-950/40 text-[10px]">
-                        ⏳ Đang đối soát
+                      <Badge variant="outline" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-500/40 text-[11px] py-0.5 font-semibold">
+                        <Clock className="h-3 w-3 mr-1 text-emerald-600" />
+                        Giữ riêng 24h: Còn {myActiveDraft.time_left_hours != null ? `${myActiveDraft.time_left_hours} giờ` : "24 giờ"}
                       </Badge>
-                    )}
+                    </div>
+                    <DialogTitle className="text-base sm:text-lg font-extrabold text-foreground leading-snug">
+                      Phiếu Mượn Nháp & Khóa Riêng Bản Sao 24h
+                    </DialogTitle>
+                    <DialogDescription className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
+                      Hệ thống đã tự động khóa riêng 1 bản sao cụ thể trong 24 giờ cho bạn. Khi Thủ thư quét xác nhận tại quầy, phiếu này sẽ chuyển thành <strong>Phiếu mượn chính thức</strong> (hạn mượn 14 ngày).
+                    </DialogDescription>
                   </div>
                 </div>
               </div>
 
               {/* Body */}
-              <div className="p-5 space-y-6">
-                {/* QR Code and Code info block */}
-                <div className="grid grid-cols-1 md:grid-cols-12 gap-5 items-center">
+              <div className="p-5 space-y-4">
+                {/* QR Code and Workflow Steps Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-stretch">
                   {/* Left: QR Display */}
-                  <div className={`md:col-span-5 flex flex-col items-center justify-center p-4 bg-muted/30 rounded-2xl border text-center transition-all ${
-                    myActiveDraft.all_verified ? "ring-4 ring-emerald-500 border-emerald-400 bg-emerald-500/5" : "border-border/60"
-                  }`}>
-                    <div className="bg-white p-3 rounded-xl shadow-xs border border-border/40 inline-block">
+                  <div className="md:col-span-5 flex flex-col items-center justify-center p-3.5 bg-indigo-500/[0.04] rounded-2xl border border-indigo-500/30 text-center">
+                    <div className="bg-white p-2.5 rounded-xl shadow-2xs border border-slate-200 inline-block">
                       <QRCodeCanvas
                         id="canvas-my-draft-qr"
                         value={myActiveDraft.draft_code}
-                        size={175}
+                        size={148}
                         level="H"
                         includeMargin={true}
                       />
                     </div>
-                    <div className="mt-3 flex items-center gap-1.5">
-                      <code className="text-xs font-mono font-bold px-2.5 py-1 bg-background rounded-md border border-border/80 text-foreground">
+                    <div className="mt-2.5 flex items-center gap-1">
+                      <code className="text-xs font-mono font-bold px-2.5 py-0.5 bg-background rounded-md border border-border text-foreground">
                         {myActiveDraft.draft_code}
                       </code>
                       <Button
                         size="sm"
                         variant="ghost"
-                        className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
-                        title="Sao chép mã phiếu"
+                        className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground cursor-pointer"
+                        title="Sao chép mã Phiếu mượn nháp"
                         onClick={() => handleCopyDraftCode(myActiveDraft.draft_code)}
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </Button>
                     </div>
-                    
-                    {myActiveDraft.all_verified ? (
-                      <span className="mt-2 text-[11px] font-bold text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-                        Mã Nhận Sách 1-Chạm hợp lệ
-                      </span>
-                    ) : (
-                      <div className="mt-2 flex flex-col items-center gap-1.5">
-                        <span className="text-[11px] font-medium text-amber-700 dark:text-amber-400 flex items-center gap-1">
-                          <span className="h-2 w-2 rounded-full bg-amber-500 inline-block animate-pulse"></span>
-                          Chờ đối soát ({myActiveDraft.verified_count || 0}/{myActiveDraft.items?.length || 1} sách)
-                        </span>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-[11px] gap-1 text-primary border-primary/40 hover:bg-primary/10 mt-1"
-                          onClick={() => {
-                            setIsDraftQrModalOpen(false);
-                            navigate("/borrow?scan=shelf");
-                          }}
-                        >
-                          <Camera className="h-3 w-3" /> Mở camera quét tại kệ
-                        </Button>
-                      </div>
-                    )}
+                    <span className="mt-1.5 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">
+                      <CheckCircle2 className="h-3 w-3 text-indigo-600 shrink-0" />
+                      Đã khóa bản sao riêng 24h
+                    </span>
                   </div>
 
-                  {/* Right: Steps & Instructions */}
-                  <div className="md:col-span-7 space-y-3">
-                    <div className="bg-primary/5 border border-primary/20 rounded-xl p-3.5">
+                  {/* Right: Compact 3-Step Workflow & Reader Summary */}
+                  <div className="md:col-span-7 flex flex-col justify-between gap-2.5">
+                    <div className="bg-muted/25 border border-border/70 rounded-2xl p-3 space-y-2 flex-1">
                       <h4 className="text-xs font-bold text-foreground flex items-center gap-1.5">
-                        <Sparkles className="h-4 w-4 text-primary" />
-                        Quy trình mượn sách thông minh 3 bước:
+                        <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
+                        Quy trình 3 bước Mượn sách & Đối soát:
                       </h4>
-                      <div className="space-y-2 mt-2.5 text-xs">
-                        <div className="flex items-start gap-2 p-1.5 rounded-lg bg-emerald-500/10 border border-emerald-500/30">
-                          <span className="h-5 w-5 rounded-full bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0">✓</span>
-                          <div>
-                            <p className="font-semibold text-emerald-900 dark:text-emerald-300">Bước 1: Giữ chỗ 24h</p>
-                            <p className="text-[11px] text-muted-foreground">Đã tạm giữ riêng {myActiveDraft.items?.length || 1} cuốn sách trong 24h.</p>
+                      <div className="space-y-1.5 text-xs">
+                        <div className="flex items-start gap-2 p-2 rounded-xl bg-indigo-500/8 border border-indigo-500/20">
+                          <span className="h-4.5 w-4.5 rounded-full bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+                          <div className="leading-snug">
+                            <p className="font-semibold text-indigo-950 dark:text-indigo-200 text-[11px]">Tạo Phiếu mượn nháp & Khóa giữ chỗ 24h</p>
+                            <p className="text-[11px] text-muted-foreground">Hệ thống đã khóa giữ riêng {myActiveDraft.items?.length || 1} suất bản sao trên kệ trong 24h.</p>
                           </div>
                         </div>
 
-                        <div className={`flex items-start gap-2 p-1.5 rounded-lg border ${
-                          myActiveDraft.all_verified 
-                            ? "bg-emerald-500/10 border-emerald-500/30" 
-                            : "bg-amber-500/10 border-amber-500/30"
-                        }`}>
-                          <span className={`h-5 w-5 rounded-full font-bold text-[10px] flex items-center justify-center shrink-0 ${
-                            myActiveDraft.all_verified ? "bg-emerald-600 text-white" : "bg-amber-500 text-white animate-pulse"
-                          }`}>
-                            {myActiveDraft.all_verified ? "✓" : "2"}
-                          </span>
-                          <div>
-                            <p className={`font-semibold ${myActiveDraft.all_verified ? "text-emerald-900 dark:text-emerald-300" : "text-amber-900 dark:text-amber-300"}`}>
-                              Bước 2: Tự lấy & Quét đối soát tại kệ
-                            </p>
-                            <p className="text-[11px] text-muted-foreground">
-                              {myActiveDraft.all_verified 
-                                ? "Đã đối soát 100% sách thành công." 
-                                : "Độc giả tự đến kệ lấy sách, quét mã QR trên sách để xác nhận."}
-                            </p>
+                        <div className="flex items-start gap-2 p-2 rounded-xl bg-amber-500/8 border border-amber-500/20">
+                          <span className="h-4.5 w-4.5 rounded-full bg-amber-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+                          <div className="leading-snug">
+                            <p className="font-semibold text-amber-950 dark:text-amber-200 text-[11px]">Tự đến kệ lấy sách & Quét Tem Sách Tại Kệ</p>
+                            <p className="text-[11px] text-muted-foreground">Đến kệ lấy sách và bấm <strong>"Quét Tem Sách Tại Kệ"</strong> để định danh mã bản sao.</p>
                           </div>
                         </div>
 
-                        <div className={`flex items-start gap-2 p-1.5 rounded-lg border ${
-                          myActiveDraft.all_verified 
-                            ? "bg-emerald-500/15 border-emerald-500/40" 
-                            : "bg-muted/40 border-border/60 text-muted-foreground"
-                        }`}>
-                          <span className={`h-5 w-5 rounded-full font-bold text-[10px] flex items-center justify-center shrink-0 ${
-                            myActiveDraft.all_verified ? "bg-emerald-600 text-white shadow-xs" : "bg-muted text-muted-foreground"
-                          }`}>3</span>
-                          <div>
-                            <p className={`font-semibold ${myActiveDraft.all_verified ? "text-emerald-900 dark:text-emerald-200" : ""}`}>
-                              Bước 3: Quét 1-Chạm tại quầy Thủ thư (1 giây)
-                            </p>
-                            <p className="text-[11px]">
-                              {myActiveDraft.all_verified 
-                                ? "Mang sách ra quầy, Thủ thư quét 1 lần là hoàn tất mượn toàn bộ!" 
-                                : "Xuất trình Mã Nhận Sách sau khi đã đối soát xong Bước 2."}
-                            </p>
+                        <div className="flex items-start gap-2 p-2 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
+                          <span className="h-4.5 w-4.5 rounded-full bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+                          <div className="leading-snug">
+                            <p className="font-semibold text-emerald-950 dark:text-emerald-200 text-[11px]">Tới quầy đưa mã Phiếu nháp / Thẻ độc giả</p>
+                            <p className="text-[11px] text-muted-foreground">Thủ thư quét đối soát cho mượn → Chuyển thành <strong>Phiếu mượn chính thức</strong>.</p>
                           </div>
                         </div>
                       </div>
                     </div>
 
-                    <div className="text-xs text-muted-foreground bg-muted/30 p-2.5 rounded-xl border border-border/60 flex items-center justify-between">
+                    <div className="text-xs text-muted-foreground bg-muted/30 px-3 py-2 rounded-xl border border-border/60 flex items-center justify-between">
                       <span><strong>Độc giả:</strong> {user?.name || "Bạn"} ({user?.card_number || "Thành viên"})</span>
-                      <span><strong>Tổng sách:</strong> {myActiveDraft.items?.length || 1} cuốn</span>
+                      <Badge variant="secondary" className="text-[11px] font-bold">
+                        Đã quét tại kệ: {myActiveDraft.verified_count || 0}/{myActiveDraft.items?.length || 1} cuốn
+                      </Badge>
                     </div>
                   </div>
                 </div>
 
-                {/* List of books in this transaction */}
-                <div className="space-y-2.5">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-muted-foreground flex items-center justify-between">
-                    <span>Danh sách {myActiveDraft.items?.length || 1} cuốn sách cần lấy:</span>
-                    <span className="text-[11px] font-normal normal-case">Vị trí lưu kho & đối soát</span>
-                  </h4>
-
-                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
-                    {myActiveDraft.items?.map((item: any, idx: number) => {
-                      const isVerified = Boolean(item.book_copy_id);
-                      return (
-                        <div 
-                          key={item.item_id || item.book_id || idx}
-                          className={`flex items-center justify-between gap-3 p-2.5 rounded-xl border transition-colors ${
-                            isVerified 
-                              ? "border-emerald-500/40 bg-emerald-500/5" 
-                              : "border-border/60 bg-card hover:bg-muted/40"
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <span className={`h-6 w-6 rounded-full font-bold text-xs flex items-center justify-center shrink-0 ${
-                              isVerified ? "bg-emerald-600 text-white" : "bg-primary/10 text-primary"
-                            }`}>
-                              {isVerified ? "✓" : idx + 1}
+                {/* List of books in this transaction (Sorted by Multi-Book Pick Path) */}
+                {(() => {
+                  const modalPickPath = optimizeMultiBookPickPath(myActiveDraft.items || []);
+                  const orderedModalItems = modalPickPath.orderedItems;
+                  return (
+                    <div className="space-y-2.5">
+                      {/* Route Optimization Banner */}
+                      {orderedModalItems.length > 0 && (
+                        <div className="rounded-xl border border-emerald-500/35 bg-gradient-to-r from-emerald-500/10 via-teal-500/5 to-indigo-500/10 p-3 space-y-2">
+                          <div className="flex flex-wrap items-center justify-between gap-1.5">
+                            <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-800 dark:text-emerald-300">
+                              <Compass className="h-3.5 w-3.5 text-emerald-600" />
+                              Lộ Trình Đi Lấy Nhiều Sách Tối Ưu (Multi-Book Pick Path)
                             </span>
-                            {item.cover_image ? (
-                              <img src={item.cover_image} alt="" className="h-10 w-7 object-cover rounded-xs shadow-2xs shrink-0" />
-                            ) : (
-                              <div className="h-10 w-7 bg-muted rounded-xs flex items-center justify-center shrink-0">
-                                <BookOpen className="h-4 w-4 text-muted-foreground" />
-                              </div>
-                            )}
-                            <div className="min-w-0">
-                              <p className="font-semibold text-xs text-foreground truncate" title={item.book_title}>
-                                {item.book_title}
-                              </p>
-                              <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
-                                <span className="text-[11px] text-muted-foreground truncate">
-                                  ISBN: {item.isbn || "Chưa cập nhật"}
+                            <Badge variant="outline" className="text-[10px] border-emerald-500/40 text-emerald-700 bg-background">
+                              Phòng gần sảnh → Kệ thấp đến cao → Ngăn dưới lên trên
+                            </Badge>
+                          </div>
+                          <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px]">
+                            <span className="px-2 py-0.5 rounded-md bg-background border font-semibold shrink-0">
+                              🏁 Sảnh chính
+                            </span>
+                            {orderedModalItems.map((item: any) => {
+                              const loc = item._pickPath.parsedLocation;
+                              const isVerified = Boolean(item.book_copy_id);
+                              return (
+                                <div key={`modal-stop-${item.item_id || item.book_id || item._pickPath.stepOrder}`} className="flex items-center gap-1 shrink-0">
+                                  <ArrowRight className="h-3 w-3 text-emerald-600 shrink-0" />
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenMiniMap({ location: item.location, title: item.book_title, cover: item.cover_image })}
+                                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-semibold cursor-pointer ${
+                                      isVerified
+                                        ? "bg-indigo-600 text-white border-indigo-600"
+                                        : "bg-background hover:bg-emerald-50 border-emerald-500/40 text-foreground"
+                                    }`}
+                                    title="Bấm xem sơ đồ 2D kệ sách"
+                                  >
+                                    <span>Chặng {item._pickPath.stepOrder}:</span>
+                                    <span>{loc.roomLabel} • {loc.shelfLabel} • {loc.rackLabel}</span>
+                                  </button>
+                                </div>
+                              );
+                            })}
+                            <ArrowRight className="h-3 w-3 text-indigo-600 shrink-0" />
+                            <span className="px-2 py-0.5 rounded-md bg-indigo-500/10 border border-indigo-500/30 font-semibold text-indigo-700 shrink-0">
+                              💁 Quầy Thủ thư
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="font-bold uppercase tracking-wider text-muted-foreground">
+                          Thứ tự đi lấy sách tối ưu ({orderedModalItems.length || 1} cuốn)
+                        </span>
+                        <span className="text-[11px] text-muted-foreground">Đi theo Chặng #1 → #{orderedModalItems.length}</span>
+                      </div>
+
+                      <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                        {orderedModalItems.map((item: any, idx: number) => {
+                          const isVerified = Boolean(item.book_copy_id);
+                          const stepOrder = item._pickPath?.stepOrder || idx + 1;
+                          return (
+                            <div
+                              key={item.item_id || item.book_id || idx}
+                              className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border transition-colors ${
+                                isVerified ? "border-indigo-500/30 bg-indigo-500/[0.03]" : "border-amber-500/30 bg-amber-500/[0.03]"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                                <span className={`px-2 h-6 rounded-md font-bold text-[10px] flex items-center justify-center shrink-0 ${
+                                  isVerified ? "bg-indigo-600 text-white" : "bg-emerald-600 text-white"
+                                }`}>
+                                  {isVerified ? `✓ Chặng ${stepOrder}` : `Chặng ${stepOrder}`}
                                 </span>
-                                {isVerified ? (
-                                  <Badge className="bg-emerald-600 text-white text-[10px] py-0 px-1.5 h-4 gap-0.5">
-                                    <Check className="h-2.5 w-2.5" /> {item.copy_qr_code || `Bản sao #${item.book_copy_id}`}
-                                  </Badge>
+                                {item.cover_image ? (
+                                  <img src={item.cover_image} alt="" className="h-10 w-7 object-cover rounded shadow-2xs shrink-0" />
                                 ) : (
-                                  <Badge variant="outline" className="border-amber-400 text-amber-700 bg-amber-50 dark:bg-amber-950/40 text-[10px] py-0 px-1.5 h-4">
-                                    Chưa quét tại kệ
-                                  </Badge>
+                                  <div className="h-10 w-7 bg-muted rounded flex items-center justify-center shrink-0">
+                                    <BookOpen className="h-4 w-4 text-muted-foreground" />
+                                  </div>
                                 )}
+                                <div className="min-w-0 flex-1">
+                                  <p className="font-bold text-xs text-foreground truncate" title={item.book_title}>
+                                    {item.book_title}
+                                  </p>
+                                  {item._pickPath?.transitionHint && (
+                                    <p className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400 truncate mt-0.5">
+                                      {item._pickPath.transitionHint}
+                                    </p>
+                                  )}
+                                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                    {isVerified ? (
+                                      <span className="inline-flex items-center gap-1 bg-indigo-600 text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded-md whitespace-nowrap">
+                                        ✓ Đã quét tại kệ: {item.copy_qr_code || `Bản sao #${item.book_copy_id}`}
+                                      </span>
+                                    ) : (
+                                      <span className="inline-flex items-center border border-amber-400 text-amber-800 bg-amber-50 text-[10px] font-semibold px-2 py-0.5 rounded-md whitespace-nowrap">
+                                        🔒 Đã khóa giữ chỗ 1 bản sao (24h) • Chờ quét tại kệ
+                                      </span>
+                                    )}
+                                    <span className="text-[11px] text-muted-foreground font-mono truncate">
+                                      ISBN: {item.isbn || "N/A"}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center justify-end gap-1.5 shrink-0">
+                                <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20 text-[11px] py-1 font-medium whitespace-nowrap">
+                                  <MapPin className="h-3 w-3 mr-1 text-primary shrink-0" />
+                                  {item.location || "Phòng 01 - Kệ 01 - Ngăn 01"}
+                                </Badge>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 w-7 p-0 text-primary hover:bg-primary/10 cursor-pointer"
+                                  title="Xem sơ đồ 2D vị trí kệ sách"
+                                  onClick={() => {
+                                    handleOpenMiniMap({
+                                      location: item.location,
+                                      title: item.book_title,
+                                      cover: item.cover_image
+                                    });
+                                  }}
+                                >
+                                  <Compass className="h-3.5 w-3.5" />
+                                </Button>
+                                {!isVerified ? (
+                                  <Button
+                                    size="sm"
+                                    className="h-7 text-[11px] gap-1 px-2.5 font-semibold bg-amber-600 hover:bg-amber-700 text-white cursor-pointer"
+                                    onClick={() => {
+                                      setIsDraftQrModalOpen(false);
+                                      navigate("/borrow?scan=shelf");
+                                    }}
+                                    title="Mở máy quét để quét tem sách tại kệ"
+                                  >
+                                    <Camera className="h-3 w-3" /> Quét Tem Sách Tại Kệ
+                                  </Button>
+                                ) : (
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 text-[11px] gap-1 px-2 font-medium text-amber-700 hover:bg-amber-500/10 border-amber-300 cursor-pointer"
+                                    onClick={() => handleUnverifyDraftItem(item.item_id || item.id, item.book_title)}
+                                    title="Quét nhầm cuốn sách trên kệ? Bấm để gỡ mã và quét lại"
+                                  >
+                                    <RotateCcw className="h-3 w-3 text-amber-600" /> Quét lại
+                                  </Button>
+                                )}
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 w-7 p-0 text-destructive/70 hover:text-destructive hover:bg-destructive/10 cursor-pointer shrink-0"
+                                  onClick={() => handleRemoveDraftItem(item.item_id || item.id, item.book_title)}
+                                  title="Xóa cuốn sách này khỏi phiếu mượn nháp"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </Button>
                               </div>
                             </div>
-                          </div>
-
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20 text-[11px] py-1 font-medium">
-                              <MapPin className="h-3 w-3 mr-1 text-primary" />
-                              {item.location || "Phòng 01 - Kệ 01 - Ngăn 01"}
-                            </Badge>
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 w-7 p-0 text-primary hover:bg-primary/10"
-                              title="Xem sơ đồ 2D vị trí kệ sách"
-                              onClick={() => {
-                                handleOpenMiniMap({
-                                  location: item.location,
-                                  title: item.book_title,
-                                  cover: item.cover_image
-                                });
-                              }}
-                            >
-                              <Compass className="h-3.5 w-3.5" />
-                            </Button>
-                            {!isVerified ? (
-                              <Button
-                                size="sm"
-                                variant="secondary"
-                                className="h-7 text-[11px] gap-1 px-2 font-semibold text-amber-800 bg-amber-100 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200 cursor-pointer"
-                                onClick={() => {
-                                  setIsDraftQrModalOpen(false);
-                                  navigate("/borrow?scan=shelf");
-                                }}
-                                title="Mở máy quét trên điện thoại để quét mã cuốn sách này"
-                              >
-                                <Camera className="h-3 w-3" /> Quét
-                              </Button>
-                            ) : (
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                className="h-7 text-[11px] gap-1 px-2 font-medium text-amber-700 hover:bg-amber-500/10 border-amber-300 cursor-pointer"
-                                onClick={() => handleUnverifyDraftItem(item.item_id || item.id, item.book_title)}
-                                title="Quét lộn sách hoặc muốn đổi bản sao khác? Bấm để gỡ mã và quét lại"
-                              >
-                                <RotateCcw className="h-3 w-3 text-amber-600" /> Quét lại
-                              </Button>
-                            )}
-
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="h-7 w-7 p-0 text-destructive/70 hover:text-destructive hover:bg-destructive/10 cursor-pointer shrink-0"
-                              onClick={() => handleRemoveDraftItem(item.item_id || item.id, item.book_title)}
-                              title="Xóa cuốn sách này khỏi phiếu mượn"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
               </div>
 
               {/* Footer */}
-              <div className="p-4 border-t bg-muted/20 flex flex-col sm:flex-row items-center justify-between gap-2.5">
+              <div className="px-5 py-3.5 border-t bg-muted/25 flex flex-col sm:flex-row items-center justify-between gap-2.5">
                 <Button
                   size="sm"
                   variant="outline"
-                  className="w-full sm:w-auto text-xs gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10"
+                  className="w-full sm:w-auto text-xs gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10 cursor-pointer"
                   onClick={() => handleCancelDraft(myActiveDraft.id)}
                 >
                   <X className="h-3.5 w-3.5" />
-                  Hủy phiếu mượn này
+                  Hủy phiếu mượn nháp
                 </Button>
 
                 <div className="flex items-center gap-2 w-full sm:w-auto justify-end flex-wrap">
-                  {!myActiveDraft.all_verified ? (
-                    <Button
-                      size="sm"
-                      className="flex-1 sm:flex-initial text-xs gap-1.5 bg-primary text-primary-foreground font-semibold"
-                      onClick={() => {
-                        setIsDraftQrModalOpen(false);
-                        navigate("/borrow?scan=shelf");
-                      }}
-                    >
-                      <Camera className="h-3.5 w-3.5" />
-                      📱 Đến Kệ Quét Đối Soát Sách
-                    </Button>
-                  ) : (
-                    <Button
-                      size="sm"
-                      className="flex-1 sm:flex-initial text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
-                      onClick={() => {
-                        setIsDraftQrModalOpen(false);
-                        navigate("/borrow");
-                      }}
-                    >
-                      <Zap className="h-3.5 w-3.5" />
-                      ⚡ Ra Quầy Nhận Sách Mang Về
-                    </Button>
-                  )}
                   <Button
                     size="sm"
                     variant="outline"
-                    className="flex-1 sm:flex-initial text-xs gap-1.5"
+                    className="flex-1 sm:flex-initial text-xs gap-1.5 cursor-pointer"
                     onClick={() => handleDownloadDraftQr(myActiveDraft.draft_code)}
                   >
                     <Download className="h-3.5 w-3.5" />
@@ -3217,8 +3983,19 @@ export default function BooksPage() {
                   </Button>
                   <Button
                     size="sm"
+                    className="flex-1 sm:flex-initial text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
+                    onClick={() => {
+                      setIsDraftQrModalOpen(false);
+                      navigate("/borrow");
+                    }}
+                  >
+                    <QrCode className="h-3.5 w-3.5" />
+                    Mở trang Phiếu mượn
+                  </Button>
+                  <Button
+                    size="sm"
                     variant="ghost"
-                    className="text-xs"
+                    className="text-xs cursor-pointer"
                     onClick={() => setIsDraftQrModalOpen(false)}
                   >
                     Đóng
@@ -3245,6 +4022,17 @@ export default function BooksPage() {
         bookTitle={miniMapTarget?.title}
         authorName={miniMapTarget?.author}
         coverImage={miniMapTarget?.cover}
+        books={booksList}
+      />
+
+      {/* Smart Shelf Inventory Audit Modal (Kiểm kê kho sách nhanh bằng quét QR hàng loạt) */}
+      <SmartShelfAuditModal
+        open={shelfAuditOpen}
+        onOpenChange={setShelfAuditOpen}
+        initialLocation={shelfAuditLocation}
+        onOpenMiniMap={(target) => {
+          handleOpenMiniMap(target);
+        }}
       />
 
       {ConfirmDialogComponent}

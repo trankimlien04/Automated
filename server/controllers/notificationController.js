@@ -1,15 +1,223 @@
 const db = require('../config/db');
+const { syncOverdueFines } = require('../services/fineSyncService');
 
-// Lấy danh sách thông báo của người dùng hiện tại
+/**
+ * Hệ thống Nhắc Hạn Thông Minh Đa Cấp Độ (Smart Proactive Due-Date Reminder)
+ * Tự động chạy ngầm và phân loại 3 mức độ khẩn cấp:
+ * - Cấp 1 (Trước hạn 1–3 ngày): Nhắc nhẹ + hỗ trợ nút "Gia hạn nhanh 1-Chạm (+7 ngày)" nếu chưa có người đặt trước.
+ * - Cấp 2 (Đúng ngày đến hạn - 0 ngày): Cảnh báo màu cam nhắc trả tại Quầy hoặc thả qua Hòm 24/7.
+ * - Cấp 3 (Quá hạn < 0 ngày): Cảnh báo đỏ và tạm khóa mượn mới.
+ */
+async function syncSmartDueReminders(targetUserId = null, forceInsert = false) {
+    let inAppCount = 0;
+    try {
+        await syncOverdueFines(targetUserId);
+
+        let sql = `
+            SELECT br.id as borrow_record_id, br.user_id, br.due_date, IFNULL(br.renewal_count, 0) as renewal_count,
+                   DATEDIFF(DATE(br.due_date), CURDATE()) as days_diff,
+                   bc.qr_code as copy_qr, b.id as book_id, b.title,
+                   u.full_name, u.email, u.card_number,
+                   (SELECT COUNT(*) FROM reservations r WHERE r.book_id = b.id AND r.status IN ('pending', 'ready') AND r.user_id != br.user_id) as waiting_reservations
+            FROM borrow_records br
+            JOIN book_copies bc ON br.book_copy_id = bc.id
+            JOIN books b ON bc.book_id = b.id
+            JOIN users u ON br.user_id = u.id
+            WHERE br.status = 'borrowing' AND DATEDIFF(DATE(br.due_date), CURDATE()) <= 3
+        `;
+        const params = [];
+        if (targetUserId) {
+            sql += ' AND br.user_id = ?';
+            params.push(targetUserId);
+        }
+
+        const [rows] = await db.execute(sql, params);
+
+        for (const item of rows) {
+            const daysDiff = Number(item.days_diff);
+            const renewalCount = Number(item.renewal_count || 0);
+            const waitingRes = Number(item.waiting_reservations || 0);
+            const canQuickRenew = daysDiff >= 0 && renewalCount === 0 && waitingRes === 0;
+            const dueDateFormatted = new Date(item.due_date).toLocaleDateString('vi-VN');
+
+            let notifTitle = '';
+            let notifMessage = '';
+            let notifType = 'reminder';
+            let levelPrefix = '';
+
+            if (daysDiff >= 1 && daysDiff <= 3) {
+                // CẤP 1: TRƯỚC HẠN 1-2 NGÀY (NHẮC NHẸ + GIA HẠN NHANH 1-CHẠM)
+                levelPrefix = '🔔 Nhắc hạn sớm';
+                notifTitle = `🔔 Nhắc hạn sớm (trước ${daysDiff} ngày): «${item.title}»`;
+                notifType = 'reminder';
+                if (canQuickRenew) {
+                    notifMessage = `Cuốn sách "${item.title}" [${item.copy_qr}] sẽ đến hạn trả vào ngày ${dueDateFormatted}. Sách hiện chưa có người đặt trước — bạn có thể bấm nút "Gia hạn nhanh 1-Chạm (+7 ngày)" ngay trong thông báo này!`;
+                } else if (renewalCount >= 1) {
+                    notifMessage = `Cuốn sách "${item.title}" [${item.copy_qr}] sẽ đến hạn trả vào ngày ${dueDateFormatted} (Đã sử dụng 1/1 lượt gia hạn). Vui lòng sắp xếp hoàn trả tại Quầy hoặc Hòm 24/7.`;
+                } else {
+                    notifMessage = `Cuốn sách "${item.title}" [${item.copy_qr}] sẽ đến hạn trả vào ngày ${dueDateFormatted}. Hiện đang có độc giả khác đặt trước cuốn sách này nên không thể gia hạn thêm, vui lòng hoàn trả đúng hạn.`;
+                }
+            } else if (daysDiff === 0) {
+                // CẤP 2: ĐÚNG NGÀY ĐẾN HẠN (CẢNH BÁO CAM)
+                levelPrefix = '🟠 Hôm nay đến hạn trả';
+                notifTitle = `🟠 Hôm nay đến hạn trả: «${item.title}»`;
+                notifType = 'warning';
+                notifMessage = `Hôm nay (${dueDateFormatted}) là ngày đến hạn trả cuốn "${item.title}" [${item.copy_qr}]. Vui lòng mang sách trả tại Quầy Thủ Thư hoặc thả qua Hòm Trả Sách 24/7.`;
+            } else if (daysDiff < 0) {
+                // CẤP 3: QUÁ HẠN (CẢNH BÁO ĐỎ & TẠM KHÓA MƯỢN MỚI)
+                const overdueDays = Math.abs(daysDiff);
+                levelPrefix = '🔴 Quá hạn';
+                notifTitle = `🔴 Quá hạn ${overdueDays} ngày & Tạm khóa mượn mới: «${item.title}»`;
+                notifType = 'warning';
+                notifMessage = `Cuốn sách "${item.title}" [${item.copy_qr}] đã quá hạn ${overdueDays} ngày (Hạn trả: ${dueDateFormatted}). Hệ thống đã tạm khóa quyền mượn sách mới của thẻ. Vui lòng hoàn trả sách tại Quầy hoặc Hòm 24/7 để mở khóa thẻ ngay!`;
+            }
+
+            if (!notifTitle) continue;
+
+            // Kiểm tra xem trong ngày hôm nay đã tạo thông báo cấp độ này cho cuốn sách này chưa
+            if (!forceInsert) {
+                const [existing] = await db.execute(
+                    `SELECT id FROM notifications 
+                     WHERE user_id = ? 
+                       AND (title = ? OR (title LIKE ? AND message LIKE ?))
+                       AND DATE(created_at) = CURDATE()
+                     LIMIT 1`,
+                    [item.user_id, notifTitle, `${levelPrefix}%`, `%${item.title}%`]
+                );
+                if (existing.length > 0) {
+                    continue;
+                }
+            }
+
+            await db.execute(
+                'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)',
+                [item.user_id, notifTitle, notifMessage, notifType]
+            );
+            inAppCount++;
+        }
+    } catch (err) {
+        console.error('Lỗi khi chạy ngầm syncSmartDueReminders:', err);
+    }
+    return inAppCount;
+}
+
+// Lấy danh sách thông báo của người dùng hiện tại (kèm dữ liệu Nhắc Hạn Thông Minh Đa Cấp Độ)
 exports.getNotifications = async (req, res) => {
     const userId = req.user.id;
 
     try {
+        // Tự động chạy ngầm kiểm tra & phát sinh thông báo nhắc hạn đa cấp độ
+        await syncSmartDueReminders(userId, false);
+
         const [results] = await db.execute(
             'SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 100',
             [userId]
         );
-        res.status(200).json(results);
+
+        // Lấy danh sách sách đang mượn của người dùng để gắn metadata nút "Gia hạn nhanh 1-Chạm (+7 ngày)"
+        const [activeBorrows] = await db.execute(`
+            SELECT br.id as borrow_record_id, br.user_id, br.due_date, IFNULL(br.renewal_count, 0) as renewal_count,
+                   DATEDIFF(DATE(br.due_date), CURDATE()) as days_diff,
+                   bc.qr_code as copy_qr, b.id as book_id, b.title as book_title,
+                   (SELECT COUNT(*) FROM reservations r WHERE r.book_id = b.id AND r.status IN ('pending', 'ready') AND r.user_id != br.user_id) as waiting_reservations
+            FROM borrow_records br
+            JOIN book_copies bc ON br.book_copy_id = bc.id
+            JOIN books b ON bc.book_id = b.id
+            WHERE br.user_id = ? AND br.status = 'borrowing'
+        `, [userId]);
+
+        const enriched = results.map((noti) => {
+            const lowerTitle = (noti.title || '').toLowerCase();
+            const lowerMsg = (noti.message || '').toLowerCase();
+            const fullText = `${lowerTitle} ${lowerMsg}`;
+
+            // Tìm bản ghi mượn đang hoạt động khớp với thông báo này
+            const matchedBorrow = activeBorrows.find((ab) => {
+                const qr = (ab.copy_qr || '').toLowerCase();
+                const bTitle = (ab.book_title || '').toLowerCase();
+                return (qr && fullText.includes(qr)) || (bTitle && fullText.includes(bTitle));
+            });
+
+            // Phân loại cấp độ nhắc hạn thông minh
+            let smartLevel = null;
+            if (
+                lowerTitle.includes('nhắc hạn sớm') ||
+                lowerTitle.includes('sắp đến hạn') ||
+                (lowerTitle.includes('nhắc nhở') && fullText.includes('hạn trả'))
+            ) {
+                smartLevel = 'upcoming_2d';
+            } else if (
+                lowerTitle.includes('hôm nay đến hạn') ||
+                lowerTitle.includes('đến hạn trả hôm nay') ||
+                lowerTitle.includes('hạn chót')
+            ) {
+                smartLevel = 'due_today';
+            } else if (
+                lowerTitle.includes('quá hạn') ||
+                (lowerTitle.includes('cảnh báo') && fullText.includes('quá hạn'))
+            ) {
+                smartLevel = 'overdue';
+            }
+
+            if (!smartLevel && !matchedBorrow) {
+                return noti;
+            }
+
+            if (matchedBorrow) {
+                const daysDiff = Number(matchedBorrow.days_diff);
+                const renewalCount = Number(matchedBorrow.renewal_count || 0);
+                const waitingRes = Number(matchedBorrow.waiting_reservations || 0);
+                const canQuickRenew = daysDiff >= 0 && renewalCount === 0 && waitingRes === 0;
+
+                // Nếu cuốn sách đã được gia hạn thành công (daysDiff > 3), cập nhật smartLevel theo thực tế
+                const effectiveLevel =
+                    daysDiff < 0
+                        ? 'overdue'
+                        : daysDiff === 0
+                        ? 'due_today'
+                        : daysDiff <= 3
+                        ? 'upcoming_2d'
+                        : smartLevel;
+
+                return {
+                    ...noti,
+                    smart_reminder: effectiveLevel
+                        ? {
+                              level: effectiveLevel,
+                              borrow_record_id: matchedBorrow.borrow_record_id,
+                              book_id: matchedBorrow.book_id,
+                              book_title: matchedBorrow.book_title,
+                              copy_qr: matchedBorrow.copy_qr,
+                              due_date: matchedBorrow.due_date,
+                              days_diff: daysDiff,
+                              renewal_count: renewalCount,
+                              waiting_reservations: waitingRes,
+                              can_quick_renew: canQuickRenew
+                          }
+                        : null
+                };
+            }
+
+            return {
+                ...noti,
+                smart_reminder: smartLevel
+                    ? {
+                          level: smartLevel,
+                          borrow_record_id: null,
+                          book_id: null,
+                          book_title: null,
+                          copy_qr: null,
+                          due_date: null,
+                          days_diff: smartLevel === 'overdue' ? -1 : smartLevel === 'due_today' ? 0 : 2,
+                          renewal_count: 0,
+                          waiting_reservations: 0,
+                          can_quick_renew: false
+                      }
+                    : null
+            };
+        });
+
+        res.status(200).json(enriched);
     } catch (error) {
         console.error('Lỗi khi lấy danh sách thông báo:', error);
         res.status(500).json({ message: 'Lỗi server khi lấy danh sách thông báo' });
@@ -21,6 +229,7 @@ exports.getUnreadCount = async (req, res) => {
     const userId = req.user.id;
 
     try {
+        await syncSmartDueReminders(userId, false);
         const [results] = await db.execute(
             'SELECT COUNT(*) as unreadCount FROM notifications WHERE user_id = ? AND is_read = FALSE',
             [userId]
@@ -306,10 +515,7 @@ exports.triggerManualReminders = async (req, res) => {
             }
         }
 
-        // 3. Cảnh báo sách quá hạn & phạt tiền (T + 1 hoặc lâu hơn)
-        const [configs] = await db.execute('SELECT value FROM system_configs WHERE key_name = "fine_per_day"');
-        const finePerDay = parseInt(configs.length > 0 ? configs[0].value : '5000', 10);
-
+        // 3. Cảnh báo sách quá hạn & tạm khóa mượn mới (T + 1 hoặc lâu hơn)
         const [overdue] = await db.execute(`
             SELECT br.user_id, br.due_date, bc.qr_code as copy_qr, b.title,
                    u.full_name, u.email, u.card_number
@@ -324,14 +530,13 @@ exports.triggerManualReminders = async (req, res) => {
             const dueDate = new Date(item.due_date);
             const diffTime = Math.abs(today - dueDate);
             const overdueDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-            const fineAmount = overdueDays * finePerDay;
 
             await db.execute(
                 'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
                 [
                     item.user_id,
-                    '🚨 Cảnh báo: Sách mượn đã quá hạn',
-                    `Cuốn sách "${item.title}" đã quá hạn trả ${overdueDays} ngày (Phí phạt tích lũy: ${fineAmount.toLocaleString('vi-VN')}đ). Vui lòng hoàn trả sách ngay.`
+                    `🔴 Quá hạn ${overdueDays} ngày & Tạm khóa mượn mới: «${item.title}»`,
+                    `Cuốn sách "${item.title}" [${item.copy_qr}] đã quá hạn trả ${overdueDays} ngày. Hệ thống đã tạm khóa quyền mượn sách mới của thẻ. Vui lòng hoàn trả sách tại Quầy hoặc Hòm 24/7 để mở khóa thẻ ngay!`
                 ]
             );
             inAppCount++;
@@ -345,8 +550,7 @@ exports.triggerManualReminders = async (req, res) => {
                     bookTitle: item.title,
                     copyQr: item.copy_qr,
                     dueDate: item.due_date,
-                    overdueDays,
-                    fineAmount
+                    overdueDays
                 });
                 emailCount++;
             }
@@ -453,8 +657,7 @@ exports.testSendEmail = async (req, res) => {
                 bookTitle: sampleBook,
                 copyQr: sampleQr,
                 dueDate: new Date(Date.now() - 3 * 86400000),
-                overdueDays: 3,
-                fineAmount: 15000
+                overdueDays: 3
             });
         } else if (templateType === 'drop_box_receipt') {
             result = await emailService.sendDropBoxReceiptEmail({

@@ -40,11 +40,22 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 
 const roleMap: Record<string, string> = {
-  admin: "Quản trị viên",
+  admin: "Quản trị viên IT",
   librarian: "Thủ thư",
   reader: "Độc giả",
   owner: "Chủ thư viện / Giám đốc",
 };
+
+interface MenuItem {
+  title: string;
+  url: string;
+  icon: any;
+}
+
+interface MenuGroup {
+  label: string;
+  items: MenuItem[];
+}
 
 export function AppSidebar() {
   const location = useLocation();
@@ -63,56 +74,147 @@ export function AppSidebar() {
     return pathname.startsWith(url);
   };
 
-  // Dynamic items based on role grouped logically
-  const overview = [
-    { title: "Tổng quan", url: "/", icon: LayoutDashboard, roles: ["admin", "librarian", "reader", "owner"] },
-    { title: "Hồ sơ & Thẻ cá nhân", url: "/profile", icon: User, roles: ["admin", "librarian", "reader", "owner"] },
-    { title: "Thống kê & Báo cáo", url: "/reports", icon: BarChart3, roles: ["admin", "librarian", "owner"] },
-    { title: "Gợi ý sách thông minh", url: "/recommendations", icon: Sparkles, roles: ["admin", "librarian", "reader", "owner"] },
-  ].filter(item => item.roles.includes(user?.role || ""));
+  const role = user?.role || "reader";
+  const isReader = role === "reader";
+  const isLibrarian = role === "librarian";
+  const isAdmin = role === "admin";
+  const isOwner = role === "owner";
 
-  const isReader = user?.role === "reader";
-  const isOwner = user?.role === "owner";
+  // Phân bổ danh mục điều hướng tối ưu hóa tuyệt đối theo từng Actor (RBAC):
+  let menuGroups: MenuGroup[] = [];
 
-  const catalog = [
-    { 
-      title: isReader ? "Danh mục Sách & Tra cứu" : "Danh mục Sách & Bản sao (QR)", 
-      url: "/books", 
-      icon: BookOpen, 
-      roles: ["admin", "librarian", "reader", "owner"] 
-    },
-    { title: "Thể loại & Phân loại", url: "/categories", icon: Tag, roles: ["admin", "librarian", "owner"] },
-    { title: "Tác giả", url: "/authors", icon: PenTool, roles: ["admin", "librarian", "owner"] },
-    { title: "Nhà xuất bản", url: "/publishers", icon: Building2, roles: ["admin", "librarian", "owner"] },
-  ].filter(item => item.roles.includes(user?.role || ""));
+  if (isReader) {
+    // 1. ĐỘC GIẢ (READER) - Không gian tự phục vụ (Self-Service)
+    menuGroups = [
+      {
+        label: "Cá nhân & Khám phá",
+        items: [
+          { title: "Tổng quan", url: "/", icon: LayoutDashboard },
+          { title: "Hồ sơ & Thẻ cá nhân", url: "/profile", icon: User },
+          { title: "Gợi ý sách AI", url: "/recommendations", icon: Sparkles },
+          { title: "Thông báo", url: "/notifications", icon: Bell },
+        ],
+      },
+      {
+        label: "Tài nguyên Tri thức",
+        items: [
+          { title: "Danh mục & Tra cứu Sách", url: "/books", icon: BookOpen },
+        ],
+      },
+      {
+        label: "Lưu thông Cá nhân",
+        items: [
+          { title: "Phiếu mượn & Thẻ đọc", url: "/borrow", icon: QrCode },
+          { title: "Đặt trước sách", url: "/reservations", icon: CalendarClock },
+          { title: "Vi phạm & Kỷ luật mượn", url: "/fines", icon: ShieldCheck },
+        ],
+      },
+    ];
+  } else if (isLibrarian) {
+    // 2. THỦ THƯ (LIBRARIAN) - Bàn lưu thông nghiệp vụ, kho sách và quản lý thẻ độc giả
+    menuGroups = [
+      {
+        label: "Tổng quan & Báo cáo",
+        items: [
+          { title: "Tổng quan Nghiệp vụ", url: "/", icon: LayoutDashboard },
+          { title: "Dự báo Nhu cầu & Báo cáo", url: "/reports", icon: BarChart3 },
+          { title: "Thông báo", url: "/notifications", icon: Bell },
+        ],
+      },
+      {
+        label: "Bàn Lưu Thông & Giao Dịch",
+        items: [
+          { title: "Quầy Đa Năng Thông Minh", url: "/borrow", icon: Zap },
+          { title: "Sổ Lưu Thông & Lịch Sử", url: "/borrow?mode=history", icon: FileSpreadsheet },
+          { title: "Hòm Trả Sách 24/7", url: "/borrow?mode=dropbox", icon: Inbox },
+          { title: "Hàng đợi Đặt trước", url: "/reservations", icon: CalendarClock },
+          { title: "Sổ Vi phạm & Khắc phục", url: "/fines", icon: ShieldCheck },
+        ],
+      },
+      {
+        label: "Quản lý Kho & Bản sao",
+        items: [
+          { title: "Danh mục Sách & Mã QR", url: "/books", icon: BookOpen },
+          { title: "Thể loại & Phân loại", url: "/categories", icon: Tag },
+          { title: "Tác giả", url: "/authors", icon: PenTool },
+          { title: "Nhà xuất bản", url: "/publishers", icon: Building2 },
+        ],
+      },
+      {
+        label: "Độc giả & Thẻ thư viện",
+        items: [
+          { title: "Quản lý Độc giả", url: "/readers", icon: Users },
+        ],
+      },
+    ];
+  } else if (isAdmin) {
+    // 3. QUẢN TRỊ VIÊN IT (ADMIN) - Vận hành kỹ thuật, phân quyền, dữ liệu nền tảng và Maker quy chế
+    menuGroups = [
+      {
+        label: "Tổng quan Hệ thống",
+        items: [
+          { title: "Tổng quan Kỹ thuật", url: "/", icon: LayoutDashboard },
+          { title: "Báo cáo Kỹ thuật & Thống kê", url: "/reports", icon: BarChart3 },
+          { title: "Thông báo", url: "/notifications", icon: Bell },
+        ],
+      },
+      {
+        label: "Quản trị IT & An ninh",
+        items: [
+          { title: "Quản lý Tài khoản & Phân quyền", url: "/accounts", icon: ShieldCheck },
+          { title: "Quản lý Độc giả & Dữ liệu", url: "/readers", icon: Users },
+          { title: "Đề xuất Quy chế (Maker)", url: "/settings", icon: Settings },
+          { title: "Nhật ký Hoạt động (Audit)", url: "/activity-logs", icon: Activity },
+        ],
+      },
+      {
+        label: "Quản trị Dữ liệu Kho",
+        items: [
+          { title: "Danh mục Sách & Bản sao", url: "/books", icon: BookOpen },
+          { title: "Thể loại & Phân loại", url: "/categories", icon: Tag },
+          { title: "Tác giả", url: "/authors", icon: PenTool },
+          { title: "Nhà xuất bản", url: "/publishers", icon: Building2 },
+        ],
+      },
+      {
+        label: "Kỹ thuật Lưu thông",
+        items: [
+          { title: "Sổ Lưu Thông & Lịch Sử", url: "/borrow?mode=history", icon: FileSpreadsheet },
+          { title: "Trạm Kiosk & Cổng An Ninh", url: "/borrow?mode=kiosk", icon: ArrowRightLeft },
+        ],
+      },
+    ];
+  } else if (isOwner) {
+    // 4. CHỦ THƯ VIỆN / GIÁM ĐỐC (OWNER) - Điều hành chiến lược, phê duyệt Checker, thanh tra và tài chính
+    menuGroups = [
+      {
+        label: "Điều hành Chiến lược",
+        items: [
+          { title: "Trung tâm Điều hành Giám đốc", url: "/", icon: LayoutDashboard },
+          { title: "Báo cáo Phân tích & KPIs", url: "/reports", icon: BarChart3 },
+          { title: "Thông báo", url: "/notifications", icon: Bell },
+        ],
+      },
+      {
+        label: "Quản trị & Giám sát Tối cao",
+        items: [
+          { title: "Phê duyệt Quy chế (Checker)", url: "/settings", icon: Settings },
+          { title: "Giám sát Tài khoản Cán bộ", url: "/accounts", icon: ShieldCheck },
+          { title: "Thanh tra Hoạt động (Audit)", url: "/activity-logs", icon: Activity },
+          { title: "Giám sát Vi phạm & Kỷ luật", url: "/fines", icon: ShieldCheck },
+        ],
+      },
+      {
+        label: "Tài sản Thư viện",
+        items: [
+          { title: "Giám sát Kho Sách & Bản sao", url: "/books", icon: BookOpen },
+          { title: "Sổ Lưu Thông & Lịch Sử Giao Dịch", url: "/borrow?mode=history", icon: FileSpreadsheet },
+        ],
+      },
+    ];
+  }
 
-  const operations = [
-    ...(isReader ? [
-      { title: "Phiếu mượn & Thẻ đọc", url: "/borrow", icon: QrCode, roles: ["reader"] }
-    ] : [
-      { title: "Quầy Đa Năng Thông Minh", url: "/borrow", icon: Zap, roles: ["admin", "librarian", "owner"] },
-      { title: "Sổ Lưu Thông & Lịch Sử", url: "/borrow?mode=history", icon: FileSpreadsheet, roles: ["admin", "librarian", "owner"] },
-      { title: "Hòm Trả Sách 24/7", url: "/borrow?mode=dropbox", icon: Inbox, roles: ["admin", "librarian", "owner"] },
-      { title: "Trạm Kiosk & An Ninh", url: "/borrow?mode=kiosk", icon: ArrowRightLeft, roles: ["admin", "owner"] },
-    ]),
-    { title: "Đặt trước sách", url: "/reservations", icon: CalendarClock, roles: ["admin", "librarian", "reader", "owner"] },
-    { title: "Phí phạt", url: "/fines", icon: Wallet, roles: ["admin", "librarian", "reader", "owner"] },
-    { title: "Thông báo", url: "/notifications", icon: Bell, roles: ["admin", "librarian", "reader", "owner"] },
-  ].filter(item => item.roles.includes(user?.role || ""));
-
-  const adminSystem = [
-    { title: "Quản lý độc giả", url: "/readers", icon: Users, roles: ["admin", "librarian", "owner"] },
-    { title: "Quản lý tài khoản", url: "/accounts", icon: ShieldCheck, roles: ["admin", "owner"] },
-    { title: "Nhật ký hoạt động (Audit)", url: "/activity-logs", icon: Activity, roles: ["admin", "owner"] },
-    { 
-      title: isOwner ? "Phê duyệt Quy chế (Maker-Checker)" : "Đề xuất Quy chế & Cài đặt", 
-      url: "/settings", 
-      icon: Settings, 
-      roles: ["admin", "owner"] 
-    },
-  ].filter(item => item.roles.includes(user?.role || ""));
-
-  const renderItems = (items: any[]) => (
+  const renderItems = (items: MenuItem[]) => (
     <SidebarMenu>
       {items.map((item) => (
         <SidebarMenuItem key={item.url}>
@@ -142,30 +244,12 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent>
-        {overview.length > 0 && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Tổng quan & Báo cáo</SidebarGroupLabel>
-            <SidebarGroupContent>{renderItems(overview)}</SidebarGroupContent>
+        {menuGroups.map((group, idx) => (
+          <SidebarGroup key={group.label || idx}>
+            <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+            <SidebarGroupContent>{renderItems(group.items)}</SidebarGroupContent>
           </SidebarGroup>
-        )}
-        {catalog.length > 0 && (
-          <SidebarGroup>
-            <SidebarGroupLabel>{isReader ? "Tài nguyên Tri thức" : "Quản lý Tài nguyên"}</SidebarGroupLabel>
-            <SidebarGroupContent>{renderItems(catalog)}</SidebarGroupContent>
-          </SidebarGroup>
-        )}
-        {operations.length > 0 && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Nghiệp vụ Thư viện</SidebarGroupLabel>
-            <SidebarGroupContent>{renderItems(operations)}</SidebarGroupContent>
-          </SidebarGroup>
-        )}
-        {adminSystem.length > 0 && (
-          <SidebarGroup>
-            <SidebarGroupLabel>Quản trị Hệ thống</SidebarGroupLabel>
-            <SidebarGroupContent>{renderItems(adminSystem)}</SidebarGroupContent>
-          </SidebarGroup>
-        )}
+        ))}
       </SidebarContent>
 
       <SidebarFooter>

@@ -1,9 +1,9 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { QRCodeCanvas } from "qrcode.react";
-import { FileCheck, Clock, AlertTriangle, BookOpen, Copy, Check, QrCode, Printer, CheckCircle2 } from "lucide-react";
+import { FileCheck, BookOpen, Copy, Check, Printer, CheckCircle2, Calendar, UserCheck } from "lucide-react";
 import { toast } from "sonner";
 
 interface ExitPassModalProps {
@@ -16,6 +16,8 @@ interface ExitPassModalProps {
     bookCount?: number;
     items?: any[];
     items_summary?: any;
+    created_at?: string;
+    createdAt?: string;
     expires_at?: string;
     expiresAt?: string;
     status?: string;
@@ -24,165 +26,213 @@ interface ExitPassModalProps {
     card_number?: string;
     cardNumber?: string;
   } | null;
+  borrowRecords?: any[];
 }
 
-export function ExitPassModal({ open, onOpenChange, passData }: ExitPassModalProps) {
+export function ExitPassModal({ open, onOpenChange, passData, borrowRecords = [] }: ExitPassModalProps) {
   const [copied, setCopied] = useState(false);
-  const [timeLeft, setTimeLeft] = useState<{ minutes: number; seconds: number; isExpired: boolean }>({
-    minutes: 0,
-    seconds: 0,
-    isExpired: false
-  });
 
-  const passCode = passData?.pass_code || passData?.passCode || "";
-  const bookCount = passData?.book_count || passData?.bookCount || (passData?.items?.length || 1);
+  const rawPassCode = passData?.pass_code || passData?.passCode || "";
+  const passCode = String(rawPassCode).replace(/^PASS-EXP-/i, "PM-BRW-");
   const rawItems = passData?.items || passData?.items_summary || [];
-  const items = Array.isArray(rawItems)
+  const parsedItems = Array.isArray(rawItems)
     ? rawItems
     : typeof rawItems === "string"
     ? (() => { try { return JSON.parse(rawItems); } catch { return []; } })()
     : [];
 
-  const expiresAtStr = passData?.expires_at || passData?.expiresAt || "";
-
-  // Realtime countdown timer
-  useEffect(() => {
-    if (!expiresAtStr) return;
-
-    const updateTimer = () => {
-      const now = new Date().getTime();
-      const target = new Date(expiresAtStr).getTime();
-      const diff = target - now;
-
-      if (diff <= 0) {
-        setTimeLeft({ minutes: 0, seconds: 0, isExpired: true });
-      } else {
-        const minutes = Math.floor(diff / (1000 * 60));
-        const seconds = Math.floor((diff % (1000 * 60)) / 1000);
-        setTimeLeft({ minutes, seconds, isExpired: false });
-      }
-    };
-
-    updateTimer();
-    const interval = setInterval(updateTimer, 1000);
-    return () => clearInterval(interval);
-  }, [expiresAtStr]);
-
   const handleCopyCode = () => {
     if (!passCode) return;
     navigator.clipboard.writeText(passCode);
     setCopied(true);
-    toast.success(`Đã sao chép mã biên lai: ${passCode}`);
+    toast.success(`Đã sao chép mã Phiếu mượn: ${passCode}`);
     setTimeout(() => setCopied(false), 2000);
   };
 
   if (!passData) return null;
 
+  // Tính Ngày mượn gốc từ thời điểm tạo phiếu (created_at) và Hạn trả chuẩn (Ngày mượn + 14 ngày)
+  const rawCreatedStr = passData.created_at || passData.createdAt || "";
+  const baseCreatedDate = rawCreatedStr && !isNaN(new Date(rawCreatedStr).getTime())
+    ? new Date(rawCreatedStr)
+    : new Date();
+  const defaultBorrowDateStr = baseCreatedDate.toLocaleDateString("vi-VN");
+  const defaultDueDateObj = new Date(baseCreatedDate.getTime());
+  defaultDueDateObj.setDate(defaultDueDateObj.getDate() + 14);
+  const defaultDueDateStr = defaultDueDateObj.toLocaleDateString("vi-VN");
+
+  // Đồng bộ từng cuốn sách với borrow_records thực tế (nếu có) để lấy chính xác Ngày mượn & Hạn trả 14 ngày
+  const items = parsedItems.map((it: any) => {
+    const itemQr = it.copyQr || it.qr_code || "";
+    const itemTitle = it.title || it.book_title || "";
+    const matchedRec = borrowRecords.find((r: any) => {
+      if (it.recordId && r.id === it.recordId) return true;
+      if (itemQr && r.qr_code === itemQr) return true;
+      if (itemTitle && r.book_title === itemTitle) return true;
+      return false;
+    });
+
+    const resolvedBorrowDate = matchedRec?.borrow_date
+      ? new Date(matchedRec.borrow_date).toLocaleDateString("vi-VN")
+      : (it.borrowDate || defaultBorrowDateStr);
+
+    const resolvedDueDate = matchedRec?.due_date
+      ? new Date(matchedRec.due_date).toLocaleDateString("vi-VN")
+      : (rawCreatedStr ? defaultDueDateStr : (it.dueDate || defaultDueDateStr));
+
+    return {
+      ...it,
+      title: itemTitle || matchedRec?.book_title || "Ấn phẩm thư viện",
+      copyQr: itemQr || matchedRec?.qr_code || "N/A",
+      borrowDate: resolvedBorrowDate,
+      dueDate: resolvedDueDate,
+    };
+  });
+
+  const bookCount = passData?.book_count || passData?.bookCount || (items.length || 1);
+  const firstItem = items[0] || {};
+  const draftCode = (passData as any)?.draftCode || firstItem.draftCode || null;
+  const librarianName = (passData as any)?.librarianName || firstItem.librarianName || "Thủ thư trực quầy";
+  const borrowDateStr = firstItem.borrowDate || (passData as any)?.borrowDate || defaultBorrowDateStr;
+  const dueDateStr = firstItem.dueDate || (rawCreatedStr ? defaultDueDateStr : ((passData as any)?.dueDate || defaultDueDateStr));
+  const isUsed = passData.status === "used" || (passData as any)?.displayStatus === "used";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-md w-[95vw] sm:w-full p-0 overflow-hidden border-2 border-emerald-500/30 shadow-2xl rounded-2xl bg-gradient-to-b from-card to-background max-h-[90vh] flex flex-col">
-        {/* Header - Digital Borrow Receipt */}
-        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 p-4 sm:p-6 text-white text-center relative overflow-hidden shrink-0">
-          <div className="absolute top-0 right-0 -mr-8 -mt-8 w-28 h-28 bg-white/10 rounded-full blur-xl pointer-events-none" />
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/20 backdrop-blur-md text-xs font-bold tracking-wider uppercase mb-2 border border-white/30">
+      <DialogContent className="sm:max-w-[520px] w-[95vw] p-0 overflow-hidden border border-emerald-500/30 shadow-2xl rounded-2xl bg-card">
+        {/* Header - Official Borrow Slip */}
+        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 px-6 py-4 text-white text-center relative overflow-hidden">
+          <div className="absolute top-0 right-0 -mr-8 -mt-8 w-24 h-24 bg-white/10 rounded-full blur-xl pointer-events-none" />
+          <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-white/20 backdrop-blur-md text-[11px] font-bold tracking-wider uppercase mb-1.5 border border-white/25">
             <FileCheck className="w-3.5 h-3.5" />
-            Biên lai mượn sách điện tử (Digital Receipt)
+            Phiếu Mượn Sách Chính Thức
           </div>
-          <DialogTitle className="text-xl font-extrabold tracking-tight text-white flex items-center justify-center gap-2">
-            Chứng Nhận Mượn Sách Kỹ Thuật Số
+          <DialogTitle className="text-lg sm:text-xl font-extrabold tracking-tight text-white">
+            Phiếu Mượn & Đối Soát Ra Cổng
           </DialogTitle>
-          <DialogDescription className="text-emerald-100 text-xs mt-1">
-            Mã QR biên lai xác thực giao dịch mượn sách thành công, thay thế hoàn toàn phiếu in giấy
+          <DialogDescription className="text-emerald-100 text-xs mt-0.5">
+            Chứng từ xác nhận mượn sách tại quầy — dùng để đối soát mượn trả và xuất trình khi ra cổng
           </DialogDescription>
         </div>
 
-        <div className="p-4 sm:p-6 space-y-4 sm:space-y-5 overflow-y-auto flex-1">
-          {/* Main QR Card */}
-          <div className="flex flex-col items-center justify-center p-5 rounded-2xl bg-white border border-slate-200 shadow-inner">
-            <div className="p-3 bg-white rounded-xl shadow-sm border border-slate-100">
-              <QRCodeCanvas
-                value={passCode}
-                size={180}
-                level="H"
-                includeMargin={false}
-              />
-            </div>
-
-            {/* Pass Code badge with copy */}
-            <div className="mt-3.5 flex items-center gap-2">
-              <span className="font-mono font-black text-lg tracking-wider text-slate-800">
-                {passCode}
-              </span>
-              <Button
-                size="icon"
-                variant="ghost"
-                className="h-7 w-7 text-muted-foreground hover:text-foreground"
-                onClick={handleCopyCode}
-                title="Sao chép mã biên lai"
-              >
-                {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-              </Button>
-            </div>
-
-            {/* Countdown / Validity Badge */}
-            <div className="mt-2.5">
-              {timeLeft.isExpired || passData.status === "used" || passData.status === "expired" || (passData as any)?.isExpired ? (
-                <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-700 text-xs font-semibold">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-slate-500" />
-                  Đã hoàn tất đối soát • Đã lưu trữ số hóa
-                </div>
+        <div className="p-5 space-y-4">
+          {/* Unified QR & Slip Info Card */}
+          <div className="flex flex-col sm:flex-row items-center gap-4 p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+            {/* Left: QR Code */}
+            <div className="flex flex-col items-center shrink-0 p-2.5 bg-slate-50/70 dark:bg-slate-950 rounded-xl border border-slate-200/80 dark:border-slate-800">
+              <div className="p-2 bg-white rounded-lg shadow-2xs border border-slate-100">
+                <QRCodeCanvas
+                  value={passCode}
+                  size={132}
+                  level="H"
+                  includeMargin={false}
+                />
+              </div>
+              {isUsed ? (
+                <span className="mt-2 inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-bold">
+                  <CheckCircle2 className="w-3 h-3 text-blue-600" />
+                  Đã đối soát qua cổng
+                </span>
               ) : (
-                <div className="inline-flex items-center gap-1.5 px-3.5 py-1 rounded-full bg-amber-50 text-amber-900 border border-amber-300 text-xs font-semibold">
-                  <Clock className="w-3.5 h-3.5 text-amber-600 animate-pulse" />
-                  Thời hạn đối soát biên lai còn:{" "}
-                  <span className="font-mono font-bold text-amber-700">
-                    {String(timeLeft.minutes).padStart(2, "0")}:{String(timeLeft.seconds).padStart(2, "0")}
-                  </span>
-                </div>
+                <span className="mt-2 inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
+                  <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                  Đã xác nhận cho mượn
+                </span>
               )}
             </div>
-          </div>
 
-          {/* Book Count Banner */}
-          <div className="flex items-center justify-between p-3.5 rounded-xl bg-emerald-50/80 border border-emerald-200">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-600 text-white flex items-center justify-center shadow-md font-black text-lg">
-                {bookCount}
+            {/* Right: Pass Code & 14-day Borrow Metadata */}
+            <div className="flex-1 min-w-0 w-full space-y-2.5">
+              {/* Pass Code Box */}
+              <div className="flex items-center justify-between gap-2 bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/80 dark:border-emerald-800/50 rounded-xl px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
+                    Mã phiếu mượn đối soát
+                  </p>
+                  <p className="font-mono font-black text-sm sm:text-base text-slate-900 dark:text-slate-100 truncate">
+                    {passCode}
+                  </p>
+                </div>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="h-7 w-7 text-emerald-700 hover:bg-emerald-100 dark:text-emerald-300 shrink-0 cursor-pointer"
+                  onClick={handleCopyCode}
+                  title="Sao chép mã Phiếu mượn"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                </Button>
               </div>
-              <div>
-                <p className="text-xs font-bold text-emerald-900 uppercase tracking-wide">
-                  Đã ghi nhận mượn thành công
-                </p>
-                <p className="text-xs text-emerald-700">
-                  Tổng số lượng ấn phẩm trong phiếu mượn này
-                </p>
+
+              {draftCode && (
+                <div className="text-[11px] font-medium text-indigo-700 bg-indigo-50 px-2.5 py-1 rounded-lg border border-indigo-200">
+                  Chuyển từ Phiếu nháp: <span className="font-mono font-bold">{draftCode}</span>
+                </div>
+              )}
+
+              {/* 2x2 Grid: Borrow Date & 14-Day Due Date */}
+              <div className="grid grid-cols-2 gap-2">
+                <div className="p-2 rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200/70 dark:border-slate-700">
+                  <p className="text-[10px] text-muted-foreground font-medium flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-slate-500" /> Ngày mượn
+                  </p>
+                  <p className="text-xs font-bold text-foreground mt-0.5">{borrowDateStr}</p>
+                </div>
+                <div className="p-2 rounded-lg bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/80 dark:border-emerald-800/40">
+                  <p className="text-[10px] text-emerald-700 dark:text-emerald-400 font-semibold flex items-center gap-1">
+                    <Calendar className="w-3 h-3 text-emerald-600" /> Hạn trả (14 ngày)
+                  </p>
+                  <p className="text-xs font-extrabold text-emerald-700 dark:text-emerald-400 mt-0.5">
+                    {dueDateStr}
+                  </p>
+                </div>
+              </div>
+
+              {/* Librarian & Count Row */}
+              <div className="flex items-center justify-between text-[11px] text-muted-foreground px-1 pt-0.5">
+                <span className="inline-flex items-center gap-1 truncate">
+                  <UserCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  Duyệt: <strong className="text-foreground">{librarianName}</strong>
+                </span>
+                <Badge variant="outline" className="bg-emerald-50 text-emerald-700 border-emerald-200 text-[10px] font-bold shrink-0">
+                  {bookCount} cuốn sách
+                </Badge>
               </div>
             </div>
-            <Badge className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold">
-              ĐÃ DUYỆT
-            </Badge>
           </div>
 
           {/* Items List */}
           {items.length > 0 && (
-            <div className="space-y-2">
-              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                Danh sách ấn phẩm kèm biên lai ({items.length} cuốn):
-              </p>
-              <div className="max-h-36 overflow-y-auto space-y-2 pr-1">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
+                  Danh sách bản sao trong phiếu ({items.length} cuốn)
+                </p>
+                <span className="text-[11px] text-emerald-700 font-medium">Thời hạn mượn: 14 ngày</span>
+              </div>
+              <div className="max-h-36 overflow-y-auto space-y-1.5 pr-1">
                 {items.map((it: any, index: number) => (
                   <div
                     key={index}
-                    className="flex items-center gap-3 p-2.5 rounded-lg border bg-muted/40 text-xs"
+                    className="flex items-center justify-between gap-3 px-3 py-2 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-muted/30 text-xs"
                   >
-                    <BookOpen className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="font-semibold text-foreground truncate">
-                        {it.title || it.book_title || "Ấn phẩm thư viện"}
-                      </p>
-                      <p className="text-[11px] text-muted-foreground font-mono">
-                        Mã bản sao: {it.copyQr || it.qr_code || "N/A"}
-                      </p>
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                        <BookOpen className="w-3.5 h-3.5 text-emerald-600" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-bold text-foreground truncate">
+                          {it.title}
+                        </p>
+                        <p className="text-[11px] text-muted-foreground font-mono">
+                          Mã bản sao: <strong className="text-emerald-700 dark:text-emerald-400">{it.copyQr}</strong>
+                        </p>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <span className="inline-block text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md">
+                        Hạn trả: {it.dueDate}
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -190,37 +240,32 @@ export function ExitPassModal({ open, onOpenChange, passData }: ExitPassModalPro
             </div>
           )}
 
-          {/* Guidelines note */}
-          <div className="p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-900 dark:text-emerald-200 space-y-1">
-            <p className="font-bold">📌 Lợi ích của Biên lai mượn sách điện tử:</p>
-            <p>1. Lưu trữ trực tiếp trên thiết bị, bạn có thể tra cứu hạn trả bất kỳ lúc nào mà không sợ thất lạc phiếu giấy.</p>
-            <p>2. Khi cần đối soát hoặc hỗ trợ, chỉ cần xuất trình mã QR này hoặc <strong>Thẻ Thư Viện</strong> cho nhân viên kiểm tra nhanh.</p>
+          {/* Concise Guidelines Note */}
+          <div className="px-3.5 py-2.5 rounded-xl bg-emerald-500/8 border border-emerald-500/20 text-[11px] text-emerald-900 dark:text-emerald-200 leading-relaxed">
+            <strong>📌 Lưu ý:</strong> Phiếu mượn chính thức được chuyển đổi từ <strong>Phiếu mượn nháp</strong> khi Thủ thư xác nhận cho mượn tại quầy (thời hạn mượn tiêu chuẩn <strong>14 ngày</strong> kể từ ngày mượn), dùng để đối soát mượn trả và xuất trình khi ra cổng nếu được hỏi.
           </div>
         </div>
 
-        <DialogFooter className="p-4 bg-muted/30 border-t flex flex-col sm:flex-row sm:justify-between items-center gap-2">
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => window.print()}
-              className="text-xs gap-1.5 cursor-pointer w-full sm:w-auto"
-            >
-              <Printer className="w-3.5 h-3.5" /> In biên lai
-            </Button>
-            <span className="text-[11px] text-muted-foreground hidden sm:inline">
-              Smart Library Management • Biên lai số
-            </span>
-          </div>
+        <DialogFooter className="px-5 py-3.5 bg-muted/30 border-t flex flex-row items-center justify-between gap-3">
           <Button
-            className="w-full sm:w-auto bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => window.print()}
+            className="text-xs gap-1.5 cursor-pointer"
+          >
+            <Printer className="w-3.5 h-3.5" /> In Phiếu mượn
+          </Button>
+          <Button
+            size="sm"
+            className="bg-emerald-600 hover:bg-emerald-700 text-white font-semibold px-5 cursor-pointer"
             onClick={() => onOpenChange(false)}
           >
-            Đã hiểu & Đóng biên lai
+            Đóng Phiếu mượn
           </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
   );
 }
+export default ExitPassModal;

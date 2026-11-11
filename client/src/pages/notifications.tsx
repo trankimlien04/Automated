@@ -51,6 +51,19 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useConfirm } from "@/hooks/use-confirm";
 import { NotificationDispatchModal } from "@/components/notification-dispatch-modal";
 
+interface SmartReminderMeta {
+  level: "upcoming_2d" | "due_today" | "overdue";
+  borrow_record_id: number | null;
+  book_id: number | null;
+  book_title: string | null;
+  copy_qr: string | null;
+  due_date: string | null;
+  days_diff: number;
+  renewal_count: number;
+  waiting_reservations: number;
+  can_quick_renew: boolean;
+}
+
 interface Notification {
   id: number;
   title: string;
@@ -58,6 +71,7 @@ interface Notification {
   type: string;
   is_read: boolean;
   created_at: string;
+  smart_reminder?: SmartReminderMeta | null;
 }
 
 export default function NotificationsPage() {
@@ -79,6 +93,22 @@ export default function NotificationsPage() {
   const [sendingBroadcast, setSendingBroadcast] = useState(false);
   const [scanningReminders, setScanningReminders] = useState(false);
   const [isDispatchModalOpen, setIsDispatchModalOpen] = useState(false);
+  const [renewingBorrowId, setRenewingBorrowId] = useState<number | null>(null);
+
+  const handleQuickRenew = async (e: React.MouseEvent, borrowRecordId: number, notiId: number) => {
+    e.stopPropagation();
+    setRenewingBorrowId(borrowRecordId);
+    try {
+      const res = await api.post("/borrow/renew", { borrowRecordId });
+      toast.success(res.data?.message || "Gia hạn nhanh +7 ngày thành công!");
+      await api.put(`/notifications/${notiId}/read`).catch(() => {});
+      await fetchNotifications();
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || "Không thể gia hạn cuốn sách này");
+    } finally {
+      setRenewingBorrowId(null);
+    }
+  };
 
   const fetchNotifications = async () => {
     setLoading(true);
@@ -264,23 +294,64 @@ export default function NotificationsPage() {
     }
   };
 
-  // Helper to categorize each notification by business domain
+  // Helper to categorize each notification by business domain & 3-tier Smart Reminder urgency
   const getNotificationDetails = (noti: Notification) => {
     const title = (noti.title || "").toLowerCase();
     const msg = (noti.message || "").toLowerCase();
     const fullText = `${title} ${msg}`;
+    const smartLevel = noti.smart_reminder?.level;
 
-    // 1. Khóa tài khoản / Phí phạt & Cảnh báo trễ hạn
+    // 0. Smart Proactive Due-Date Reminder (3 Cấp độ khẩn cấp)
+    if (smartLevel === "overdue" || title.includes("quá hạn") || (title.includes("cảnh báo") && fullText.includes("quá hạn"))) {
+      return {
+        category: "fine",
+        badge: "🔴 Quá hạn • Tạm khóa mượn mới",
+        badgeCls: "bg-destructive/15 text-destructive border-destructive/30 font-semibold",
+        Icon: ShieldAlert,
+        iconBg: "bg-destructive/15 text-destructive",
+        urgencyCardCls: "border-destructive/40 bg-destructive/[0.04] hover:border-destructive/60",
+      };
+    }
+
+    if (
+      smartLevel === "due_today" ||
+      title.includes("hôm nay đến hạn") ||
+      title.includes("đến hạn trả hôm nay") ||
+      title.includes("hạn chót")
+    ) {
+      return {
+        category: "fine",
+        badge: "🟠 Đúng ngày đến hạn • Hôm nay",
+        badgeCls: "bg-amber-500/15 text-amber-700 dark:text-amber-300 border-amber-500/40 font-semibold",
+        Icon: AlertTriangle,
+        iconBg: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
+        urgencyCardCls: "border-amber-500/45 bg-amber-500/[0.05] hover:border-amber-500/70",
+      };
+    }
+
+    if (
+      smartLevel === "upcoming_2d" ||
+      title.includes("nhắc hạn sớm") ||
+      (title.includes("nhắc nhở") && fullText.includes("sắp đến hạn"))
+    ) {
+      const daysLeft = noti.smart_reminder?.days_diff && noti.smart_reminder.days_diff > 0 ? noti.smart_reminder.days_diff : 2;
+      return {
+        category: "borrow",
+        badge: `🔔 Nhắc trước hạn (${daysLeft} ngày)`,
+        badgeCls: "bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/30 font-semibold",
+        Icon: BellRing,
+        iconBg: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
+        urgencyCardCls: "border-sky-500/35 bg-sky-500/[0.03] hover:border-sky-500/60",
+      };
+    }
+
+    // 1. Khóa tài khoản / Vi phạm trễ hạn
     if (
       title.includes("khóa") ||
       msg.includes("bị khóa") ||
       msg.includes("khóa tự động") ||
       title.includes("phạt") ||
-      fullText.includes("phí phạt") ||
-      fullText.includes("tiền phạt") ||
-      fullText.includes("nộp phạt") ||
-      title.includes("quá hạn") ||
-      (title.includes("cảnh báo") && fullText.includes("quá hạn"))
+      fullText.includes("vi phạm")
     ) {
       if (title.includes("khóa") || msg.includes("bị khóa") || msg.includes("khóa tự động")) {
         return {
@@ -289,14 +360,16 @@ export default function NotificationsPage() {
           badgeCls: "bg-destructive/10 text-destructive border-destructive/20",
           Icon: ShieldAlert,
           iconBg: "bg-destructive/10 text-destructive",
+          urgencyCardCls: "",
         };
       }
       return {
         category: "fine",
-        badge: "Phí phạt & Quá hạn",
+        badge: "Vi phạm & Trễ hạn",
         badgeCls: "bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20",
         Icon: AlertTriangle,
         iconBg: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
+        urgencyCardCls: "",
       };
     }
 
@@ -476,7 +549,7 @@ export default function NotificationsPage() {
         <div>
           <h2 className="text-2xl font-bold tracking-tight font-display">Trung tâm thông báo & Nghiệp vụ</h2>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Cập nhật toàn diện các thông báo mượn trả, đặt trước sách, phí phạt, gia hạn và phát loa hệ thống.
+            Cập nhật toàn diện các thông báo mượn trả, đặt trước sách, vi phạm & kỷ luật mượn, gia hạn và phát loa hệ thống.
           </p>
         </div>
 
@@ -625,7 +698,7 @@ export default function NotificationsPage() {
                 { id: "unread", label: "Chưa đọc", count: categoryCounts.unread },
                 { id: "borrow", label: "Mượn & Trả", icon: BookOpen, count: categoryCounts.borrow },
                 { id: "reservation", label: "Đặt trước", icon: BookmarkCheck, count: categoryCounts.reservation },
-                { id: "fine", label: "Phí phạt & Cảnh báo", icon: AlertTriangle, count: categoryCounts.fine },
+                { id: "fine", label: "Vi phạm & Cảnh báo", icon: AlertTriangle, count: categoryCounts.fine },
                 { id: "system", label: "Thẻ & Hệ thống", icon: CreditCard, count: categoryCounts.system },
               ].map((tab) => (
                 <Button
@@ -736,7 +809,9 @@ export default function NotificationsPage() {
               filteredList.map((n) => {
                 const details = getNotificationDetails(n);
                 const { Icon, iconBg, badge, badgeCls } = details;
+                const urgencyCardCls = (details as any).urgencyCardCls || "";
                 const isSelected = selectedIds.includes(n.id);
+                const sr = n.smart_reminder;
 
                 return (
                   <div
@@ -745,6 +820,8 @@ export default function NotificationsPage() {
                     className={`group relative flex items-start gap-3 rounded-xl border p-3.5 transition cursor-pointer ${
                       isSelected
                         ? "border-primary bg-primary/[0.08] shadow-xs"
+                        : urgencyCardCls
+                        ? `${urgencyCardCls} shadow-xs`
                         : !n.is_read 
                         ? "border-primary/30 bg-primary/[0.03] shadow-xs hover:border-primary/50 hover:bg-accent/40" 
                         : "border-border/60 bg-card/60 hover:border-primary/40 hover:bg-accent/40"
@@ -784,6 +861,109 @@ export default function NotificationsPage() {
                       <p className="mt-1.5 text-xs text-muted-foreground leading-relaxed">
                         {n.message}
                       </p>
+
+                      {/* SMART PROACTIVE DUE-DATE REMINDER ACTIONS (3 Cấp độ khẩn cấp) */}
+                      {sr && (
+                        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                          {/* Cấp 1: Trước hạn 2 ngày -> Nút Gia hạn nhanh 1-Chạm (+7 ngày) */}
+                          {sr.level === "upcoming_2d" && (
+                            <>
+                              {sr.can_quick_renew && sr.borrow_record_id ? (
+                                <Button
+                                  size="sm"
+                                  disabled={renewingBorrowId === sr.borrow_record_id}
+                                  onClick={(e) => handleQuickRenew(e, sr.borrow_record_id!, n.id)}
+                                  className="h-7 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-xs cursor-pointer"
+                                >
+                                  <RefreshCw className={`h-3.5 w-3.5 ${renewingBorrowId === sr.borrow_record_id ? "animate-spin" : ""}`} />
+                                  <span>Gia hạn nhanh 1-Chạm (+7 ngày)</span>
+                                </Button>
+                              ) : sr.borrow_record_id && sr.renewal_count >= 1 ? (
+                                <Badge variant="outline" className="text-[10px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 py-0.5">
+                                  ✅ Đã gia hạn 1/1 lần (+7 ngày) • Hạn trả: {sr.due_date ? new Date(sr.due_date).toLocaleDateString("vi-VN") : "---"}
+                                </Badge>
+                              ) : sr.borrow_record_id && sr.waiting_reservations > 0 ? (
+                                <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30 py-0.5">
+                                  ⏳ Đang có người đặt trước (Không thể gia hạn)
+                                </Badge>
+                              ) : null}
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate("/borrow");
+                                }}
+                                className="h-7 text-xs gap-1 border-sky-500/30 text-sky-700 dark:text-sky-300 hover:bg-sky-500/10"
+                              >
+                                <BookOpen className="h-3.5 w-3.5" />
+                                <span>Xem phiếu mượn</span>
+                              </Button>
+                            </>
+                          )}
+
+                          {/* Cấp 2: Đúng ngày đến hạn -> Cảnh báo cam nhắc trả tại Quầy hoặc Hòm 24/7 */}
+                          {sr.level === "due_today" && (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate("/borrow");
+                                }}
+                                className="h-7 text-xs gap-1.5 border-amber-500/50 bg-amber-500/10 text-amber-800 dark:text-amber-200 hover:bg-amber-500/20 font-semibold cursor-pointer"
+                              >
+                                <BookOpen className="h-3.5 w-3.5" />
+                                <span>Trả tại Quầy hoặc Hòm Trả Sách 24/7</span>
+                                <ArrowRight className="h-3 w-3" />
+                              </Button>
+                              {sr.can_quick_renew && sr.borrow_record_id && (
+                                <Button
+                                  size="sm"
+                                  disabled={renewingBorrowId === sr.borrow_record_id}
+                                  onClick={(e) => handleQuickRenew(e, sr.borrow_record_id!, n.id)}
+                                  className="h-7 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-xs cursor-pointer"
+                                >
+                                  <RefreshCw className={`h-3.5 w-3.5 ${renewingBorrowId === sr.borrow_record_id ? "animate-spin" : ""}`} />
+                                  <span>Gia hạn nhanh 1-Chạm (+7 ngày)</span>
+                                </Button>
+                              )}
+                            </>
+                          )}
+
+                          {/* Cấp 3: Quá hạn -> Cảnh báo đỏ & Tạm khóa mượn mới */}
+                          {sr.level === "overdue" && (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="destructive"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate("/borrow");
+                                }}
+                                className="h-7 text-xs gap-1.5 font-semibold shadow-xs cursor-pointer"
+                              >
+                                <BookOpen className="h-3.5 w-3.5" />
+                                <span>Hoàn trả tại Quầy / Hòm 24/7 để mở khóa thẻ</span>
+                                <ArrowRight className="h-3 w-3" />
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate("/fines");
+                                }}
+                                className="h-7 text-xs gap-1 border-destructive/30 text-destructive hover:bg-destructive/10 cursor-pointer"
+                              >
+                                <AlertTriangle className="h-3.5 w-3.5" />
+                                <span>Xem Vi phạm & Trễ hạn</span>
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      )}
 
                       {/* Nút thao tác nhanh theo loại thông báo */}
                       {(n.title.toLowerCase().includes("đặt trước") || n.message.toLowerCase().includes("đặt trước")) && (
@@ -862,40 +1042,38 @@ export default function NotificationsPage() {
             <CardHeader className="pb-3">
               <CardTitle className="font-display text-base flex items-center gap-1.5">
                 <Sparkles className="h-4 w-4 text-primary" />
-                <span>Quy chuẩn nghiệp vụ</span>
+                <span>Nhắc Hạn Thông Minh Đa Cấp Độ</span>
               </CardTitle>
-              <CardDescription className="text-xs">Các sự kiện kích hoạt gửi thông báo tự động</CardDescription>
+              <CardDescription className="text-xs">Tự động chạy ngầm & phân loại 3 mức độ khẩn cấp</CardDescription>
             </CardHeader>
-            <CardContent className="space-y-3.5 text-xs">
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-muted/40">
-                <BookOpen className="h-4 w-4 text-emerald-500 shrink-0 mt-0.5" />
+            <CardContent className="space-y-3 text-xs">
+              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-sky-500/25 bg-sky-500/5">
+                <BellRing className="h-4 w-4 text-sky-500 shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-semibold text-foreground">Mượn & Trả sách qua QR</p>
-                  <p className="text-[11px] text-muted-foreground">Tự động thông báo hạn trả khi mượn, xác nhận vào kho khi trả sách.</p>
+                  <p className="font-semibold text-foreground">1. Trước hạn 2 ngày (Nhắc nhẹ)</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Tự động gửi thông báo nhắc sớm kèm nút <strong>"Gia hạn nhanh 1-Chạm (+7 ngày)"</strong> ngay trong thông báo nếu sách chưa có người đặt trước.
+                  </p>
                 </div>
               </div>
 
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-muted/40">
-                <BookmarkCheck className="h-4 w-4 text-purple-500 shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-semibold text-foreground">Hàng đợi Đặt trước sách</p>
-                  <p className="text-[11px] text-muted-foreground">Báo ngay cho người đặt tiếp theo khi sách được trả về quầy.</p>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-muted/40">
+              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-amber-500/30 bg-amber-500/5">
                 <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-semibold text-foreground">Cảnh báo trễ hạn & Tiền phạt</p>
-                  <p className="text-[11px] text-muted-foreground">Nhắc trước 2 ngày, báo nợ phí phạt và tự động khóa thẻ nếu trễ ≥7 ngày.</p>
+                  <p className="font-semibold text-amber-700 dark:text-amber-400">2. Đúng ngày đến hạn (Cảnh báo cam)</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Cảnh báo màu cam nhắc độc giả hoàn trả tại Quầy Thủ Thư hoặc thả qua Hòm Trả Sách 24/7.
+                  </p>
                 </div>
               </div>
 
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-muted/40">
-                <CreditCard className="h-4 w-4 text-sky-500 shrink-0 mt-0.5" />
+              <div className="flex items-start gap-2.5 p-2.5 rounded-lg border border-destructive/30 bg-destructive/5">
+                <ShieldAlert className="h-4 w-4 text-destructive shrink-0 mt-0.5" />
                 <div>
-                  <p className="font-semibold text-foreground">Kích hoạt & Hạn thẻ thư viện</p>
-                  <p className="text-[11px] text-muted-foreground">Thông báo duyệt tài khoản, cấp mã thẻ và nhắc gia hạn trước 15 ngày.</p>
+                  <p className="font-semibold text-destructive">3. Quá hạn (Cảnh báo đỏ & Khóa mượn mới)</p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Cảnh báo đỏ và tạm khóa quyền mượn sách mới cho đến khi hoàn trả sách quá hạn về thư viện.
+                  </p>
                 </div>
               </div>
             </CardContent>

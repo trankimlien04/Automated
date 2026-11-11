@@ -21,6 +21,9 @@ interface User {
   avatar_url?: string;
   card_number?: string;
   status: "active" | "locked" | "pending";
+  suspended_until?: string | null;
+  overdue_count?: number;
+  pending_remediation_count?: number;
   created_at: string;
 }
 
@@ -90,7 +93,7 @@ export default function ReadersPage() {
           { label: "Tổng độc giả", value: readersList.length.toString(), sub: "Hồ sơ độc giả đã đăng ký" },
           { label: "Đang hoạt động", value: readersList.filter(u => u.status === 'active').length.toString(), sub: "Độc giả được mượn sách" },
           { label: "Chờ duyệt thẻ", value: readersList.filter(u => u.status === 'pending').length.toString(), sub: "Đăng ký thẻ mới" },
-          { label: "Thẻ đang khóa", value: readersList.filter(u => u.status === 'locked').length.toString(), sub: "Bị khóa do quá hạn/vi phạm" },
+          { label: "Thẻ đang khóa", value: readersList.filter(u => u.status === 'locked').length.toString(), sub: "Khóa quản trị bởi thủ thư/admin" },
         ].map((s) => (
           <Card key={s.label}>
             <CardContent className="p-5">
@@ -156,9 +159,26 @@ export default function ReadersPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline" className={statusMap[r.status]?.cls || ""}>
-                        {statusMap[r.status]?.label || r.status}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-1">
+                        <Badge variant="outline" className={statusMap[r.status]?.cls || ""}>
+                          {statusMap[r.status]?.label || r.status}
+                        </Badge>
+                        {Number(r.overdue_count || 0) > 0 && (
+                          <Badge variant="destructive" className="text-[10px]">
+                            Quá hạn ({r.overdue_count})
+                          </Badge>
+                        )}
+                        {r.suspended_until && new Date(r.suspended_until).getTime() > Date.now() && (
+                          <Badge variant="outline" className="text-[10px] border-amber-500/40 text-amber-700 dark:text-amber-300">
+                            Đình chỉ đến {new Date(r.suspended_until).toLocaleDateString("vi-VN")}
+                          </Badge>
+                        )}
+                        {Number(r.pending_remediation_count || 0) > 0 && (
+                          <Badge variant="outline" className="text-[10px] border-orange-500/40 text-orange-700 dark:text-orange-300">
+                            Chờ khắc phục ({r.pending_remediation_count})
+                          </Badge>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-2">

@@ -325,15 +325,35 @@ export default function ProfilePage() {
                   <p className="text-2xl font-bold text-primary mt-1">{stats.currentlyBorrowing || 0} <span className="text-xs font-normal text-muted-foreground">cuốn</span></p>
                 </Card>
                 <Card className="p-3.5">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[11px] text-muted-foreground">Nợ phạt trễ hạn</p>
-                    {Number(stats.unpaidFines || 0) > 0 && (
-                      <Link to="/fines" className="text-[10px] font-semibold text-primary hover:underline flex items-center gap-0.5">
-                        Nộp phạt QR <ArrowRight className="h-3 w-3" />
-                      </Link>
-                    )}
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-[11px] text-muted-foreground">Quyền lưu thông</p>
+                    <Link to="/fines" className="text-[10px] font-semibold text-primary hover:underline flex items-center gap-0.5 shrink-0">
+                      Kỷ luật mượn <ArrowRight className="h-3 w-3" />
+                    </Link>
                   </div>
-                  <p className="text-2xl font-bold text-destructive mt-1">{Number(stats.unpaidFines || 0).toLocaleString("vi-VN")} <span className="text-xs font-normal text-muted-foreground">đ</span></p>
+                  {stats.circulationStatus?.eligibleToBorrow === false ? (
+                    <>
+                      <p className="text-lg font-bold text-destructive mt-1 truncate">
+                        {stats.circulationStatus?.primaryStatus === "OVERDUE"
+                          ? `${stats.circulationStatus?.overdueCount || 0} sách quá hạn`
+                          : stats.circulationStatus?.primaryStatus === "SUSPENDED"
+                          ? `Tạm ngưng ${stats.circulationStatus?.suspensionRemainingDays || 0} ngày`
+                          : stats.circulationStatus?.primaryStatus === "PENDING_REMEDIATION"
+                          ? `${stats.circulationStatus?.pendingRemediationCount || 0} chờ khắc phục`
+                          : "Đang tạm khóa"}
+                      </p>
+                      {stats.circulationStatus?.blockReason && (
+                        <p className="text-[10px] text-muted-foreground mt-0.5 line-clamp-2">
+                          {stats.circulationStatus.blockReason}
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <p className="text-lg font-bold text-emerald-600 mt-1">Đủ điều kiện</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5">Không có quá hạn hay đình chỉ</p>
+                    </>
+                  )}
                 </Card>
               </>
             )}

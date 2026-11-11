@@ -65,7 +65,6 @@ interface BasketItem {
   dueDate?: string;
   borrowDate?: string;
   overdueDays?: number;
-  fineAmount?: number;
   reservationId?: number;
   location?: string;
   draftCode?: string;
@@ -89,20 +88,38 @@ interface ScannedReader {
   borrowBlockReason?: string | null;
   activeBorrows?: any[];
   readyReservations?: any[];
-  unpaidFines?: any[];
-  totalUnpaidFines?: number;
+  circulationStatus?: {
+    primaryStatus?: string;
+    restrictions?: string[];
+    isOverdue?: boolean;
+    overdueCount?: number;
+    isSuspended?: boolean;
+    suspendedUntil?: string | null;
+    suspendedUntilFormatted?: string | null;
+    suspensionRemainingDays?: number;
+    isPendingRemediation?: boolean;
+    pendingRemediationCount?: number;
+    eligibleToBorrow?: boolean;
+    eligibleToReserve?: boolean;
+    blockReason?: string | null;
+  } | null;
+  overdueLoansCount?: number;
   activeDraft?: any;
+  activeExitPass?: any;
+  exitPasses?: any[];
   dropBoxPendingLoans?: any[];
 }
 
 interface RecentTransaction {
   id: number;
   borrow_date: string;
+  due_date?: string;
   status: string;
   reader_name: string;
   card_number: string;
   book_title: string;
   qr_code: string;
+  pass_code?: string | null;
 }
 
 export function SmartCounter() {
@@ -120,13 +137,9 @@ export function SmartCounter() {
   const [exitPassModalOpen, setExitPassModalOpen] = useState(false);
   const [exitPassData, setExitPassData] = useState<any>(null);
 
-  // Bank & Payment Config
-  const [bankConfig, setBankConfig] = useState<any>(null);
-  const [finePaidMethod, setFinePaidMethod] = useState<"cash" | "vietqr">("cash");
-  const [includeOldFines, setIncludeOldFines] = useState(true);
-
   // Camera Dialog
   const [cameraOpen, setCameraOpen] = useState(false);
+  const [isCameraRunning, setIsCameraRunning] = useState(false);
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
   const cameraFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -151,11 +164,32 @@ export function SmartCounter() {
   // Recent 5 History Records for Quick Desk Audit
   const [recentTransactions, setRecentTransactions] = useState<RecentTransaction[]>([]);
 
+  const formatViDate = (val?: string | null) => {
+    if (!val) return "—";
+    if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(val.trim())) return val.trim();
+    const d = new Date(val);
+    if (isNaN(d.getTime())) return val;
+    return d.toLocaleDateString("vi-VN");
+  };
+
   const fetchRecentHistory = async () => {
     try {
       const res = await api.get("/borrow/records");
       if (Array.isArray(res.data)) {
-        setRecentTransactions(res.data.slice(0, 5));
+        const seen = new Set<number>();
+        const deduped: RecentTransaction[] = [];
+        for (const r of res.data) {
+          if (!seen.has(r.id)) {
+            seen.add(r.id);
+            const suffix = (r.card_number || "").replace(/\D/g, "").replace(/^0+/, "") || String(r.id);
+            const passCode = r.pass_code
+              ? r.pass_code.replace(/^PASS-EXP-/i, "PM-BRW-")
+              : `PM-BRW-${String(r.id).padStart(4, "0")}-${suffix}`;
+            deduped.push({ ...r, pass_code: passCode });
+          }
+          if (deduped.length >= 5) break;
+        }
+        setRecentTransactions(deduped);
       }
     } catch (e) {
       console.error(e);
@@ -193,15 +227,6 @@ export function SmartCounter() {
     setPendingDraftsModalOpen(true);
   };
 
-  const fetchBankConfig = async () => {
-    try {
-      const res = await api.get("/fines/bank-config");
-      setBankConfig(res.data);
-    } catch (e) {
-      // Ignore if not configured
-    }
-  };
-
   useEffect(() => {
     if (searchParams.get("mode") === "dropbox") {
       setBookDropModalOpen(true);
@@ -210,7 +235,6 @@ export function SmartCounter() {
 
   useEffect(() => {
     fetchRecentHistory();
-    fetchBankConfig();
     fetchPendingDrafts();
     fetchDropBoxCount();
 
@@ -235,7 +259,7 @@ export function SmartCounter() {
         scanInputRef.current?.select();
       } else if (e.key === "F9") {
         e.preventDefault();
-        if ((basket.length > 0 || totalFinesToCollect > 0) && !isSubmitting) {
+        if (basket.length > 0 && !isSubmitting) {
           handleCompleteSession();
         }
       } else if (e.key === "Escape") {
@@ -270,9 +294,11 @@ export function SmartCounter() {
           borrowBlockReason: data.borrowBlockReason,
           activeBorrows: data.activeBorrows || [],
           readyReservations: data.readyReservations || [],
-          unpaidFines: data.unpaidFines || [],
-          totalUnpaidFines: data.totalUnpaidFines || 0,
+          circulationStatus: data.circulationStatus || null,
+          overdueLoansCount: data.overdueLoansCount || 0,
           activeDraft: data.activeDraft || null,
+          activeExitPass: data.activeExitPass || null,
+          exitPasses: data.exitPasses || (data.activeExitPass ? [data.activeExitPass] : []),
           dropBoxPendingLoans: data.dropBoxPendingLoans || []
         };
 
@@ -503,8 +529,6 @@ export function SmartCounter() {
       return;
     }
     const overdueDays = loan.overdue_days || 0;
-    // If fine is already paid, do not charge again!
-    const fine = loan.fine_already_paid ? 0 : (loan.fine_amount || 0);
 
     const newItem: BasketItem = {
       id: `ret-${loan.qr_code}`,
@@ -516,7 +540,6 @@ export function SmartCounter() {
       borrowDate: loan.borrow_date,
       dueDate: loan.due_date,
       overdueDays: overdueDays,
-      fineAmount: fine,
       location: loan.location,
       borrowerName: currentReader?.full_name || loan.reader_name,
       borrowerCardNumber: currentReader?.card_number || loan.card_number
@@ -536,7 +559,6 @@ export function SmartCounter() {
     for (const loan of currentReader.activeBorrows) {
       if (!basket.some(item => item.copyQr === loan.qr_code)) {
         const overdueDays = loan.overdue_days || 0;
-        const fine = loan.fine_already_paid ? 0 : (loan.fine_amount || 0);
 
         newItems.push({
           id: `ret-${loan.qr_code}`,
@@ -548,7 +570,6 @@ export function SmartCounter() {
           borrowDate: loan.borrow_date,
           dueDate: loan.due_date,
           overdueDays: overdueDays,
-          fineAmount: fine,
           location: loan.location,
           borrowerName: currentReader.full_name,
           borrowerCardNumber: currentReader.card_number
@@ -566,6 +587,54 @@ export function SmartCounter() {
     }
   };
 
+  // Tra cứu & Mở Phiếu mượn chính thức (PM-BRW-...) để đối soát tại quầy hoặc ra cổng
+  const handleVerifyAndOpenBorrowSlip = async (passCode: string, fallbackTx?: RecentTransaction) => {
+    try {
+      const res = await api.post("/borrow/exit-passes/verify", { passCode: passCode.trim() });
+      const data = res.data;
+      if (data?.pass) {
+        setExitPassData(data.pass);
+        setExitPassModalOpen(true);
+        playTone("beep");
+        toast.success(data.message || `Đã mở Phiếu mượn chính thức [${data.pass.pass_code}] để đối soát!`);
+        if (data.pass.card_number && (!currentReader || currentReader.card_number !== data.pass.card_number)) {
+          await loadReaderProfile(data.pass.card_number, false);
+        }
+        return true;
+      }
+    } catch (err: any) {
+      // Fallback if synthesized slip
+    }
+
+    if (fallbackTx) {
+      setExitPassData({
+        pass_code: passCode,
+        reader_name: fallbackTx.reader_name,
+        card_number: fallbackTx.card_number,
+        created_at: fallbackTx.borrow_date,
+        borrowDate: formatViDate(fallbackTx.borrow_date),
+        dueDate: fallbackTx.due_date ? formatViDate(fallbackTx.due_date) : undefined,
+        librarianName: "Trần Thủ Thư",
+        book_count: 1,
+        items: [
+          {
+            title: fallbackTx.book_title,
+            book_title: fallbackTx.book_title,
+            qr_code: fallbackTx.qr_code,
+            copyQr: fallbackTx.qr_code
+          }
+        ]
+      });
+      setExitPassModalOpen(true);
+      playTone("beep");
+      return true;
+    }
+
+    playTone("error");
+    toast.error(`Không tìm thấy Phiếu mượn chính thức [${passCode}]`);
+    return false;
+  };
+
   // Main Unified Scan Processor
   const handleProcessCode = async (rawCode: string) => {
     const code = rawCode.trim();
@@ -576,6 +645,14 @@ export function SmartCounter() {
 
     try {
       const upperCode = code.toUpperCase();
+
+      // 0a. Check if code is an Official Borrow Slip (PM-BRW-... or PASS-EXP-...)
+      if (upperCode.startsWith("PM-BRW-") || upperCode.startsWith("PASS-EXP-")) {
+        await handleVerifyAndOpenBorrowSlip(code);
+        setIsProcessingScan(false);
+        scanInputRef.current?.focus();
+        return;
+      }
 
       // 0. Check if code is a Draft Borrow Code (DRAFT-BRW-... or DRAFT-... or BRW-...)
       if (upperCode.startsWith("DRAFT-BRW-") || upperCode.startsWith("DRAFT-") || upperCode.startsWith("BRW-")) {
@@ -679,9 +756,8 @@ export function SmartCounter() {
         }
 
         const overdueDays = copy.due_date
-          ? Math.max(0, Math.ceil((Date.now() - new Date(copy.due_date).getTime()) / (1000 * 60 * 60 * 24)))
+          ? Math.max(0, Math.floor((new Date(new Date().setHours(0, 0, 0, 0)).getTime() - new Date(new Date(copy.due_date).setHours(0, 0, 0, 0)).getTime()) / (1000 * 60 * 60 * 24)))
           : 0;
-        const fineAmount = overdueDays > 0 ? overdueDays * 5000 : 0;
 
         const newItem: BasketItem = {
           id: `ret-${copy.qr_code}`,
@@ -693,7 +769,6 @@ export function SmartCounter() {
           borrowDate: copy.borrow_date,
           dueDate: copy.due_date,
           overdueDays,
-          fineAmount,
           location: copy.location,
           borrowerName: borrowerName || currentReader?.full_name,
           borrowerCardNumber: borrowerCard || currentReader?.card_number
@@ -702,7 +777,7 @@ export function SmartCounter() {
         setBasket(prev => [...prev, newItem]);
         playTone("beep");
         toast.success(
-          `🔄 Nghiệp vụ: TRẢ SÁCH — Đã nhận ấn phẩm «${copy.book_title}» từ bạn đọc ${borrowerName || "độc giả"}${borrowerCard ? ` (${borrowerCard})` : ""}!${overdueDays > 0 ? ` [Quá hạn ${overdueDays} ngày - Phạt: ${fineAmount.toLocaleString("vi-VN")} đ]` : ""}`
+          `🔄 Nghiệp vụ: TRẢ SÁCH — Đã nhận ấn phẩm «${copy.book_title}» từ bạn đọc ${borrowerName || "độc giả"}${borrowerCard ? ` (${borrowerCard})` : ""}!${overdueDays > 0 ? ` [Trễ hạn ${overdueDays} ngày — Áp dụng quy chế tạm ngưng lưu thông nếu vượt ngưỡng]` : ""}`
         );
         setIsProcessingScan(false);
         scanInputRef.current?.focus();
@@ -763,7 +838,7 @@ export function SmartCounter() {
 
         if (!currentReader.canBorrow) {
           playTone("error");
-          toast.error(`Độc giả không đủ điều kiện mượn: ${currentReader.borrowBlockReason || "Bị khóa hoặc nợ phạt"}`);
+          toast.error(`Độc giả không đủ điều kiện mượn: ${currentReader.borrowBlockReason || "Thẻ đang bị hạn chế quyền mượn (quá hạn / tạm ngưng / chờ khắc phục)"}`);
           setIsProcessingScan(false);
           return;
         }
@@ -829,44 +904,15 @@ export function SmartCounter() {
   const handleResetDesk = () => {
     setCurrentReader(null);
     setBasket([]);
-    setIncludeOldFines(true);
     setScanInput("");
     scanInputRef.current?.focus();
     toast.info("Đã làm mới quầy giao dịch.");
   };
 
-  // Quick Pay Old Fines Handler
-  const handleQuickPayOldFines = async () => {
-    if (!currentReader || !currentReader.unpaidFines || currentReader.unpaidFines.length === 0) return;
-    setIsSubmitting(true);
-    try {
-      let successCount = 0;
-      let totalPaid = 0;
-      for (const fine of currentReader.unpaidFines) {
-        await api.put(`/fines/${fine.id}/pay`, {
-          payment_method: finePaidMethod === "vietqr" ? "transfer" : "cash",
-          payment_channel: "counter",
-          transaction_ref: finePaidMethod === "vietqr" ? `TXN-CTR-${fine.id}-${Date.now().toString().slice(-6)}` : null
-        });
-        successCount++;
-        totalPaid += (Number(fine.amount) || 0);
-      }
-      playTone("success");
-      toast.success(`Đã thu thành công ${totalPaid.toLocaleString("vi-VN")} đ tiền phạt cho độc giả ${currentReader.full_name}!`);
-      loadReaderProfile(currentReader.card_number);
-      fetchRecentHistory();
-    } catch (err: any) {
-      playTone("error");
-      toast.error(err.response?.data?.message || "Không thể thực hiện thanh toán phí phạt");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // Complete Transaction Session (Batch process basket & fine settlement)
+  // Complete Transaction Session (Batch process basket)
   const handleCompleteSession = async () => {
-    if (basket.length === 0 && totalFinesToCollect === 0) {
-      toast.warning("Chưa có ấn phẩm hoặc phí phạt nào để quyết toán!");
+    if (basket.length === 0) {
+      toast.warning("Chưa có ấn phẩm nào trong giỏ giao dịch!");
       return;
     }
 
@@ -880,33 +926,15 @@ export function SmartCounter() {
     setIsSubmitting(true);
     let successBorrowCount = 0;
     let successReturnCount = 0;
-    let paidFinesAmount = 0;
     let errors: string[] = [];
 
     try {
-      // 0. Settle Old Fines if checked
-      if (includeOldFines && currentReader?.unpaidFines && currentReader.unpaidFines.length > 0) {
-        for (const fine of currentReader.unpaidFines) {
-          try {
-            await api.put(`/fines/${fine.id}/pay`, {
-              payment_method: finePaidMethod === "vietqr" ? "transfer" : "cash",
-              payment_channel: "counter",
-              transaction_ref: finePaidMethod === "vietqr" ? `TXN-CTR-${fine.id}-${Date.now().toString().slice(-6)}` : null
-            });
-            paidFinesAmount += (Number(fine.amount) || 0);
-          } catch (err: any) {
-            errors.push(`Thu phạt #${fine.id}: ${err.response?.data?.message || "Lỗi xử lý"}`);
-          }
-        }
-      }
-      // 1. Process all RETURNS first (frees up slots)
+      // 1. Process all RETURNS first (frees up slots & records any late suspension)
       const returnItems = basket.filter(i => i.actionType === "return");
       for (const item of returnItems) {
         try {
           await api.post("/borrow/return", {
-            bookQrCode: item.copyQr,
-            confirmPaidFine: true,
-            paymentMethod: finePaidMethod
+            bookQrCode: item.copyQr
           });
           successReturnCount++;
         } catch (err: any) {
@@ -969,18 +997,12 @@ export function SmartCounter() {
 
       if (errors.length === 0) {
         playTone("success");
-        if (basket.length === 0 && paidFinesAmount > 0) {
-          toast.success(`Đã thu thành công ${paidFinesAmount.toLocaleString("vi-VN")} đ tiền phạt cho độc giả ${currentReader?.full_name}!`);
-          loadReaderProfile(currentReader!.card_number);
-          fetchRecentHistory();
-        } else {
-          toast.success(
-            `Giao dịch hoàn tất! (Mượn: ${successBorrowCount} cuốn, Nhận trả: ${successReturnCount} cuốn${paidFinesAmount > 0 ? `, Thu phạt: ${paidFinesAmount.toLocaleString("vi-VN")} đ` : ""})`
-          );
-          handleResetDesk();
-          fetchRecentHistory();
-          await fetchPendingDrafts();
-        }
+        toast.success(
+          `Giao dịch hoàn tất! (Mượn: ${successBorrowCount} cuốn, Nhận trả: ${successReturnCount} cuốn)`
+        );
+        handleResetDesk();
+        fetchRecentHistory();
+        await fetchPendingDrafts();
       } else {
         playTone("error");
         toast.error(`Có lỗi xảy ra trong phiên: ${errors.join("; ")}`);
@@ -1000,8 +1022,33 @@ export function SmartCounter() {
   };
 
   // Camera Scanner Functions
-  const startCamera = async () => {
-    setCameraOpen(true);
+  const disableCameraStream = async () => {
+    if (html5QrCodeRef.current) {
+      try {
+        if (html5QrCodeRef.current.isScanning) {
+          await html5QrCodeRef.current.stop();
+        }
+        html5QrCodeRef.current.clear();
+      } catch (e) {}
+      html5QrCodeRef.current = null;
+    }
+    const container = document.getElementById("smart-counter-camera");
+    if (container) {
+      const videos = container.querySelectorAll("video");
+      videos.forEach((v) => {
+        if (v.srcObject) {
+          const stream = v.srcObject as MediaStream;
+          stream.getTracks().forEach((t) => t.stop());
+          v.srcObject = null;
+        }
+      });
+    }
+    setIsCameraRunning(false);
+  };
+
+  const enableCameraStream = async () => {
+    await disableCameraStream();
+    setIsCameraRunning(true);
     setTimeout(async () => {
       try {
         const scannerElement = document.getElementById("smart-counter-camera");
@@ -1012,26 +1059,28 @@ export function SmartCounter() {
         await scanner.start(
           { facingMode: "environment" },
           { fps: 10, qrbox: { width: 250, height: 250 } },
-          (decodedText) => {
-            scanner.stop().then(() => {
-              setCameraOpen(false);
-              handleProcessCode(decodedText);
-            });
+          async (decodedText) => {
+            await disableCameraStream();
+            setCameraOpen(false);
+            handleProcessCode(decodedText);
           },
           () => {}
         );
       } catch (err) {
         console.error("Camera error:", err);
+        setIsCameraRunning(false);
+        toast.error("Không thể bật Camera (hoặc nắp che Camera đang đóng). Bạn có thể bấm 'Tải ảnh QR từ máy'!");
       }
-    }, 300);
+    }, 200);
+  };
+
+  const startCamera = async () => {
+    setCameraOpen(true);
+    await enableCameraStream();
   };
 
   const stopCamera = async () => {
-    if (html5QrCodeRef.current && html5QrCodeRef.current.isScanning) {
-      try {
-        await html5QrCodeRef.current.stop();
-      } catch (e) {}
-    }
+    await disableCameraStream();
     setCameraOpen(false);
   };
 
@@ -1058,18 +1107,6 @@ export function SmartCounter() {
   // Calculations
   const borrowCount = basket.filter(i => i.actionType === "borrow" || i.actionType === "reservation" || i.actionType === "draft").length;
   const returnCount = basket.filter(i => i.actionType === "return").length;
-  const basketFines = basket.reduce((sum, item) => sum + (item.fineAmount || 0), 0);
-  const oldFines = (currentReader && includeOldFines) ? (currentReader.totalUnpaidFines || 0) : 0;
-  const totalFinesToCollect = basketFines + oldFines;
-
-  // Dynamic VietQR generator string
-  const bankCode = bankConfig?.bank_code || "TPB";
-  const accountNo = bankConfig?.bank_account_no || bankConfig?.account_number || "00000307092";
-  const accountName = bankConfig?.bank_account_name || bankConfig?.account_name || "THU VIEN ATHENAEUM";
-
-  const vietQrUrl = totalFinesToCollect > 0
-    ? `https://img.vietqr.io/image/${bankCode}-${accountNo}-compact2.png?amount=${totalFinesToCollect}&addInfo=${encodeURIComponent(`ThuPhat ${currentReader?.card_number || "DocGia"}`)}&accountName=${encodeURIComponent(accountName)}`
-    : null;
 
   return (
     <div className="space-y-4 max-w-[1600px] mx-auto">
@@ -1205,25 +1242,51 @@ export function SmartCounter() {
                     <span className="text-muted-foreground">Đang giữ:</span>
                     <span className="font-bold text-foreground">{currentReader.activeBorrowCount || 0} / {currentReader.maxBooksAllowed || 5} cuốn</span>
                   </div>
-                  {currentReader.totalUnpaidFines && currentReader.totalUnpaidFines > 0 ? (
-                    <div className="pt-2 border-t border-border/60 space-y-1.5">
+                  <div className="flex justify-between items-center pt-1 border-t border-border/40">
+                    <span className="text-muted-foreground">Quyền lưu thông:</span>
+                    {currentReader.canBorrow ? (
+                      <Badge variant="outline" className="text-[10px] py-0 px-1.5 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 font-semibold">
+                        ELIGIBLE • Đủ điều kiện
+                      </Badge>
+                    ) : (
+                      <Badge variant="destructive" className="text-[10px] py-0 px-1.5 font-semibold">
+                        {currentReader.circulationStatus?.primaryStatus || "BỊ HẠN CHẾ"}
+                      </Badge>
+                    )}
+                  </div>
+                  {((currentReader.overdueLoansCount || 0) > 0 || currentReader.circulationStatus?.isOverdue) && (
+                    <div className="pt-2 border-t border-border/60 space-y-1">
                       <div className="flex justify-between items-center text-destructive font-semibold">
-                        <span>Nợ phạt cũ:</span>
-                        <span>{currentReader.totalUnpaidFines.toLocaleString("vi-VN")} đ</span>
+                        <span>Đang quá hạn:</span>
+                        <span>{currentReader.circulationStatus?.overdueCount || currentReader.overdueLoansCount} cuốn</span>
                       </div>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="destructive"
-                        onClick={handleQuickPayOldFines}
-                        disabled={isSubmitting}
-                        className="w-full h-7 text-xs font-bold gap-1.5 shadow-xs cursor-pointer"
-                      >
-                        <Wallet className="h-3.5 w-3.5" />
-                        <span>Thu Nhanh {currentReader.totalUnpaidFines.toLocaleString("vi-VN")} đ</span>
-                      </Button>
+                      <p className="text-[10px] text-muted-foreground">
+                        Tạm khóa mượn mới — Nhận trả sách quá hạn để kiểm tra mở khóa.
+                      </p>
                     </div>
-                  ) : null}
+                  )}
+                  {currentReader.circulationStatus?.isSuspended && (
+                    <div className="pt-2 border-t border-border/60 space-y-0.5 text-amber-700 dark:text-amber-300">
+                      <div className="flex justify-between items-center font-semibold">
+                        <span>Tạm ngưng (trả trễ):</span>
+                        <span>Còn {currentReader.circulationStatus.suspensionRemainingDays} ngày</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">
+                        Đến hết {currentReader.circulationStatus.suspendedUntilFormatted} (không được mượn mới).
+                      </p>
+                    </div>
+                  )}
+                  {currentReader.circulationStatus?.isPendingRemediation && (
+                    <div className="pt-2 border-t border-border/60 space-y-0.5 text-orange-700 dark:text-orange-300">
+                      <div className="flex justify-between items-center font-semibold">
+                        <span>Chờ khắc phục sách:</span>
+                        <span>{currentReader.circulationStatus.pendingRemediationCount} biên bản</span>
+                      </div>
+                      <p className="text-[10px] text-muted-foreground">
+                        Mở mục Vi phạm & Kỷ luật mượn để xác nhận khi độc giả khắc phục xong.
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Danh sách sách đang giữ & Nút trả nhanh */}
@@ -1258,9 +1321,7 @@ export function SmartCounter() {
                               inBasket
                                 ? "bg-amber-500/10 border-amber-500/30"
                                 : isOverdue
-                                ? loan.fine_already_paid
-                                  ? "bg-emerald-500/5 border-emerald-500/20"
-                                  : "bg-destructive/5 border-destructive/20"
+                                ? "bg-destructive/5 border-destructive/20"
                                 : "bg-card border-border/60"
                             }`}
                           >
@@ -1288,15 +1349,9 @@ export function SmartCounter() {
                             <div className="flex items-center justify-between text-[10px] text-muted-foreground font-mono">
                               <span>Mã: {loan.qr_code}</span>
                               {isOverdue ? (
-                                loan.fine_already_paid ? (
-                                  <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                                    Trễ {loan.overdue_days}d (Đã nộp phạt)
-                                  </span>
-                                ) : (
-                                  <span className="text-destructive font-semibold">
-                                    Trễ {loan.overdue_days}d (Phạt: {loan.fine_amount?.toLocaleString("vi-VN")}đ)
-                                  </span>
-                                )
+                                <span className="text-destructive font-semibold">
+                                  Quá hạn {loan.overdue_days} ngày (Cần trả)
+                                </span>
                               ) : (
                                 <span>Hạn: {new Date(loan.due_date).toLocaleDateString("vi-VN")}</span>
                               )}
@@ -1308,12 +1363,12 @@ export function SmartCounter() {
                   </div>
                 )}
 
-                {/* Phiếu mượn online của độc giả */}
+                {/* Phiếu mượn nháp online của độc giả */}
                 {currentReader.activeDraft && (
                   <div className="space-y-2 pt-2 border-t border-border/60">
                     <div className="flex items-center justify-between">
                       <p className="text-[11px] font-bold text-indigo-600 dark:text-indigo-400 flex items-center gap-1 uppercase tracking-wider">
-                        <Zap className="h-3.5 w-3.5" /> Phiếu mượn online:
+                        <Zap className="h-3.5 w-3.5" /> Phiếu mượn nháp (24h):
                       </p>
                       <code className="text-[10px] font-mono font-bold bg-indigo-50 text-indigo-700 dark:bg-indigo-950 dark:text-indigo-300 px-1 py-0.5 rounded border border-indigo-200 dark:border-indigo-800">
                         {currentReader.activeDraft.draft_code}
@@ -1322,13 +1377,15 @@ export function SmartCounter() {
 
                     <div className="p-2.5 rounded-lg bg-indigo-50/40 dark:bg-indigo-950/20 border border-indigo-200 dark:border-indigo-800/40 space-y-2">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="text-[11px] text-muted-foreground">Tiến độ đối soát:</span>
+                        <span className="text-[11px] text-muted-foreground">Quét tại kệ:</span>
                         <Badge variant="outline" className={`text-[10px] py-0 px-1.5 ${
                           currentReader.activeDraft.all_verified
                             ? "bg-emerald-50 text-emerald-700 border-emerald-300 font-semibold"
                             : "bg-amber-50 text-amber-700 border-amber-300 font-semibold"
                         }`}>
-                          {currentReader.activeDraft.all_verified ? "✓ Đã đối soát đủ" : `Chờ đối soát (${currentReader.activeDraft.verified_count || 0}/${currentReader.activeDraft.items?.length || 0})`}
+                          {currentReader.activeDraft.all_verified
+                            ? "✓ Đã quét tại kệ"
+                            : `Chờ quét tại kệ (${currentReader.activeDraft.verified_count || 0}/${currentReader.activeDraft.items?.length || 0})`}
                         </Badge>
                       </div>
 
@@ -1350,33 +1407,80 @@ export function SmartCounter() {
                       </div>
 
                       <div className="flex flex-col gap-1.5 pt-1">
-                        <Button
-                          size="sm"
-                          className="w-full h-8 text-xs font-bold gap-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-xs cursor-pointer"
-                          onClick={() => handleOpenDraftByCode(currentReader.activeDraft.draft_code)}
-                        >
-                          <Zap className="h-3.5 w-3.5" />
-                          <span>Đối Soát Sách & Duyệt 1-Chạm</span>
-                        </Button>
-                        <div className="flex gap-1.5">
+                        {currentReader.activeDraft.all_verified ? (
+                          <>
+                            <Button
+                              size="sm"
+                              disabled={isSubmitting}
+                              className="w-full h-8 text-xs font-bold gap-1.5 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white shadow-xs cursor-pointer"
+                              onClick={() => handleQuickApproveDraft(currentReader.activeDraft.draft_code)}
+                              title="Duyệt ngay theo mã bản sao độc giả đã quét tại kệ và cấp Phiếu mượn chính thức"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                              <span>Duyệt & Cấp Phiếu Mượn Ngay</span>
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="w-full h-7 text-[11px] gap-1 border-indigo-300 text-indigo-700 hover:bg-indigo-50 font-semibold cursor-pointer"
+                              onClick={() => handleOpenDraftByCode(currentReader.activeDraft.draft_code)}
+                              title="Mở bảng chi tiết để kiểm tra hoặc đổi sang mã bản sao QR khác"
+                            >
+                              <Search className="h-3 w-3" /> Kiểm Tra / Đổi Mã Bản Sao
+                            </Button>
+                          </>
+                        ) : (
                           <Button
                             size="sm"
-                            variant="secondary"
-                            className="flex-1 h-7 text-[11px] gap-1 bg-indigo-100 hover:bg-indigo-200 text-indigo-800 font-semibold cursor-pointer"
-                            onClick={() => handleLoadDraftToBasket(currentReader.activeDraft)}
+                            className="w-full h-8 text-xs font-bold gap-1.5 bg-gradient-to-r from-indigo-600 to-emerald-600 hover:from-indigo-700 hover:to-emerald-700 text-white shadow-xs cursor-pointer"
+                            onClick={() => handleOpenDraftByCode(currentReader.activeDraft.draft_code)}
+                            title="Mở bảng quét mã bản sao vật lý tại quầy và duyệt cho mượn"
                           >
-                            <Zap className="h-3 w-3" /> Nạp vào giỏ
+                            <QrCode className="h-3.5 w-3.5" />
+                            <span>Quét Tem Sách & Duyệt Phiếu</span>
                           </Button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Lịch sử Phiếu mượn chính thức (PM-BRW-...) của độc giả để Thủ thư đối soát khi cần */}
+                {currentReader.exitPasses && currentReader.exitPasses.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-border/60">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 flex items-center gap-1 uppercase tracking-wider">
+                        <QrCode className="h-3.5 w-3.5" /> Phiếu mượn đối soát ({currentReader.exitPasses.length}):
+                      </p>
+                    </div>
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {currentReader.exitPasses.slice(0, 5).map((ep: any) => (
+                        <div
+                          key={ep.id || ep.pass_code}
+                          className="p-2 rounded-lg bg-emerald-500/5 border border-emerald-500/25 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <p className="font-mono font-bold text-[11px] text-emerald-700 dark:text-emerald-400 truncate">
+                              {ep.pass_code}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground truncate">
+                              {ep.book_count || ep.items?.length || 1} cuốn • Mượn: {formatViDate(ep.borrowDate || ep.created_at)}
+                            </p>
+                          </div>
                           <Button
+                            type="button"
                             size="sm"
                             variant="outline"
-                            className="flex-1 h-7 text-[11px] gap-1 border-emerald-500 text-emerald-700 hover:bg-emerald-50 font-semibold cursor-pointer"
-                            onClick={() => handleQuickApproveDraft(currentReader.activeDraft.draft_code)}
+                            className="h-6 px-2 text-[10px] font-bold border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 shrink-0 cursor-pointer"
+                            onClick={() => {
+                              setExitPassData(ep);
+                              setExitPassModalOpen(true);
+                            }}
                           >
-                            <Check className="h-3 w-3" /> Duyệt nhanh
+                            Xem Phiếu
                           </Button>
                         </div>
-                      </div>
+                      ))}
                     </div>
                   </div>
                 )}
@@ -1599,15 +1703,9 @@ export function SmartCounter() {
                           )}
 
                           {item.overdueDays && item.overdueDays > 0 ? (
-                            item.fineAmount && item.fineAmount > 0 ? (
-                              <span className="text-destructive font-semibold">
-                                • Quá hạn {item.overdueDays} ngày (Phạt {item.fineAmount.toLocaleString("vi-VN")} đ)
-                              </span>
-                            ) : (
-                              <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                                • Quá hạn {item.overdueDays} ngày (Đã nộp phạt)
-                              </span>
-                            )
+                            <span className="text-destructive font-semibold">
+                              • Quá hạn {item.overdueDays} ngày (Nhận trả để hoàn tất đối soát & kiểm tra kỷ luật)
+                            </span>
                           ) : null}
                         </div>
                       </div>
@@ -1635,7 +1733,7 @@ export function SmartCounter() {
             <CardHeader className="py-3 px-4 border-b border-border/60 bg-muted/20">
               <CardTitle className="text-sm font-bold flex items-center gap-2">
                 <CreditCard className="h-4 w-4 text-primary" />
-                <span>Quyết Toán & Xác Nhận</span>
+                <span>Đối Soát & Xác Nhận</span>
               </CardTitle>
             </CardHeader>
 
@@ -1650,80 +1748,28 @@ export function SmartCounter() {
                   <span className="text-muted-foreground">Sách nhận trả lại:</span>
                   <span className="font-bold text-foreground text-sm">{returnCount} cuốn</span>
                 </div>
-                {basketFines > 0 && (
-                  <div className="flex justify-between items-center py-1 border-b border-border/40 text-xs">
-                    <span className="text-muted-foreground">Phạt trễ hạn sách trả:</span>
-                    <span className="font-bold text-destructive">{basketFines.toLocaleString("vi-VN")} đ</span>
-                  </div>
-                )}
-                {currentReader && currentReader.totalUnpaidFines && currentReader.totalUnpaidFines > 0 ? (
-                  <div className="flex justify-between items-center py-1 border-b border-border/40 text-xs">
-                    <label className="flex items-center gap-1.5 cursor-pointer text-destructive font-medium">
-                      <input
-                        type="checkbox"
-                        checked={includeOldFines}
-                        onChange={(e) => setIncludeOldFines(e.target.checked)}
-                        className="rounded border-destructive/40 text-destructive focus:ring-destructive"
-                      />
-                      <span>Thu kèm nợ phạt cũ:</span>
-                    </label>
-                    <span className={includeOldFines ? "font-bold text-destructive" : "text-muted-foreground line-through"}>
-                      {currentReader.totalUnpaidFines.toLocaleString("vi-VN")} đ
-                    </span>
-                  </div>
-                ) : null}
-                <div className="flex justify-between items-center py-1 text-sm font-bold">
-                  <span>Tổng tiền phạt cần thu:</span>
-                  <span className={totalFinesToCollect > 0 ? "text-destructive" : "text-foreground"}>
-                    {totalFinesToCollect.toLocaleString("vi-VN")} đ
-                  </span>
+                <div className="flex justify-between items-center py-1 text-xs font-semibold gap-2">
+                  <span className="text-muted-foreground">Kỷ luật thẻ:</span>
+                  {currentReader ? (
+                    currentReader.canBorrow ? (
+                      <span className="text-emerald-600 font-bold">Đủ điều kiện mượn</span>
+                    ) : (
+                      <span className="text-destructive font-bold text-right">
+                        {currentReader.circulationStatus?.restrictions?.join(" + ") || currentReader.circulationStatus?.primaryStatus || "Tạm khóa quyền mượn"}
+                      </span>
+                    )
+                  ) : (
+                    <span className="text-muted-foreground font-medium">Chưa quét thẻ</span>
+                  )}
                 </div>
               </div>
-
-              {/* Dynamic VietQR if Fines > 0 */}
-              {totalFinesToCollect > 0 && (
-                <div className="p-3 rounded-xl bg-destructive/5 border border-destructive/20 text-center space-y-2">
-                  <div className="flex items-center justify-between text-xs font-semibold text-destructive">
-                    <span>Quyết Toán Phí Phạt ({totalFinesToCollect.toLocaleString("vi-VN")} đ)</span>
-                    <Badge variant="destructive" className="text-[10px]">Cần thu</Badge>
-                  </div>
-
-                  {vietQrUrl ? (
-                    <div className="flex flex-col items-center justify-center p-2 bg-white rounded-lg border border-border shadow-2xs">
-                      <img src={vietQrUrl} alt="VietQR" className="h-32 object-contain" />
-                      <p className="text-[10px] text-muted-foreground mt-1">Quét mã VietQR chuyển khoản nhanh</p>
-                    </div>
-                  ) : null}
-
-                  <div className="flex items-center justify-center gap-2 pt-1">
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant={finePaidMethod === "cash" ? "default" : "outline"}
-                      onClick={() => setFinePaidMethod("cash")}
-                      className="h-7 text-xs px-2.5"
-                    >
-                      Tiền mặt
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant={finePaidMethod === "vietqr" ? "default" : "outline"}
-                      onClick={() => setFinePaidMethod("vietqr")}
-                      className="h-7 text-xs px-2.5"
-                    >
-                      Chuyển khoản QR
-                    </Button>
-                  </div>
-                </div>
-              )}
             </CardContent>
           </div>
 
           <div className="p-4 border-t border-border/60 space-y-2 bg-muted/10">
             <Button
               onClick={handleCompleteSession}
-              disabled={(basket.length === 0 && totalFinesToCollect === 0) || isSubmitting}
+              disabled={basket.length === 0 || isSubmitting}
               className="w-full h-12 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground font-bold text-sm gap-2 shadow-sm cursor-pointer"
             >
               {isSubmitting ? (
@@ -1769,6 +1815,21 @@ export function SmartCounter() {
                   <TableCell className="py-2 font-medium text-foreground max-w-[200px] truncate">{tx.book_title}</TableCell>
                   <TableCell className="py-2 text-muted-foreground">{tx.reader_name} ({tx.card_number})</TableCell>
                   <TableCell className="py-2 text-muted-foreground">{new Date(tx.borrow_date).toLocaleDateString("vi-VN")}</TableCell>
+                  <TableCell className="py-2">
+                    {tx.pass_code ? (
+                      <button
+                        type="button"
+                        onClick={() => handleVerifyAndOpenBorrowSlip(tx.pass_code!, tx)}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[10px] cursor-pointer transition-colors"
+                        title="Bấm để mở Phiếu mượn chính thức & đối soát"
+                      >
+                        <QrCode className="h-3 w-3" />
+                        {tx.pass_code}
+                      </button>
+                    ) : (
+                      <span className="text-[10px] text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
                   <TableCell className="py-2 text-right">
                     <Badge variant="outline" className={`text-[10px] ${tx.status === "borrowing" ? "bg-emerald-500/10 text-emerald-600 border-emerald-500/30" : "bg-muted text-muted-foreground"}`}>
                       {tx.status === "borrowing" ? "Đang mượn" : "Đã trả"}
@@ -1785,28 +1846,82 @@ export function SmartCounter() {
       <Dialog open={cameraOpen} onOpenChange={(open) => !open && stopCamera()}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle className="text-base font-bold flex items-center gap-2">
-              <Camera className="h-4 w-4 text-primary" />
-              Quét Mã Qua Camera
-            </DialogTitle>
+            <div className="flex items-center justify-between pr-6">
+              <DialogTitle className="text-base font-bold flex items-center gap-2">
+                <Camera className="h-4 w-4 text-primary" />
+                Quét Mã Qua Camera
+              </DialogTitle>
+              <Badge
+                variant="outline"
+                className={`text-[10px] font-semibold ${
+                  isCameraRunning
+                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/40"
+                    : "bg-slate-200/70 text-slate-600 dark:bg-slate-800 dark:text-slate-400 border-slate-300"
+                }`}
+              >
+                {isCameraRunning ? "● Đang bật Camera" : "○ Đã tắt Camera"}
+              </Badge>
+            </div>
             <DialogDescription className="text-xs">
-              Giơ mã Thẻ độc giả hoặc Tem gáy sách vào giữa khung hình.
+              Giơ mã Thẻ độc giả hoặc Tem gáy sách vào giữa khung hình, hoặc tắt camera để tải ảnh mã QR từ máy.
             </DialogDescription>
           </DialogHeader>
           <div className="flex flex-col items-center justify-center p-2">
-            <div id="smart-counter-camera" className="w-full h-64 rounded-xl overflow-hidden bg-black"></div>
+            <div className="relative w-full h-64 rounded-xl overflow-hidden bg-black flex items-center justify-center border border-border">
+              <div
+                id="smart-counter-camera"
+                className={`w-full h-full ${isCameraRunning ? "block" : "hidden"}`}
+              />
+              {!isCameraRunning && (
+                <div className="flex flex-col items-center justify-center text-center p-6 space-y-3 text-slate-300">
+                  <div className="h-12 w-12 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center text-slate-400">
+                    <Camera className="h-6 w-6" />
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs font-bold text-white">Camera hiện đang tắt</p>
+                    <p className="text-[11px] text-slate-400">
+                      Bấm nút bên dưới để bật lại Camera hoặc tải ảnh mã QR từ thiết bị.
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={enableCameraStream}
+                    className="gap-1.5 text-xs font-bold bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer"
+                  >
+                    <Camera className="h-3.5 w-3.5" />
+                    <span>Bật Camera</span>
+                  </Button>
+                </div>
+              )}
+            </div>
           </div>
-          <DialogFooter className="flex items-center justify-between sm:justify-between w-full">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => cameraFileInputRef.current?.click()}
-              className="gap-1.5 text-xs font-semibold border-primary/40 text-primary hover:bg-primary/10"
-            >
-              <Upload className="h-3.5 w-3.5" />
-              <span>Tải ảnh QR từ máy</span>
-            </Button>
+          <DialogFooter className="flex flex-wrap items-center justify-between sm:justify-between gap-2 w-full">
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant={isCameraRunning ? "destructive" : "default"}
+                size="sm"
+                onClick={isCameraRunning ? disableCameraStream : enableCameraStream}
+                className={`gap-1.5 text-xs font-semibold cursor-pointer ${
+                  !isCameraRunning ? "bg-emerald-600 hover:bg-emerald-700 text-white" : ""
+                }`}
+              >
+                <Camera className="h-3.5 w-3.5" />
+                <span>{isCameraRunning ? "Tắt Camera" : "Bật Camera"}</span>
+              </Button>
+
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => cameraFileInputRef.current?.click()}
+                className="gap-1.5 text-xs font-semibold border-primary/40 text-primary hover:bg-primary/10 cursor-pointer"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                <span>Tải ảnh QR từ máy</span>
+              </Button>
+            </div>
             <input
               type="file"
               ref={cameraFileInputRef}
@@ -1815,7 +1930,9 @@ export function SmartCounter() {
               onChange={handleImageFileUpload}
             />
             <div id="smart-counter-temp-file" className="hidden" />
-            <Button variant="outline" size="sm" onClick={stopCamera}>Đóng</Button>
+            <Button variant="outline" size="sm" onClick={stopCamera} className="cursor-pointer">
+              Đóng
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1827,34 +1944,34 @@ export function SmartCounter() {
         passData={exitPassData}
       />
 
-      {/* DIALOG: PHÊ DUYỆT PHIẾU MƯỢN ONLINE (1-CHẠM) & ĐỐI SOÁT MÃ TEM GÁY SÁCH TẠI QUẦY */}
+      {/* DIALOG: XÁC NHẬN PHIẾU MƯỢN NHÁP -> CHUYỂN SANG PHIẾU MƯỢN CHÍNH THỨC */}
       <Dialog open={draftApprovalModalOpen} onOpenChange={setDraftApprovalModalOpen}>
         <DialogContent className="max-w-3xl max-h-[92vh] overflow-y-auto">
           {targetDraftData && (
             <>
               <DialogHeader>
                 <div className="flex items-center gap-2">
-                  <Badge className="bg-primary text-primary-foreground font-semibold">
-                    Giao Dịch Mượn Gom Nhiều Cuốn
+                  <Badge className="bg-indigo-600 text-white font-semibold">
+                    Phiếu Mượn Nháp (Giữ Chỗ 24h)
                   </Badge>
                   <code className="px-2 py-0.5 bg-primary/10 text-primary rounded border border-primary/20 font-mono font-bold text-xs">
                     {targetDraftData.draft?.draft_code}
                   </code>
                 </div>
                 <DialogTitle className="font-display text-lg font-bold mt-1 text-foreground">
-                  Phê Duyệt Phiếu Mượn Online (1-Chạm) & Đối Soát Mã Tem Gáy Sách ({targetDraftData.items?.length || 0} cuốn)
+                  Xác Nhận Cho Mượn & Chuyển Sang Phiếu Mượn Chính Thức ({targetDraftData.items?.length || 0} cuốn)
                 </DialogTitle>
                 <DialogDescription className="text-xs">
-                  Thủ thư đối soát bản sao sách độc giả mang tới bàn và bấm 1 chạm để hoàn tất xuất mượn toàn bộ ấn phẩm.
+                  Hệ thống đã tự động khóa giữ riêng 1 bản sao cụ thể trong 24h cho từng cuốn. Khi Thủ thư xác nhận cho mượn, Phiếu mượn nháp sẽ chuyển thành <strong>Phiếu mượn chính thức</strong> để đối soát mượn trả và kiểm tra khi ra cổng.
                 </DialogDescription>
               </DialogHeader>
 
               <div className="space-y-4 pt-1">
-                {/* Visual notice if reader already 100% self-verified at shelf */}
+                {/* Visual notice if copies are locked */}
                 {(targetDraftData.allVerified || targetDraftData.draft?.all_verified) && (
-                  <div className="p-3 bg-emerald-500/15 border border-emerald-500/30 rounded-xl text-xs text-emerald-800 dark:text-emerald-200 flex items-center gap-2 font-medium">
-                    <Sparkles className="h-4 w-4 text-emerald-600 shrink-0 animate-pulse" />
-                    <span>⭐ <strong>MÃ XUẤT KHO 1-CHẠM:</strong> Độc giả đã tự đối soát 100% bản sao tại kệ sách. Thủ thư chỉ cần bấm <em>"Xác nhận xuất kho"</em> để hoàn tất mượn mà không cần thao tác kiểm tra lại!</span>
+                  <div className="p-3 bg-indigo-500/10 border border-indigo-500/30 rounded-xl text-xs text-indigo-900 dark:text-indigo-200 flex items-center gap-2 font-medium">
+                    <Sparkles className="h-4 w-4 text-indigo-600 shrink-0" />
+                    <span>🔒 <strong>ĐÃ KHÓA GIỮ RIÊNG BẢN SAO 24H:</strong> Hệ thống đã khóa riêng bản sao cụ thể cho độc giả. Thủ thư đối chiếu đúng mã QR bản sao và bấm xác nhận để chuyển sang <strong>Phiếu mượn chính thức</strong>!</span>
                   </div>
                 )}
 
@@ -1903,9 +2020,19 @@ export function SmartCounter() {
                             <strong className="text-emerald-600 font-bold">Hoạt động</strong>
                           </div>
                           <div className="p-2.5 bg-background rounded-xl border">
-                            <span className="text-[10px] text-muted-foreground block">Nợ phí phạt</span>
-                            <strong className={(targetDraftData.eligibility?.unpaidFines || 0) > 0 ? "text-destructive font-bold" : "text-foreground font-bold"}>
-                              {(targetDraftData.eligibility?.unpaidFines || 0).toLocaleString('vi-VN')}đ
+                            <span className="text-[10px] text-muted-foreground block">Kỷ luật / Khắc phục</span>
+                            <strong
+                              className={
+                                (targetDraftData.eligibility?.pendingRemediationCount || 0) > 0 || targetDraftData.eligibility?.suspendedUntil
+                                  ? "text-destructive font-bold"
+                                  : "text-emerald-600 font-bold"
+                              }
+                            >
+                              {(targetDraftData.eligibility?.pendingRemediationCount || 0) > 0
+                                ? `${targetDraftData.eligibility.pendingRemediationCount} chờ khắc phục`
+                                : targetDraftData.eligibility?.suspendedUntil
+                                ? `Đình chỉ đến ${new Date(targetDraftData.eligibility.suspendedUntil).toLocaleDateString("vi-VN")}`
+                                : "Không vi phạm"}
                             </strong>
                           </div>
                           <div className="p-2.5 bg-background rounded-xl border">
@@ -1990,14 +2117,30 @@ export function SmartCounter() {
 
                         {/* Physical verification state or input */}
                         {item.book_copy_id ? (
-                          <div className="flex items-center justify-between p-2 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs">
-                            <span className="flex items-center gap-1.5 font-semibold text-emerald-800 dark:text-emerald-200">
-                              <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                              Độc giả đã tự đối soát bản sao tại kệ:
-                            </span>
-                            <Badge className="bg-emerald-600 text-white font-mono text-xs">
-                              {item.copy_qr_code || `Bản sao #${item.book_copy_id}`}
-                            </Badge>
+                          <div className="space-y-2">
+                            <div className="flex items-center justify-between p-2 rounded-lg bg-indigo-500/10 border border-indigo-500/30 text-xs">
+                              <span className="flex items-center gap-1.5 font-semibold text-indigo-800 dark:text-indigo-200">
+                                <CheckCircle2 className="h-4 w-4 text-indigo-600" />
+                                Bản sao đang khóa giữ riêng 24h (Phiếu mượn nháp):
+                              </span>
+                              <Badge className="bg-indigo-600 text-white font-mono text-xs">
+                                🔒 {item.copy_qr_code || `Bản sao #${item.book_copy_id}`}
+                              </Badge>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="text-[11px] text-muted-foreground shrink-0">
+                                Đổi sang bản sao khác (nếu độc giả cầm cuốn khác):
+                              </span>
+                              <Input
+                                placeholder={`Mặc định giữ bản sao [${item.copy_qr_code || item.book_copy_id}] — hoặc quét mã QR bản sao khác...`}
+                                value={copyOverrides[item.book_id] || ""}
+                                onChange={(e) => {
+                                  const val = e.target.value.trim();
+                                  setCopyOverrides(prev => ({ ...prev, [item.book_id]: val }));
+                                }}
+                                className="h-7 text-xs font-mono bg-background flex-1"
+                              />
+                            </div>
                           </div>
                         ) : (
                           <div className="flex items-center gap-2 pt-1 border-t border-border/50">
@@ -2062,10 +2205,10 @@ export function SmartCounter() {
                     >
                       <Zap className="h-4 w-4" />
                       {isApprovingDraft
-                        ? "Đang xuất kho..."
+                        ? "Đang xác nhận Phiếu mượn..."
                         : isDraftExceedingLimit
                         ? `⛔ Không thể duyệt: Vượt hạn mức (${targetDraftData.activeBorrowsCount || 0} + ${targetDraftData.items?.length || 0} / ${targetDraftData.maxBooks || 5} cuốn)`
-                        : `⚡ Xác Nhận Xuất Kho Toàn Bộ ${targetDraftData.items?.length || 0} Cuốn Sách (1-Chạm)`}
+                        : `⚡ Xác Nhận Cho Mượn & Chuyển Sang Phiếu Mượn (${targetDraftData.items?.length || 0} cuốn)`}
                     </Button>
                   );
                 })()}
@@ -2120,7 +2263,16 @@ export function SmartCounter() {
                     </div>
                     <p className="font-semibold text-foreground mt-0.5">{d.reader_name} ({d.card_number})</p>
                     <p className="text-[11px] text-muted-foreground mt-0.5">
-                      Số lượng: <strong>{d.items_count || d.items?.length || 1} cuốn sách</strong> • Còn {d.time_left_hours ?? 24}h
+                      Số lượng: <strong>{d.items_count || d.items?.length || 1} cuốn sách</strong> • {(() => {
+                        if (!d.expires_at) return `Còn ${d.time_left_hours ?? 24}h`;
+                        const diffMs = new Date(d.expires_at).getTime() - Date.now();
+                        if (diffMs <= 0) return "Đã hết hạn";
+                        const totalMinutes = Math.floor(diffMs / (1000 * 60));
+                        const hours = Math.floor(totalMinutes / 60);
+                        const minutes = totalMinutes % 60;
+                        if (hours > 0) return `Còn ${hours}h ${minutes}p`;
+                        return `Còn ${minutes} phút`;
+                      })()}
                     </p>
                   </div>
                   <Button

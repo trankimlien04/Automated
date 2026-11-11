@@ -7,7 +7,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Mail, Phone, Lock, Unlock, Plus, UserPlus, ShieldAlert } from "lucide-react";
+import { Search, Mail, Phone, Lock, Unlock, Plus, UserPlus, ShieldAlert, Crown } from "lucide-react";
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
@@ -75,7 +75,7 @@ export default function AccountsPage() {
   const handleUpdateStatus = (id: number, fullName: string, newStatus: string) => {
     const actionName = newStatus === "active" ? "mở khóa" : "khóa";
     const title = newStatus === "active" ? "Xác nhận mở khóa tài khoản" : "Xác nhận khóa tài khoản";
-    
+
     confirm({
       title: title,
       description: `Bạn có đồng ý chấp nhận ${actionName} tài khoản của "${fullName}" không?`,
@@ -131,14 +131,14 @@ export default function AccountsPage() {
 
           toast.success(`Tạo tài khoản ${roleMap[newRole]} thành công!`);
           setIsDialogOpen(false);
-          
+
           // Reset form fields
           setNewName("");
           setNewEmail("");
           setNewPassword("");
           setNewPhone("");
           setNewRole("librarian");
-          
+
           fetchUsers();
         } catch (error: any) {
           console.error("Lỗi khi tạo tài khoản:", error);
@@ -219,19 +219,19 @@ export default function AccountsPage() {
                   </div>
                   <Input placeholder="Mật khẩu đăng nhập mặc định" type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} required />
                   <div>
-                    <Input 
-                      placeholder="Số điện thoại (10 chữ số, VD: 0901234567)" 
+                    <Input
+                      placeholder="Số điện thoại (10 chữ số, VD: 0901234567)"
                       type="tel"
-                      value={newPhone} 
+                      value={newPhone}
                       maxLength={10}
-                      onChange={(e) => setNewPhone(sanitizePhoneInput(e.target.value))} 
+                      onChange={(e) => setNewPhone(sanitizePhoneInput(e.target.value))}
                     />
                     <p className="text-[11px] text-muted-foreground mt-1">Chỉ nhập số, không được ghi chữ</p>
                     {newPhone && !isValidPhone(newPhone) && (
                       <p className="text-[11px] text-destructive mt-0.5">Số điện thoại phải gồm 10 chữ số, bắt đầu bằng 0</p>
                     )}
                   </div>
-                  
+
                   <div className="flex flex-col gap-2">
                     <label className="text-xs text-muted-foreground">Vai trò</label>
                     <Select value={newRole} onValueChange={setNewRole}>
@@ -239,10 +239,12 @@ export default function AccountsPage() {
                         <SelectValue placeholder="Chọn vai trò" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="owner">Chủ thư viện / Giám đốc (Owner)</SelectItem>
+                        {user?.role === "owner" && (
+                          <SelectItem value="owner">Chủ thư viện / Giám đốc (Owner)</SelectItem>
+                        )}
                         <SelectItem value="librarian">Thủ thư (Librarian)</SelectItem>
                         <SelectItem value="reader">Độc giả (Reader)</SelectItem>
-                        <SelectItem value="admin">Quản trị viên (Admin)</SelectItem>
+                        <SelectItem value="admin">Quản trị viên IT (Admin)</SelectItem>
                       </SelectContent>
                     </Select>
                   </div>
@@ -299,10 +301,9 @@ export default function AccountsPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <Badge variant="outline" className={`text-xs ${
-                        r.role === 'admin' ? 'border-destructive text-destructive bg-destructive/5' : 
-                        r.role === 'librarian' ? 'border-primary text-primary bg-primary/5' : ''
-                      }`}>
+                      <Badge variant="outline" className={`text-xs ${r.role === 'admin' ? 'border-destructive text-destructive bg-destructive/5' :
+                          r.role === 'librarian' ? 'border-primary text-primary bg-primary/5' : ''
+                        }`}>
                         {roleMap[r.role] || r.role}
                       </Badge>
                     </TableCell>
@@ -313,7 +314,7 @@ export default function AccountsPage() {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-2">
-                        {r.id !== user?.id && r.role !== 'admin' && (
+                        {r.id !== user?.id && (user?.role === "owner" ? r.role !== "owner" : r.role !== "admin" && r.role !== "owner") ? (
                           <>
                             {r.status === "active" && (
                               <Button
@@ -336,10 +337,15 @@ export default function AccountsPage() {
                               </Button>
                             )}
                           </>
-                        )}
-                        {r.role === 'admin' && r.id !== user?.id && (
+                        ) : r.id === user?.id ? (
+                          <span className="text-xs text-muted-foreground italic">Tài khoản hiện tại</span>
+                        ) : r.role === 'owner' ? (
+                          <span className="text-xs text-amber-600 font-medium italic flex items-center gap-1">
+                            <Crown className="h-3.5 w-3.5" /> Chủ thư viện
+                          </span>
+                        ) : (
                           <span className="text-xs text-muted-foreground italic flex items-center gap-1">
-                            <ShieldAlert className="h-3 w-3" /> Admin tối cao
+                            <ShieldAlert className="h-3.5 w-3.5" /> Quản trị viên IT
                           </span>
                         )}
                       </div>

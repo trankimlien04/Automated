@@ -109,34 +109,53 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
 
   // Camera toggle
   const startCamera = async () => {
-    try {
-      setIsCameraActive(true);
-      const html5QrCode = new Html5Qrcode("security-reader-qr-box");
-      html5QrCodeRef.current = html5QrCode;
+    await stopCamera();
+    setIsCameraActive(true);
+    setTimeout(async () => {
+      try {
+        const el = document.getElementById("security-reader-qr-box");
+        if (!el) return;
+        const html5QrCode = new Html5Qrcode("security-reader-qr-box");
+        html5QrCodeRef.current = html5QrCode;
 
-      await html5QrCode.start(
-        { facingMode: "environment" },
-        { fps: 10, qrbox: { width: 250, height: 250 } },
-        (decodedText) => {
-          stopCamera();
-          setPassCodeInput(decodedText);
-          handleVerify(decodedText);
-        },
-        () => {}
-      );
-    } catch (e) {
-      console.error("Camera error:", e);
-      setIsCameraActive(false);
-      toast.error("Không thể bật camera thiết bị");
-    }
+        await html5QrCode.start(
+          { facingMode: "environment" },
+          { fps: 10, qrbox: { width: 250, height: 250 } },
+          (decodedText) => {
+            stopCamera();
+            setPassCodeInput(decodedText);
+            handleVerify(decodedText);
+          },
+          () => {}
+        );
+      } catch (e) {
+        console.error("Camera error:", e);
+        setIsCameraActive(false);
+        toast.error("Không thể bật camera thiết bị");
+      }
+    }, 150);
   };
 
   const stopCamera = async () => {
-    if (html5QrCodeRef.current && isCameraActive) {
+    if (html5QrCodeRef.current) {
       try {
-        await html5QrCodeRef.current.stop();
-        html5QrCodeRef.current = null;
+        if (html5QrCodeRef.current.isScanning) {
+          await html5QrCodeRef.current.stop();
+        }
+        html5QrCodeRef.current.clear();
       } catch (e) {}
+      html5QrCodeRef.current = null;
+    }
+    const container = document.getElementById("security-reader-qr-box");
+    if (container) {
+      const videos = container.querySelectorAll("video");
+      videos.forEach((v) => {
+        if (v.srcObject) {
+          const stream = v.srcObject as MediaStream;
+          stream.getTracks().forEach((t) => t.stop());
+          v.srcObject = null;
+        }
+      });
     }
     setIsCameraActive(false);
   };
@@ -152,15 +171,15 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
             </div>
             <div>
               <DialogTitle className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                Bộ Đối Soát Biên Lai Mượn Sách Điện Tử
+                Bộ Đối Soát Phiếu Mượn & Kiểm Soát Ra Cổng
               </DialogTitle>
               <DialogDescription className="text-slate-400 text-xs mt-0.5">
-                Kiểm tra & tra cứu nhanh chứng từ mượn sách số hóa của độc giả qua Camera hoặc mã QR
+                Kiểm tra & đối soát nhanh Phiếu mượn chính thức (PM-BRW-...) hoặc Thẻ độc giả khi ra cổng
               </DialogDescription>
             </div>
           </div>
           <Badge variant="outline" className="text-indigo-300 border-indigo-400/40 bg-indigo-950/50 hidden sm:inline-flex">
-            Digital Verifier
+            Đối Soát Phiếu Mượn
           </Badge>
         </div>
 
@@ -169,7 +188,7 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
-                Quét Thẻ Độc Giả (LIB-RD-...) hoặc Mã Biên Lai (PASS-EXP-...)
+                Quét Mã Phiếu Mượn (PM-BRW-...) hoặc Thẻ Độc Giả (LIB-RD-...)
               </label>
               <Badge variant="outline" className="text-[10px] bg-indigo-50 text-indigo-700 border-indigo-200">
                 ⭐ Nhận diện qua mã QR
@@ -178,7 +197,7 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
             <div className="flex gap-2">
               <div className="relative flex-1">
                 <Input
-                  placeholder="Quét Thẻ Độc Giả (VD: LIB-RD-000003) hoặc mã PASS-EXP-..."
+                  placeholder="Quét mã Phiếu mượn (VD: PM-BRW-...) hoặc Thẻ độc giả (LIB-RD-000003)..."
                   value={passCodeInput}
                   onChange={(e) => setPassCodeInput(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleVerify()}
@@ -208,7 +227,7 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
                 className="gap-2 bg-indigo-600 hover:bg-indigo-700 text-white shrink-0"
               >
                 <Scan className="w-4 h-4" />
-                {isVerifying ? "Đang soát..." : "Kiểm tra biên lai"}
+                {isVerifying ? "Đang soát..." : "Đối soát Phiếu mượn"}
               </Button>
             </div>
           </div>
@@ -218,7 +237,7 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
             <div className="rounded-xl overflow-hidden border-2 border-indigo-500 bg-black flex flex-col items-center p-3 relative">
               <div id="security-reader-qr-box" className="w-full max-w-sm rounded-lg overflow-hidden" />
               <p className="text-white/80 text-xs mt-2 font-medium animate-pulse">
-                Hướng camera vào mã QR Biên lai trên điện thoại hoặc Thẻ thư viện
+                Hướng camera vào mã QR Phiếu mượn trên điện thoại hoặc Thẻ thư viện
               </p>
             </div>
           )}
@@ -326,12 +345,12 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
             </div>
           )}
 
-          {/* Live Recent Receipts in Library */}
+          {/* Live Recent Borrow Slips in Library */}
           <div className="space-y-3 pt-2 border-t">
             <div className="flex items-center justify-between">
               <h4 className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-2">
                 <Clock className="w-3.5 h-3.5 text-indigo-600" />
-                Các Biên Lai Mượn Số Vừa Được Tạo
+                Các Phiếu Mượn Vừa Được Thủ Thư Xác Nhận
               </h4>
               <Button
                 size="sm"
@@ -348,7 +367,7 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
             <div className="max-h-40 overflow-y-auto space-y-2 pr-1">
               {activePassesList.length === 0 ? (
                 <p className="text-xs text-muted-foreground text-center py-4">
-                  Chưa có biên lai mượn số nào được tạo gần đây.
+                  Chưa có Phiếu mượn nào được tạo gần đây.
                 </p>
               ) : (
                 activePassesList.map((p) => (

@@ -72,17 +72,20 @@ async function initOwnerAndConfigTables() {
             card_expiry = IFNULL(card_expiry, DATE_ADD(CURRENT_DATE, INTERVAL 4 YEAR))
         `);
 
-        // 5. Ensure at least 1 sample pending proposal exists if empty
+        // 5. Remove legacy monetary pending proposals and ensure sample discipline proposal if empty
+        await db.execute(
+            "DELETE FROM config_change_requests WHERE status = 'pending' AND key_name IN ('fine_per_day', 'bank_code', 'bank_name', 'bank_account_no', 'bank_account_name')"
+        );
         const [existingRequests] = await db.execute("SELECT id FROM config_change_requests");
         if (existingRequests.length === 0) {
             const [adminUser] = await db.execute("SELECT id FROM users WHERE role = 'admin' LIMIT 1");
             const adminId = adminUser.length > 0 ? adminUser[0].id : 1;
             await db.execute(
                 `INSERT INTO config_change_requests (key_name, current_value, proposed_value, reason, requested_by, status)
-                 VALUES ('fine_per_day', '5000', '10000', 'Đề xuất tăng phí phạt theo quý mới nhằm giảm thiểu độc giả giữ sách quá hạn', ?, 'pending')`,
+                 VALUES ('suspension_days_per_late_day', '1', '2', 'Đề xuất tăng số ngày tạm ngưng mượn trên mỗi ngày trả trễ nhằm hạn chế giữ sách quá hạn', ?, 'pending')`,
                 [adminId]
             );
-            console.log('👑 [INIT DB] Seeded sample pending config request for Owner review');
+            console.log('👑 [INIT DB] Seeded sample pending discipline config request for Owner review');
         }
 
         // 6. Ensure all staff roles (Admin, Librarian, Owner) have starter notifications
@@ -93,9 +96,9 @@ async function initOwnerAndConfigTables() {
                 if (staff.role === 'admin') {
                     await db.execute(`
                         INSERT INTO notifications (user_id, title, message, type, is_read, created_at) VALUES
-                        (?, 'Hệ thống Smart Library đã sẵn sàng', 'Chào mừng Quản trị viên. Toàn bộ các dịch vụ mượn trả, tra cứu và Maker-Checker đang hoạt động bình thường.', 'info', 0, NOW()),
-                        (?, 'Cảnh báo sách quá hạn định kỳ', 'Hệ thống ghi nhận có độc giả mượn sách quá hạn cần đôn đốc thu hồi và nộp phạt.', 'warning', 0, DATE_SUB(NOW(), INTERVAL 2 HOUR)),
-                        (?, 'Yêu cầu phê duyệt cấu hình hệ thống', 'Đã có đề xuất thay đổi mức phí phạt trễ hạn gửi tới Giám đốc phê duyệt.', 'reminder', 0, DATE_SUB(NOW(), INTERVAL 5 HOUR))
+                        (?, 'Hệ thống Smart Library đã sẵn sàng', 'Chào mừng Quản trị viên. Toàn bộ các dịch vụ mượn trả, kiểm soát kỷ luật mượn và Maker-Checker đang hoạt động bình thường.', 'info', 0, NOW()),
+                        (?, 'Cảnh báo sách quá hạn định kỳ', 'Hệ thống ghi nhận có độc giả mượn sách quá hạn cần đôn đốc thu hồi và theo dõi tình trạng tạm ngưng mượn.', 'warning', 0, DATE_SUB(NOW(), INTERVAL 2 HOUR)),
+                        (?, 'Yêu cầu phê duyệt quy chế mượn trả', 'Đã có đề xuất thay đổi tham số quy chế tạm ngưng mượn sách gửi tới Giám đốc phê duyệt.', 'reminder', 0, DATE_SUB(NOW(), INTERVAL 5 HOUR))
                     `, [staff.id, staff.id, staff.id]);
                 } else if (staff.role === 'librarian') {
                     await db.execute(`
@@ -108,40 +111,79 @@ async function initOwnerAndConfigTables() {
                 } else if (staff.role === 'owner') {
                     await db.execute(`
                         INSERT INTO notifications (user_id, title, message, type, is_read, created_at) VALUES
-                        (?, 'Quyền Giám đốc / Chủ thư viện', 'Chào mừng Chủ thư viện. Bạn có toàn quyền giám sát toàn bộ hoạt động lưu thông, tài chính và phê duyệt Maker-Checker.', 'info', 0, NOW()),
-                        (?, 'Đề xuất thay đổi quy chế mới (Maker-Checker)', 'Admin vừa đề xuất điều chỉnh tham số phí phạt trễ hạn "fine_per_day". Vui lòng vào mục Quản lý hệ thống để phê duyệt.', 'reminder', 0, DATE_SUB(NOW(), INTERVAL 4 HOUR)),
-                        (?, 'Báo cáo doanh thu & lưu thông định kỳ', 'Tổng lượt mượn sách và doanh thu thu phạt đã được cập nhật tại mục Thống kê & Báo cáo.', 'info', 0, DATE_SUB(NOW(), INTERVAL 8 HOUR))
+                        (?, 'Quyền Giám đốc / Chủ thư viện', 'Chào mừng Chủ thư viện. Bạn có toàn quyền giám sát hoạt động lưu thông, tình hình vi phạm kỷ luật mượn và phê duyệt Maker-Checker.', 'info', 0, NOW()),
+                        (?, 'Đề xuất thay đổi quy chế mới (Maker-Checker)', 'Admin vừa đề xuất điều chỉnh quy chế tạm ngưng mượn "suspension_days_per_late_day". Vui lòng vào mục Quản lý hệ thống để phê duyệt.', 'reminder', 0, DATE_SUB(NOW(), INTERVAL 4 HOUR)),
+                        (?, 'Báo cáo lưu thông & kỷ luật định kỳ', 'Tổng lượt mượn sách, tình trạng quá hạn và xử lý khắc phục sách hỏng đã được cập nhật tại mục Thống kê & Báo cáo.', 'info', 0, DATE_SUB(NOW(), INTERVAL 8 HOUR))
                     `, [staff.id, staff.id, staff.id]);
                 }
             }
         }
 
-        // 7. Ensure payment columns exist in fines table (Omnichannel payment: Cash & VietQR Transfer)
+        // 7. Ensure suspension column on users & non-monetary Violation/Remediation columns on fines
         try {
-            const [pMethodCol] = await db.execute("SHOW COLUMNS FROM fines LIKE 'payment_method'");
-            if (pMethodCol.length === 0) {
-                await db.execute("ALTER TABLE fines ADD COLUMN payment_method ENUM('cash', 'transfer') DEFAULT 'cash'");
+            const [suspCol] = await db.execute("SHOW COLUMNS FROM users LIKE 'suspended_until'");
+            if (suspCol.length === 0) {
+                await db.execute("ALTER TABLE users ADD COLUMN suspended_until DATETIME NULL DEFAULT NULL");
             }
-            const [pChannelCol] = await db.execute("SHOW COLUMNS FROM fines LIKE 'payment_channel'");
-            if (pChannelCol.length === 0) {
-                await db.execute("ALTER TABLE fines ADD COLUMN payment_channel ENUM('counter', 'online') DEFAULT 'counter'");
-            }
-            const [pRefCol] = await db.execute("SHOW COLUMNS FROM fines LIKE 'transaction_ref'");
-            if (pRefCol.length === 0) {
-                await db.execute("ALTER TABLE fines ADD COLUMN transaction_ref VARCHAR(100) NULL");
-            }
-        } catch (colErr) {
-            console.error('⚠️ [INIT DB] Error verifying fines payment columns:', colErr.message);
+        } catch (userColErr) {
+            console.error('⚠️ [INIT DB] Error verifying users.suspended_until:', userColErr.message);
         }
 
-        // 8. Ensure library bank configuration exists for VietQR payment
-        const bankConfigs = [
-            ['bank_code', 'TPB', 'Mã ngân hàng nhận thanh toán VietQR (ví dụ: TPB, MB, VCB, TCB, ACB...)'],
-            ['bank_name', 'TPBank (Ngân hàng Tiên Phong)', 'Tên ngân hàng thụ hưởng'],
-            ['bank_account_no', '00000307092', 'Số tài khoản ngân hàng nhận tiền phạt'],
-            ['bank_account_name', 'THU VIEN ATHENAEUM', 'Tên chủ tài khoản thụ hưởng']
+        try {
+            await db.execute("ALTER TABLE fines MODIFY COLUMN amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00");
+        } catch (amtErr) {}
+
+        try {
+            const ensureFineCol = async (colName, alterSql) => {
+                const [cols] = await db.execute(`SHOW COLUMNS FROM fines LIKE '${colName}'`);
+                if (cols.length === 0) {
+                    await db.execute(alterSql);
+                }
+            };
+            await ensureFineCol('violation_type', "ALTER TABLE fines ADD COLUMN violation_type ENUM('overdue', 'damaged', 'lost') DEFAULT 'overdue'");
+            await ensureFineCol('severity', "ALTER TABLE fines ADD COLUMN severity ENUM('none', 'minor', 'moderate', 'severe', 'lost') DEFAULT 'none'");
+            await ensureFineCol('remediation_status', "ALTER TABLE fines ADD COLUMN remediation_status ENUM('none', 'active_overdue', 'pending_remediation', 'resolved') DEFAULT 'none'");
+            await ensureFineCol('remediation_action', "ALTER TABLE fines ADD COLUMN remediation_action TEXT NULL");
+            await ensureFineCol('remediation_note', "ALTER TABLE fines ADD COLUMN remediation_note TEXT NULL");
+            await ensureFineCol('resolved_by', "ALTER TABLE fines ADD COLUMN resolved_by INT NULL");
+            await ensureFineCol('resolved_at', "ALTER TABLE fines ADD COLUMN resolved_at DATETIME NULL");
+
+            for (const legacyCol of ['payment_method', 'payment_channel', 'transaction_ref']) {
+                const [cols] = await db.execute(`SHOW COLUMNS FROM fines LIKE '${legacyCol}'`);
+                if (cols.length > 0) {
+                    await db.execute(`ALTER TABLE fines DROP COLUMN ${legacyCol}`);
+                }
+            }
+
+            // Normalize legacy rows to zero-money ledger
+            await db.execute(`
+                UPDATE fines
+                SET amount = 0.00,
+                    violation_type = IFNULL(violation_type, 'overdue'),
+                    remediation_status = CASE
+                        WHEN remediation_status IS NOT NULL AND remediation_status <> 'none' THEN remediation_status
+                        WHEN status = 'paid' THEN 'resolved'
+                        WHEN violation_type IN ('damaged', 'lost') THEN 'pending_remediation'
+                        ELSE 'active_overdue'
+                    END
+            `);
+        } catch (colErr) {
+            console.error('⚠️ [INIT DB] Error verifying non-monetary discipline columns on fines:', colErr.message);
+        }
+
+        // 8. Remove monetary/bank configs and ensure non-monetary suspension discipline rules exist
+        await db.execute(
+            "DELETE FROM system_configs WHERE key_name IN ('fine_per_day', 'bank_code', 'bank_name', 'bank_account_no', 'bank_account_name')"
+        );
+        const disciplineConfigs = [
+            ['max_books_per_user', '5', 'Số lượng sách tối đa một độc giả được mượn cùng lúc (cuốn)'],
+            ['max_borrow_days', '14', 'Thời hạn mượn mặc định cho mỗi phiếu mượn (ngày)'],
+            ['grace_days', '0', 'Số ngày ân hạn sau hạn trả trước khi tính tạm ngưng quyền mượn (ngày)'],
+            ['suspension_days_per_late_day', '1', 'Số ngày tạm ngưng quyền mượn áp dụng cho mỗi ngày trả sách trễ (ngày)'],
+            ['max_suspension_days', '14', 'Số ngày tạm ngưng quyền mượn tối đa cho một lần trễ hạn (ngày)'],
+            ['block_reserve_when_suspended', '1', 'Không cho phép đặt trước sách trong thời gian đang bị đình chỉ (1 = Có chặn, 0 = Cho phép)']
         ];
-        for (const [key, val, desc] of bankConfigs) {
+        for (const [key, val, desc] of disciplineConfigs) {
             const [exist] = await db.execute('SELECT key_name FROM system_configs WHERE key_name = ?', [key]);
             if (exist.length === 0) {
                 await db.execute('INSERT INTO system_configs (key_name, value, description) VALUES (?, ?, ?)', [key, val, desc]);
@@ -325,6 +367,10 @@ async function initOwnerAndConfigTables() {
             if (dropBoxAuditedAtCol.length === 0) {
                 await db.execute("ALTER TABLE borrow_records ADD COLUMN drop_box_audited_at DATETIME NULL");
             }
+            const [dropBoxProofCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'drop_box_proof_image'");
+            if (dropBoxProofCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN drop_box_proof_image LONGTEXT NULL");
+            }
         } catch (dropBoxErr) {
             console.error('⚠️ [INIT DB] Error setting up drop box columns:', dropBoxErr.message);
         }
@@ -365,7 +411,7 @@ async function initOwnerAndConfigTables() {
             )
         `);
 
-        console.log('✅ [INIT DB] Smart Library 4.0 Suite Ready: Maker-Checker, VietQR, Smart Book Drop 24/7, Exit Passes & Multi-channel Notifications!');
+        console.log('✅ [INIT DB] Smart Library 4.0 Suite Ready: Maker-Checker, Non-Monetary Discipline, Smart Book Drop 24/7, Exit Passes & Multi-channel Notifications!');
     } catch (error) {
         console.error('⚠️ [INIT DB] Warning initializing owner/config tables:', error.message);
     }

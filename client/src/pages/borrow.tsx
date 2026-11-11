@@ -16,7 +16,13 @@ export default function BorrowPage() {
     return <ReaderBorrowView />;
   }
 
-  // 2. DÀNH CHO NHÂN VIÊN & QUẢN TRỊ (LIBRARIAN / ADMIN / OWNER)
+  // 2. DÀNH CHO CHỦ THƯ VIỆN / GIÁM ĐỐC (OWNER)
+  // Ban Giám đốc giám sát kiểm toán sổ lưu thông & toàn bộ lịch sử mượn trả
+  if (user?.role === "owner" && mode !== "kiosk") {
+    return <CirculationHistoryView />;
+  }
+
+  // 3. DÀNH CHO NHÂN VIÊN & QUẢN TRỊ (LIBRARIAN / ADMIN)
   // Phân luồng công thái học theo tham số chế độ:
   if (mode === "history") {
     return <CirculationHistoryView />;
@@ -26,6 +32,6 @@ export default function BorrowPage() {
     return <KioskToolsView />;
   }
 
-  // Mặc định: QUẦY GIAO DỊCH ĐA NĂNG THÔNG MINH (Smart Unified Counter)
+  // Mặc định: QUẦY GIAO DỊCH ĐA NĂNG THÔNG MINH (Dành cho Thủ thư tác nghiệp trực tiếp, hoặc Admin hỗ trợ)
   return <SmartCounter />;
 }

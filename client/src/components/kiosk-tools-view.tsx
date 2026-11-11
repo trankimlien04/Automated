@@ -71,15 +71,15 @@ export function KioskToolsView() {
           </CardContent>
         </Card>
 
-        {/* Card 3: Cổng an ninh */}
+        {/* Card 3: Đối soát Phiếu mượn tại cổng */}
         <Card className="border-border hover:border-primary/40 transition-all shadow-xs flex flex-col justify-between">
           <CardHeader className="pb-3">
             <div className="h-10 w-10 rounded-xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center mb-2">
               <ShieldCheck className="h-5 w-5" />
             </div>
-            <CardTitle className="text-base font-bold">Cổng Kiểm Soát An Ninh</CardTitle>
+            <CardTitle className="text-base font-bold">Đối Soát Phiếu Mượn & Cổng Ra</CardTitle>
             <CardDescription className="text-xs">
-              Màn hình trạm quét bảo vệ tại lối ra: Quét mã Exit Pass để cho phép bạn đọc mang sách ra khỏi thư viện.
+              Màn hình trạm quét đối soát tại lối ra: Quét mã QR Phiếu mượn chính thức (PM-BRW-...) hoặc Thẻ độc giả để kiểm tra sách mang ra khỏi thư viện.
             </CardDescription>
           </CardHeader>
           <CardContent className="pt-0">
@@ -87,7 +87,7 @@ export function KioskToolsView() {
               onClick={() => setSecurityExitOpen(true)}
               className="w-full h-9 text-xs font-semibold gap-1.5 cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white"
             >
-              <span>Mở Trạm Cổng Ra</span>
+              <span>Mở Trạm Đối Soát Phiếu Mượn</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </Button>
           </CardContent>

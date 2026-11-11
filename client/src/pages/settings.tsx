@@ -62,7 +62,10 @@ interface ConfigRequest {
 const CONFIG_LABELS: Record<string, { label: string; unit: string }> = {
   max_books_per_user: { label: "Số sách tối đa / độc giả", unit: "cuốn" },
   max_borrow_days: { label: "Thời hạn mượn mặc định", unit: "ngày" },
-  fine_per_day: { label: "Phí phạt trễ hạn mỗi ngày", unit: "VNĐ / ngày" },
+  grace_days: { label: "Số ngày ân hạn trước trễ hạn", unit: "ngày" },
+  suspension_days_per_late_day: { label: "Tạm ngưng mượn / ngày trễ", unit: "ngày" },
+  max_suspension_days: { label: "Thời gian tạm ngưng tối đa", unit: "ngày" },
+  block_reserve_when_suspended: { label: "Chặn đặt trước khi bị đình chỉ", unit: "(1 = Có chặn, 0 = Cho phép)" },
 };
 
 export default function SettingsPage() {
@@ -74,7 +77,7 @@ export default function SettingsPage() {
 
   // Propose Modal State (For Admin)
   const [proposeOpen, setProposeOpen] = useState(false);
-  const [selectedKey, setSelectedKey] = useState("fine_per_day");
+  const [selectedKey, setSelectedKey] = useState("suspension_days_per_late_day");
   const [proposedVal, setProposedVal] = useState("");
   const [proposeReason, setProposeReason] = useState("");
   const [submittingPropose, setSubmittingPropose] = useState(false);
@@ -118,7 +121,7 @@ export default function SettingsPage() {
   }, []);
 
   const handleOpenPropose = (keyName?: string) => {
-    const key = keyName || "fine_per_day";
+    const key = keyName || "suspension_days_per_late_day";
     setSelectedKey(key);
     setProposedVal(configs[key]?.value || "");
     setProposeReason("");
@@ -255,8 +258,12 @@ export default function SettingsPage() {
                         )}
                       </div>
                       <div className="text-2xl font-bold tracking-tight text-foreground">
-                        {key === "fine_per_day" ? Number(item?.value || 0).toLocaleString("vi-VN") : item?.value || "N/A"}{" "}
-                        <span className="text-xs font-normal text-muted-foreground">{meta.unit}</span>
+                        {key === "block_reserve_when_suspended"
+                          ? (item?.value === "1" || item?.value === "true" ? "Có chặn" : "Cho phép")
+                          : item?.value ?? "N/A"}{" "}
+                        {key !== "block_reserve_when_suspended" && (
+                          <span className="text-xs font-normal text-muted-foreground">{meta.unit}</span>
+                        )}
                       </div>
                       <p className="text-[11px] text-muted-foreground mt-1 line-clamp-2">{item?.description}</p>
                     </div>
@@ -280,8 +287,8 @@ export default function SettingsPage() {
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <div>
-                  <Label className="font-medium text-xs">Tự động tạm khóa thẻ khi trễ &gt; 7 ngày</Label>
-                  <p className="text-[10px] text-muted-foreground">Khóa cho đến khi độc giả hoàn tất thanh toán nợ phí phạt</p>
+                  <Label className="font-medium text-xs">Khóa mượn đa nguyên nhân (Quá hạn / Tạm ngưng / Chờ khắc phục)</Label>
+                  <p className="text-[10px] text-muted-foreground">Quản lý độc lập từng nguyên nhân; chỉ mở quyền mượn khi không còn điều kiện hạn chế nào</p>
                 </div>
                 <Switch defaultChecked disabled={!isOwner && !isAdmin} />
               </div>
@@ -492,7 +499,7 @@ export default function SettingsPage() {
             <div className="space-y-1.5">
               <Label className="text-xs">Giá trị đề xuất mới (*)</Label>
               <Input
-                placeholder="Nhập giá trị mới (vd: 10000 hoặc 5)"
+                placeholder="Nhập giá trị mới (vd: 1, 14 hoặc 1 = Chặn)"
                 value={proposedVal}
                 onChange={(e) => setProposedVal(e.target.value)}
               />

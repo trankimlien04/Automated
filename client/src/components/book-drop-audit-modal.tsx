@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
   Inbox, CheckCircle2, AlertTriangle, XCircle, RefreshCw,
-  BookOpen, Clock, ShieldCheck, UserCheck, AlertOctagon, HelpCircle
+  BookOpen, Clock, ShieldCheck, UserCheck, AlertOctagon, HelpCircle, Image as ImageIcon, Eye
 } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/services/api";
@@ -22,12 +22,14 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Damage reporting sub-dialog
+  // Damage / loss incident reporting sub-dialog (non-monetary physical remediation)
   const [damageDialogOpen, setDamageDialogOpen] = useState(false);
   const [selectedRecord, setSelectedRecord] = useState<any | null>(null);
   const [damageNote, setDamageNote] = useState("Rách trang sách / ướt bìa");
-  const [damageFee, setDamageFee] = useState("50000");
+  const [damageSeverity, setDamageSeverity] = useState<"minor" | "moderate" | "severe" | "lost">("moderate");
+  const [remediationAction, setRemediationAction] = useState("Khắc phục / Phục hồi nguyên trạng sách dưới sự hướng dẫn của thủ thư");
   const [submittingAction, setSubmittingAction] = useState(false);
+  const [previewProofImg, setPreviewProofImg] = useState<{ url: string; title: string; reader: string; time?: string } | null>(null);
 
   const fetchDropItems = async () => {
     setLoading(true);
@@ -48,14 +50,21 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
     }
   }, [open]);
 
-  const handleAuditAction = async (recordId: number, action: "verify_intact" | "report_damaged" | "report_missing", note?: string, fee?: number) => {
+  const handleAuditAction = async (
+    recordId: number,
+    action: "verify_intact" | "report_damaged" | "report_missing",
+    note?: string,
+    severity?: "minor" | "moderate" | "severe" | "lost",
+    remedAction?: string
+  ) => {
     setSubmittingAction(true);
     try {
       const res = await api.post("/borrow/drop-box-audit", {
         recordId,
         action,
         auditNote: note,
-        damageFee: fee
+        severity,
+        remediationAction: remedAction
       });
       toast.success(res.data.message || "Đã hoàn tất đối soát cuốn sách!");
       fetchDropItems();
@@ -174,7 +183,7 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
                         <div>
                           {item.overdueDays > 0 ? (
                             <Badge variant="destructive" className="text-[10px]">
-                              Trễ {item.overdueDays} ngày (Phạt {item.fineAmount?.toLocaleString("vi-VN")}đ)
+                              Quá hạn {item.overdueDays} ngày (Trả sẽ mở khóa quyền mượn)
                             </Badge>
                           ) : (
                             <Badge className="bg-emerald-600 text-white text-[10px]">
@@ -185,12 +194,59 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
                       </div>
                     </div>
 
-                    {/* Note if reader wrote one */}
-                    {item.drop_box_audit_note && (
-                      <p className="text-[11px] p-2 rounded-lg bg-muted/60 text-muted-foreground italic">
-                        📝 Ghi chú độc giả: "{item.drop_box_audit_note}"
-                      </p>
-                    )}
+                    {/* Proof image & Note if reader uploaded/wrote one */}
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-2.5 rounded-lg bg-slate-50 border border-slate-200/80">
+                      <div className="space-y-1 flex-1 min-w-0">
+                        {item.drop_box_audit_note && (
+                          <p className="text-[11px] text-slate-700 italic">
+                            📝 Ghi chú độc giả: "{item.drop_box_audit_note}"
+                          </p>
+                        )}
+                        <p className="text-[10px] text-muted-foreground">
+                          🔔 Khi Thủ thư bấm xác nhận bên dưới, hệ thống sẽ tự động gửi Thông báo Chuông + Email kết quả đối soát cho độc giả <strong>{item.reader_name}</strong>.
+                        </p>
+                      </div>
+
+                      {item.drop_box_proof_image ? (
+                        <div className="flex items-center gap-2 shrink-0">
+                          <img
+                            src={item.drop_box_proof_image}
+                            alt="Ảnh minh chứng"
+                            onClick={() =>
+                              setPreviewProofImg({
+                                url: item.drop_box_proof_image,
+                                title: item.book_title,
+                                reader: `${item.reader_name} (${item.card_number})`,
+                                time: item.drop_box_at ? new Date(item.drop_box_at).toLocaleString("vi-VN") : undefined
+                              })
+                            }
+                            className="h-12 w-16 object-cover rounded-md border border-sky-400 cursor-pointer hover:opacity-90 shadow-2xs"
+                            title="Bấm để phóng to ảnh minh chứng"
+                          />
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-8 text-xs gap-1.5 border-sky-400 text-sky-700 hover:bg-sky-50"
+                            onClick={() =>
+                              setPreviewProofImg({
+                                url: item.drop_box_proof_image,
+                                title: item.book_title,
+                                reader: `${item.reader_name} (${item.card_number})`,
+                                time: item.drop_box_at ? new Date(item.drop_box_at).toLocaleString("vi-VN") : undefined
+                              })
+                            }
+                          >
+                            <Eye className="w-3.5 h-3.5 text-sky-600" />
+                            Xem ảnh minh chứng
+                          </Button>
+                        </div>
+                      ) : (
+                        <Badge variant="outline" className="text-[10px] text-amber-700 border-amber-300 bg-amber-50 shrink-0">
+                          Không có ảnh đính kèm (Dữ liệu cũ)
+                        </Badge>
+                      )}
+                    </div>
 
                     {/* Action buttons */}
                     <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t">
@@ -253,16 +309,38 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
           <DialogHeader>
             <DialogTitle className="text-base font-bold text-amber-900 flex items-center gap-2">
               <AlertTriangle className="w-5 h-5 text-amber-600" />
-              Biên Bản Hư Hỏng Sách (Hòm 24/7)
+              Biên Bản Hư Hỏng / Mất Sách (Hòm 24/7)
             </DialogTitle>
             <DialogDescription className="text-xs">
-              Lập biên bản vi phạm cho độc giả: {selectedRecord?.reader_name} ({selectedRecord?.book_title})
+              Lập biên bản hiện trạng cho độc giả: {selectedRecord?.reader_name} ({selectedRecord?.book_title}). Quyền mượn sẽ tạm ngưng cho đến khi thủ thư xác nhận khắc phục.
             </DialogDescription>
           </DialogHeader>
 
           <div className="space-y-3 py-2 text-xs">
             <div className="space-y-1.5">
-              <label className="font-semibold text-slate-700">Mô tả tình trạng hư hại:</label>
+              <label className="font-semibold text-slate-700">Phân loại mức độ hư hỏng:</label>
+              <select
+                value={damageSeverity}
+                onChange={(e) => {
+                  const val = e.target.value as "minor" | "moderate" | "severe" | "lost";
+                  setDamageSeverity(val);
+                  if (val === "lost" || val === "severe") {
+                    setRemediationAction("Nộp sách thay thế cùng nhan đề hoặc ấn bản tương đương theo quy định thư viện");
+                  } else {
+                    setRemediationAction("Khắc phục / Phục hồi nguyên trạng sách dưới sự hướng dẫn của thủ thư");
+                  }
+                }}
+                className="w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium"
+              >
+                <option value="minor">Nhẹ (Quăn mép, rách nhỏ)</option>
+                <option value="moderate">Trung bình (Rách bìa, ướt trang, viết vẽ)</option>
+                <option value="severe">Nặng (Mất trang, hư hỏng nặng cần thay thế)</option>
+                <option value="lost">Mất / Không thể phục hồi (Cần nộp sách thay thế)</option>
+              </select>
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="font-semibold text-slate-700">Ghi chú hiện trạng sách:</label>
               <Textarea
                 value={damageNote}
                 onChange={(e) => setDamageNote(e.target.value)}
@@ -272,12 +350,12 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
             </div>
 
             <div className="space-y-1.5">
-              <label className="font-semibold text-slate-700">Mức phạt bồi hoàn (VNĐ):</label>
+              <label className="font-semibold text-slate-700">Hướng khắc phục yêu cầu:</label>
               <Input
-                type="number"
-                value={damageFee}
-                onChange={(e) => setDamageFee(e.target.value)}
-                className="font-mono text-sm"
+                value={remediationAction}
+                onChange={(e) => setRemediationAction(e.target.value)}
+                placeholder="Ví dụ: Nộp sách thay thế cùng nhan đề..."
+                className="text-xs"
               />
             </div>
           </div>
@@ -292,11 +370,41 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
               disabled={submittingAction || !damageNote.trim()}
               onClick={() => {
                 if (selectedRecord) {
-                  handleAuditAction(selectedRecord.record_id, "report_damaged", damageNote, parseInt(damageFee, 10));
+                  handleAuditAction(selectedRecord.record_id, "report_damaged", damageNote, damageSeverity, remediationAction);
                 }
               }}
             >
-              {submittingAction ? "Đang lập..." : "Xác nhận phạt hư hại"}
+              {submittingAction ? "Đang lập..." : "Lập biên bản & Tạm ngưng mượn"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Sub Dialog: Full Proof Image Preview */}
+      <Dialog open={Boolean(previewProofImg)} onOpenChange={(v) => !v && setPreviewProofImg(null)}>
+        <DialogContent className="max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="text-base font-bold flex items-center gap-2">
+              <ImageIcon className="w-5 h-5 text-sky-600" />
+              Ảnh Minh Chứng Độc Giả Thả Hòm 24/7
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Ấn phẩm: <strong>{previewProofImg?.title}</strong> • Độc giả: <strong>{previewProofImg?.reader}</strong>
+              {previewProofImg?.time ? ` • Lúc: ${previewProofImg.time}` : ""}
+            </DialogDescription>
+          </DialogHeader>
+          {previewProofImg && (
+            <div className="rounded-xl overflow-hidden border bg-slate-950 flex items-center justify-center max-h-[65vh]">
+              <img
+                src={previewProofImg.url}
+                alt="Ảnh minh chứng thả sách"
+                className="max-h-[65vh] w-auto object-contain"
+              />
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setPreviewProofImg(null)}>
+              Đóng ảnh
             </Button>
           </DialogFooter>
         </DialogContent>

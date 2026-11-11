@@ -4,7 +4,7 @@ export const stats = {
   borrowedToday: 142,
   overdue: 23,
   returnRate: 94.2,
-  finesThisMonth: 1840000,
+  suspendedReaders: 4,
 };
 
 export const monthlyTrend = [
@@ -78,17 +78,17 @@ export const reservations = [
 ];
 
 export const fines = [
-  { id: "FN-301", reader: "Đỗ Văn Tài", book: "Nhà Giả Kim", days: 12, amount: 60000, status: "unpaid" },
-  { id: "FN-302", reader: "Hoàng Thị Mai", book: "Deep Work", days: 8, amount: 40000, status: "unpaid" },
-  { id: "FN-303", reader: "Trần Thùy Linh", book: "Sapiens", days: 3, amount: 15000, status: "paid" },
-  { id: "FN-304", reader: "Lê Quang Huy", book: "Atomic Habits", days: 5, amount: 25000, status: "paid" },
+  { id: "FN-301", reader: "Đỗ Văn Tài", book: "Nhà Giả Kim", days: 12, status: "unpaid", remediationStatus: "active_overdue" },
+  { id: "FN-302", reader: "Hoàng Thị Mai", book: "Deep Work", days: 8, status: "unpaid", remediationStatus: "pending_remediation" },
+  { id: "FN-303", reader: "Trần Thùy Linh", book: "Sapiens", days: 3, status: "paid", remediationStatus: "resolved" },
+  { id: "FN-304", reader: "Lê Quang Huy", book: "Atomic Habits", days: 5, status: "paid", remediationStatus: "resolved" },
 ];
 
 export const notifications = [
   { id: 1, title: "Sách bạn đặt trước đã có", body: "“Atomic Habits” đã sẵn sàng để mượn tại quầy A2.", time: "10 phút trước", type: "success", unread: true },
   { id: 2, title: "Nhắc trả sách", body: "Còn 2 ngày để trả “Clean Code”. Vui lòng gia hạn hoặc trả đúng hạn.", time: "1 giờ trước", type: "warning", unread: true },
   { id: 3, title: "Mượn sách thành công", body: "Bạn vừa mượn “Sapiens”. Hạn trả: 30/11/2025.", time: "Hôm qua", type: "info", unread: false },
-  { id: 4, title: "Cảnh báo quá hạn", body: "“Deep Work” đã quá hạn 3 ngày. Phí phạt: 15.000đ.", time: "2 ngày trước", type: "danger", unread: false },
+  { id: 4, title: "Cảnh báo quá hạn", body: "“Deep Work” đã quá hạn 3 ngày. Quyền mượn tạm khóa cho đến khi hoàn trả sách.", time: "2 ngày trước", type: "danger", unread: false },
 ];
 
 export const recommendations = [
