@@ -208,7 +208,7 @@ async function sendDueTodayEmail({ to, userId, fullName, cardNumber, bookTitle, 
             <p style="margin: 4px 0; font-size: 13px;"><strong>Hạn cuối:</strong> <span style="color: #ea580c; font-weight: 700;">Hôm nay (${dueDateStr})</span></p>
         </div>
 
-        <p>🌟 <strong>Nếu bạn bận hoặc trả ngoài giờ hành chính:</strong> Bạn hoàn toàn có thể thả sách vào <strong>Hòm trả sách tự động 24/7 (Smart Book Drop)</strong> tại sảnh trước thư viện. Hệ thống sẽ ngay lập tức chốt thời gian trả và ngừng tính phí phạt!</p>
+        <p>🌟 <strong>Nếu bạn bận hoặc trả ngoài giờ hành chính:</strong> Bạn hoàn toàn có thể thả sách vào <strong>Hòm trả sách tự động 24/7 (Smart Book Drop)</strong> tại sảnh trước thư viện. Hệ thống sẽ ngay lập tức chốt mốc thời gian trả hợp lệ và không phát sinh thêm ngày trễ hạn!</p>
     `;
 
     return sendEmail({
@@ -217,7 +217,7 @@ async function sendDueTodayEmail({ to, userId, fullName, cardNumber, bookTitle, 
         subject,
         html: createEmailTemplate({
             headerBadge: 'Hạn chót trả sách hôm nay (T - 0)',
-            subtitle: 'Lưu ý hoàn trả để tránh phát sinh phí trễ hạn',
+            subtitle: 'Lưu ý hoàn trả đúng hạn để tránh tạm ngưng quyền mượn theo quy chế',
             contentHtml,
             actionButtonText: 'Xem hướng dẫn Trả hòm 24/7 & Bản đồ thư viện',
             actionButtonUrl: 'http://localhost:5173/borrow'
@@ -228,11 +228,10 @@ async function sendDueTodayEmail({ to, userId, fullName, cardNumber, bookTitle, 
 }
 
 /**
- * Kịch bản 3: Cảnh báo quá hạn & Phát sinh phí phạt (T + 1 ngày hoặc quá hạn)
+ * Kịch bản 3: Cảnh báo quá hạn & Tạm khóa quyền mượn (T + 1 ngày hoặc quá hạn)
  */
-async function sendOverdueWarningEmail({ to, userId, fullName, cardNumber, bookTitle, copyQr, dueDate, overdueDays = 1, fineAmount = 5000 }) {
+async function sendOverdueWarningEmail({ to, userId, fullName, cardNumber, bookTitle, copyQr, dueDate, overdueDays = 1 }) {
     const dueDateStr = new Date(dueDate).toLocaleDateString('vi-VN');
-    const fineStr = fineAmount.toLocaleString('vi-VN') + ' đ';
     const subject = `🚨 [CẢNH BÁO QUÁ HẠN] Sách "${bookTitle}" đã quá hạn ${overdueDays} ngày`;
     const contentHtml = `
         <p>Xin chào <strong>${fullName || 'Bạn đọc'}</strong> (Mã thẻ: <code>${cardNumber || 'LIB-RD-***'}</code>),</p>
@@ -243,10 +242,10 @@ async function sendOverdueWarningEmail({ to, userId, fullName, cardNumber, bookT
             <p style="margin: 4px 0; font-size: 13px;"><strong>Mã bản sao:</strong> <code>${copyQr || 'N/A'}</code></p>
             <p style="margin: 4px 0; font-size: 13px;"><strong>Ngày đến hạn:</strong> ${dueDateStr}</p>
             <p style="margin: 4px 0; font-size: 13px;"><strong>Số ngày trễ hạn:</strong> <span class="danger">${overdueDays} ngày</span></p>
-            <p style="margin: 4px 0; font-size: 14px;"><strong>Phí phạt tích lũy tạm tính:</strong> <span class="danger">${fineStr}</span></p>
+            <p style="margin: 4px 0; font-size: 14px;"><strong>Trạng thái lưu thông:</strong> <span class="danger">Tạm khóa quyền mượn & đặt trước sách</span></p>
         </div>
 
-        <p class="danger">⚠️ Lưu ý: Theo quy chế Maker-Checker, tài khoản quá hạn từ 7 ngày trở lên sẽ tự động bị khóa quyền mượn sách. Vui lòng mang sách trả gấp để ngưng tích lũy phí phạt!</p>
+        <p class="danger">⚠️ Lưu ý quy chế kỷ luật mượn: Thẻ đang ở trạng thái tạm khóa cho đến khi bạn hoàn trả hết sách quá hạn. Sau khi hoàn trả trễ, hệ thống sẽ áp dụng số ngày tạm ngưng quyền mượn tương ứng theo quy chế thư viện. Vui lòng hoàn trả sách sớm tại Quầy hoặc Hòm trả 24/7!</p>
     `;
 
     return sendEmail({
@@ -254,14 +253,14 @@ async function sendOverdueWarningEmail({ to, userId, fullName, cardNumber, bookT
         userId,
         subject,
         html: createEmailTemplate({
-            headerBadge: 'Cảnh báo quá hạn & Phí phạt',
+            headerBadge: 'Cảnh báo quá hạn & Kỷ luật mượn',
             subtitle: 'Đôn đốc thu hồi tài nguyên thư viện',
             contentHtml,
-            actionButtonText: 'Thanh toán phí phạt & Xem chi tiết',
+            actionButtonText: 'Xem hồ sơ vi phạm & Thời hạn trả',
             actionButtonUrl: 'http://localhost:5173/fines'
         }),
         templateType: 'overdue_warning',
-        text: `Cảnh báo: Sách "${bookTitle}" đã quá hạn ${overdueDays} ngày. Phí phạt hiện tại: ${fineStr}. Vui lòng trả sách sớm!`
+        text: `Cảnh báo: Sách "${bookTitle}" đã quá hạn ${overdueDays} ngày. Quyền mượn/đặt trước đang tạm khóa cho đến khi bạn hoàn trả sách.`
     });
 }
 
@@ -279,7 +278,7 @@ async function sendDropBoxReceiptEmail({ to, userId, fullName, cardNumber, bookT
             <h3 style="margin-top: 0; color: #0369a1; font-size: 16px;">📖 ${bookTitle}</h3>
             <p style="margin: 4px 0; font-size: 13px;"><strong>Mã bản sao:</strong> <code>${copyQr || 'N/A'}</code></p>
             <p style="margin: 4px 0; font-size: 13px;"><strong>Thời điểm thả hòm:</strong> <span class="highlight">${timeStr}</span></p>
-            <p style="margin: 4px 0; font-size: 13px;"><strong>Tính phí phạt:</strong> <span style="color: #059669; font-weight: 700;">Đã ngưng tính phạt tại mốc thời gian trên</span></p>
+            <p style="margin: 4px 0; font-size: 13px;"><strong>Chốt mốc hoàn trả:</strong> <span style="color: #059669; font-weight: 700;">Đã ngưng tính thêm ngày trễ hạn tại mốc thời gian trên</span></p>
             <p style="margin: 4px 0; font-size: 13px;"><strong>Trạng thái:</strong> ⏳ Đang chờ thủ thư kiểm tra tình trạng sách đầu ca sáng</p>
         </div>
 
@@ -303,42 +302,105 @@ async function sendDropBoxReceiptEmail({ to, userId, fullName, cardNumber, bookT
 }
 
 /**
- * Kịch bản 5: Vé thông hành ra cửa điện tử (Digital Exit Pass)
+ * Kịch bản 4B: Kết quả Thủ thư đối soát Hòm trả sách 24/7
  */
-async function sendExitPassEmail({ to, userId, fullName, cardNumber, passCode, bookCount, books = [], expiresAt }) {
-    const expStr = new Date(expiresAt).toLocaleTimeString('vi-VN');
-    const subject = `🎫 [Vé ra cửa] Vé thông hành mang sách ra khỏi thư viện (${passCode})`;
+async function sendDropBoxAuditResultEmail({ to, userId, fullName, cardNumber, bookTitle, copyQr, action, auditorName, auditNote, severity = 'moderate', remediationAction = '', auditedAt }) {
+    const timeStr = new Date(auditedAt || Date.now()).toLocaleString('vi-VN');
+    let subject = `✅ [Kết quả đối soát Hòm 24/7] Đã xác nhận trả sách "${bookTitle}" thành công`;
+    let headerBadge = 'Hoàn tất đối soát Hòm 24/7';
+    let cardBorder = '#059669';
+    let cardBg = '#ecfdf5';
+    let statusHtml = `<span style="color: #059669; font-weight: 700;">✅ Đã kiểm nhận nguyên vẹn & Nhập kho</span>`;
+    let extraHtml = `<p>Giao dịch hoàn trả cuốn sách của bạn đã chính thức hoàn tất. Cảm ơn bạn đã giữ gìn ấn phẩm của thư viện!</p>`;
+
+    if (action === 'report_damaged') {
+        subject = `⚠️ [Biên bản đối soát Hòm 24/7] Phát hiện hư hại sách "${bookTitle}"`;
+        headerBadge = 'Biên bản hư hại sách - Hòm 24/7';
+        cardBorder = '#d97706';
+        cardBg = '#fffbeb';
+        statusHtml = `<span style="color: #d97706; font-weight: 700;">⚠️ Đã nhận sách - Ghi nhận hư hại (${severity}) • Chờ khắc phục</span>`;
+        extraHtml = `<p class="danger">Hướng xử lý: <strong>${remediationAction || 'Khắc phục hoặc nộp sách thay thế tương đương theo quy chế thư viện'}</strong>. Quyền mượn & đặt trước tạm ngưng cho đến khi thủ thư xác nhận bạn đã hoàn tất khắc phục tại mục <strong>Vi phạm & Kỷ luật mượn</strong>.</p>`;
+    } else if (action === 'report_missing') {
+        subject = `🚨 [Cảnh báo đối soát Hòm 24/7] Không tìm thấy sách "${bookTitle}" trong hòm`;
+        headerBadge = 'Cảnh báo thất lạc - Hòm 24/7';
+        cardBorder = '#dc2626';
+        cardBg = '#fef2f2';
+        statusHtml = `<span style="color: #dc2626; font-weight: 700;">🚨 Không tìm thấy sách trong hòm (Hoàn tác về Đang mượn)</span>`;
+        extraHtml = `<p class="danger">Phiếu mượn đã được hoàn tác về trạng thái <strong>ĐANG MƯỢN</strong>. Vui lòng mang ảnh minh chứng đến quầy thủ thư để đối chiếu camera và xử lý ngay!</p>`;
+    }
+
+    const contentHtml = `
+        <p>Xin chào <strong>${fullName || 'Bạn đọc'}</strong> (Mã thẻ: <code>${cardNumber || 'LIB-RD-***'}</code>),</p>
+        <p>Thủ thư vừa hoàn tất kiểm kê và đối soát cuốn sách bạn gửi qua <strong>Hòm trả sách 24/7</strong> với kết quả chi tiết như sau:</p>
+        
+        <div class="card" style="border-left: 4px solid ${cardBorder}; background: ${cardBg};">
+            <h3 style="margin-top: 0; color: #1e293b; font-size: 16px;">📖 ${bookTitle}</h3>
+            <p style="margin: 4px 0; font-size: 13px;"><strong>Mã bản sao:</strong> <code>${copyQr || 'N/A'}</code></p>
+            <p style="margin: 4px 0; font-size: 13px;"><strong>Kết quả xác nhận:</strong> ${statusHtml}</p>
+            <p style="margin: 4px 0; font-size: 13px;"><strong>Thủ thư xác nhận:</strong> ${auditorName || 'Thủ thư trực ca'}</p>
+            <p style="margin: 4px 0; font-size: 13px;"><strong>Thời điểm xác nhận:</strong> ${timeStr}</p>
+            <p style="margin: 4px 0; font-size: 13px;"><strong>Ghi chú kiểm kê:</strong> <em>"${auditNote || 'Sách nguyên vẹn đạt chuẩn lưu kho'}"</em></p>
+        </div>
+
+        ${extraHtml}
+    `;
+
+    return sendEmail({
+        to,
+        userId,
+        subject,
+        html: createEmailTemplate({
+            headerBadge,
+            subtitle: 'Thông báo kết quả kiểm kê sách trả ngoài giờ',
+            contentHtml,
+            actionButtonText: 'Xem chi tiết trên Sổ Lưu Thông Cá Nhân',
+            actionButtonUrl: 'http://localhost:5173/borrow'
+        }),
+        templateType: 'drop_box_audit_result',
+        text: `Kết quả đối soát Hòm 24/7 cho cuốn "${bookTitle}": ${action} (${auditNote || 'Đã kiểm nhận'}).`
+    });
+}
+
+/**
+ * Kịch bản 5: Phiếu mượn sách chính thức (Sau khi Thủ thư xác nhận cho mượn - Dùng để đối soát & ra cổng)
+ */
+async function sendExitPassEmail({ to, userId, fullName, cardNumber, passCode, draftCode, librarianName, dueDate, bookCount, books = [], expiresAt }) {
+    const borrowTimeStr = new Date().toLocaleString('vi-VN');
+    const dueDateStr = dueDate ? new Date(dueDate).toLocaleDateString('vi-VN') : new Date(expiresAt || Date.now() + 14 * 86400000).toLocaleDateString('vi-VN');
+    const subject = `📋 [Phiếu Mượn Sách] Xác nhận Phiếu mượn chính thức (${passCode})`;
     
     const bookListHtml = books.map((b, i) => `
         <li style="margin: 6px 0; font-size: 13px;">
-            <strong>${i + 1}. ${b.title || b.book_title}</strong> (Mã: <code>${b.qr_code || b.copy_qr || 'N/A'}</code>)
+            <strong>${i + 1}. ${b.title || b.book_title}</strong> — Mã bản sao: <code>${b.copyQr || b.qr_code || b.copy_qr || 'N/A'}</code>
         </li>
     `).join('');
 
     const contentHtml = `
         <p>Xin chào <strong>${fullName || 'Bạn đọc'}</strong> (Mã thẻ: <code>${cardNumber || 'LIB-RD-***'}</code>),</p>
-        <p>Bạn vừa thực hiện mượn sách thành công tại kệ. Dưới đây là <strong>Vé thông hành ra cửa điện tử (Exit Pass)</strong> của bạn:</p>
+        <p>Thủ thư đã quét xác nhận cho mượn sách thành công. <strong>Phiếu mượn nháp</strong> của bạn đã được chuyển thành <strong>Phiếu mượn chính thức</strong> dùng để đối soát mượn trả và xuất trình khi ra cổng nếu được hỏi:</p>
         
-        <div class="card" style="border: 2px dashed #2563eb; background: #eff6ff; text-align: center;">
-            <span style="font-size: 11px; font-weight: 700; color: #2563eb; text-transform: uppercase;">Mã Vé Ra Cửa</span>
-            <h2 style="margin: 6px 0; color: #1e3a8a; font-family: monospace; letter-spacing: 0.1em;">${passCode}</h2>
-            <p style="margin: 4px 0; font-size: 14px; font-weight: 700; color: #059669;">
-                ✅ HỢP LỆ CHO PHÉP MANG RA: ${bookCount} CUỐN SÁCH
+        <div class="card" style="border: 2px solid #059669; background: #ecfdf5; text-align: center;">
+            <span style="font-size: 11px; font-weight: 700; color: #059669; text-transform: uppercase;">Mã Phiếu Mượn Chính Thức</span>
+            <h2 style="margin: 6px 0; color: #065f46; font-family: monospace; letter-spacing: 0.1em;">${passCode}</h2>
+            ${draftCode ? `<p style="margin: 2px 0; font-size: 11px; color: #047857;">Chuyển đổi từ Phiếu mượn nháp: <code>${draftCode}</code></p>` : ''}
+            <p style="margin: 6px 0; font-size: 14px; font-weight: 700; color: #059669;">
+                ✅ ĐÃ XÁC NHẬN CHO MƯỢN: ${bookCount} CUỐN SÁCH
             </p>
-            <p style="margin: 4px 0; font-size: 12px; color: #dc2626;">
-                ⏳ Hiệu lực xuất cổng đến: <strong>${expStr}</strong> (Trong vòng 30 phút)
+            <p style="margin: 4px 0; font-size: 12px; color: #1e293b;">
+                📅 Thời điểm xác nhận: <strong>${borrowTimeStr}</strong> &bull; Hạn trả sách: <strong style="color: #dc2626;">${dueDateStr}</strong>
             </p>
+            ${librarianName ? `<p style="margin: 4px 0; font-size: 12px; color: #475569;">👨‍💼 Thủ thư xác nhận: <strong>${librarianName}</strong></p>` : ''}
         </div>
 
         <div style="margin-top: 16px;">
-            <p style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">Danh mục sách kèm vé:</p>
+            <p style="font-size: 13px; font-weight: 700; margin-bottom: 6px;">Danh sách bản sao sách trong Phiếu mượn:</p>
             <ul style="padding-left: 20px; margin-top: 4px;">
                 ${bookListHtml}
             </ul>
         </div>
 
         <p style="font-size: 12px; color: #64748b; margin-top: 14px;">
-            Khi đi qua cửa kiểm soát, vui lòng xuất trình màn hình vé này hoặc mã vé cho nhân viên trực cửa/bảo vệ quét kiểm tra đối soát.
+            Vui lòng lưu giữ <strong>Phiếu mượn</strong> này trên ứng dụng để đối soát khi cần thiết hoặc xuất trình tại cổng kiểm soát an ninh nếu được nhân viên hỏi.
         </p>
     `;
 
@@ -347,14 +409,14 @@ async function sendExitPassEmail({ to, userId, fullName, cardNumber, passCode, b
         userId,
         subject,
         html: createEmailTemplate({
-            headerBadge: 'Kiểm soát an ninh - Vé ra cửa',
-            subtitle: 'Digital Exit Pass & Security Clearance',
+            headerBadge: 'Phiếu Mượn Sách Chính Thức',
+            subtitle: 'Chứng từ đối soát mượn trả & Kiểm tra ra cổng',
             contentHtml,
-            actionButtonText: 'Mở Vé Ra Cửa Trên Ứng Dụng',
+            actionButtonText: 'Xem Phiếu Mượn Trên Ứng Dụng',
             actionButtonUrl: 'http://localhost:5173/borrow'
         }),
         templateType: 'exit_pass',
-        text: `Vé ra cửa ${passCode}: Cho phép mang ra ${bookCount} cuốn sách. Hết hạn lúc ${expStr}.`
+        text: `Phiếu mượn chính thức ${passCode}: Đã xác nhận cho mượn ${bookCount} cuốn sách. Hạn trả: ${dueDateStr}.`
     });
 }
 
@@ -364,6 +426,7 @@ module.exports = {
     sendDueTodayEmail,
     sendOverdueWarningEmail,
     sendDropBoxReceiptEmail,
+    sendDropBoxAuditResultEmail,
     sendExitPassEmail,
     recordDispatch
 };

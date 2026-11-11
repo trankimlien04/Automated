@@ -1,4 +1,5 @@
 const db = require('../config/db');
+const { rankBooksSmart } = require('../utils/smartSearch');
 
 exports.globalSearch = async (req, res) => {
     const query = (req.query.q || '').trim();
@@ -9,6 +10,8 @@ exports.globalSearch = async (req, res) => {
         return res.status(200).json({
             role,
             books: [],
+            didYouMean: null,
+            detectedConcepts: [],
             users: [],
             copies: [],
             borrows: [],
@@ -25,6 +28,8 @@ exports.globalSearch = async (req, res) => {
         let results = {
             role,
             books: [],
+            didYouMean: null,
+            detectedConcepts: [],
             users: [],
             copies: [],
             borrows: [],
@@ -34,18 +39,19 @@ exports.globalSearch = async (req, res) => {
             logs: []
         };
 
-        // 1. SÁCH & ẤN PHẨM (Tất cả các vai trò đều có thể tìm sách)
-        const [books] = await db.execute(`
-            SELECT b.id, b.title, b.isbn, b.cover_image, b.available_copies, b.total_copies, b.published_year,
+        // 1. SÁCH & ẤN PHẨM (Tìm kiếm Ngữ nghĩa Thông minh & Bắt lỗi chính tả)
+        const [allBooks] = await db.execute(`
+            SELECT b.id, b.title, b.isbn, b.description, b.cover_image, b.available_copies, b.total_copies, b.published_year,
                    a.name as author_name, c.name as category_name, p.name as publisher_name
             FROM books b
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN categories c ON b.category_id = c.id
             LEFT JOIN publishers p ON b.publisher_id = p.id
-            WHERE b.title LIKE ? OR b.isbn LIKE ? OR a.name LIKE ? OR c.name LIKE ? OR p.name LIKE ?
-            LIMIT 6
-        `, [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]);
-        results.books = books;
+        `);
+        const smartRank = rankBooksSmart(allBooks, query, 8);
+        results.books = smartRank.books;
+        results.didYouMean = smartRank.didYouMean;
+        results.detectedConcepts = smartRank.detectedConcepts;
 
         // ==========================================
         // 2. DÀNH CHO ĐỘC GIẢ (READER)
@@ -77,9 +83,12 @@ exports.globalSearch = async (req, res) => {
             `, [userId, searchTerm, searchTerm]);
             results.reservations = myResvs;
 
-            // Khoản phí phạt của độc giả này
+            // Hồ sơ vi phạm & kỷ luật mượn của độc giả này
             const [myFines] = await db.execute(`
-                SELECT f.id, f.amount, f.reason, f.status, f.created_at, b.title as book_title
+                SELECT f.id, 0 as amount, f.reason, f.status,
+                       IFNULL(f.violation_type, 'overdue') as violation_type,
+                       IFNULL(f.remediation_status, 'none') as remediation_status,
+                       f.created_at, b.title as book_title
                 FROM fines f
                 LEFT JOIN borrow_records br ON f.borrow_record_id = br.id
                 LEFT JOIN book_copies bc ON br.book_copy_id = bc.id
@@ -105,14 +114,27 @@ exports.globalSearch = async (req, res) => {
             results.users = readers;
 
             // Tra cứu Bản sao sách & Mã QR
-            const [copies] = await db.execute(`
-                SELECT bc.id, bc.qr_code, bc.status, bc.condition_note, b.id as book_id, b.title as book_title, b.cover_image
-                FROM book_copies bc
-                JOIN books b ON bc.book_id = b.id
-                WHERE bc.qr_code LIKE ? OR b.title LIKE ?
-                LIMIT 6
-            `, [searchTerm, searchTerm]);
-            results.copies = copies;
+            const topBookIds = results.books.slice(0, 3).map((b) => b.id);
+            if (topBookIds.length > 0) {
+                const placeholders = topBookIds.map(() => '?').join(',');
+                const [copies] = await db.execute(`
+                    SELECT bc.id, bc.qr_code, bc.status, bc.condition_note, b.id as book_id, b.title as book_title, b.cover_image
+                    FROM book_copies bc
+                    JOIN books b ON bc.book_id = b.id
+                    WHERE bc.qr_code LIKE ? OR b.title LIKE ? OR b.id IN (${placeholders})
+                    LIMIT 6
+                `, [searchTerm, searchTerm, ...topBookIds]);
+                results.copies = copies;
+            } else {
+                const [copies] = await db.execute(`
+                    SELECT bc.id, bc.qr_code, bc.status, bc.condition_note, b.id as book_id, b.title as book_title, b.cover_image
+                    FROM book_copies bc
+                    JOIN books b ON bc.book_id = b.id
+                    WHERE bc.qr_code LIKE ? OR b.title LIKE ?
+                    LIMIT 6
+                `, [searchTerm, searchTerm]);
+                results.copies = copies;
+            }
 
             // Tra cứu Phiếu mượn / Trả toàn hệ thống
             const [borrows] = await db.execute(`

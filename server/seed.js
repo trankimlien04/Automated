@@ -26,13 +26,16 @@ async function seed() {
         await db.execute('TRUNCATE TABLE system_configs');
         await db.execute('SET FOREIGN_KEY_CHECKS = 1');
 
-        // 2. System Configs
-        console.log('⚙️ Seeding cấu hình hệ thống...');
+        // 2. System Configs (Non-monetary Discipline Rules)
+        console.log('⚙️ Seeding cấu hình hệ thống (Quy chế kỷ luật phi tiền tệ)...');
         await db.execute(`
             INSERT INTO system_configs (key_name, value, description) VALUES
-            ('max_borrow_days', '14', 'Số ngày mượn tối đa cho mỗi sách'),
-            ('fine_per_day', '5000', 'Số tiền phạt mỗi ngày trễ hạn (VNĐ)'),
-            ('max_books_per_user', '5', 'Số lượng sách tối đa một độc giả được mượn (chưa trả)')
+            ('max_borrow_days', '14', 'Thời hạn mượn mặc định cho mỗi phiếu mượn (ngày)'),
+            ('max_books_per_user', '5', 'Số lượng sách tối đa một độc giả được mượn (chưa trả)'),
+            ('grace_days', '0', 'Số ngày ân hạn sau hạn trả trước khi tính tạm ngưng quyền mượn (ngày)'),
+            ('suspension_days_per_late_day', '1', 'Số ngày tạm ngưng quyền mượn áp dụng cho mỗi ngày trả sách trễ (ngày)'),
+            ('max_suspension_days', '14', 'Số ngày tạm ngưng quyền mượn tối đa cho một lần trễ hạn (ngày)'),
+            ('block_reserve_when_suspended', '1', 'Không cho phép đặt trước sách trong thời gian đang bị đình chỉ (1 = Có chặn, 0 = Cho phép)')
         `);
 
         // 3. Seed Users (4 Vai trò chuẩn: Admin, Librarian, Reader, Owner)
@@ -60,7 +63,7 @@ async function seed() {
         await db.execute(
             `INSERT INTO config_change_requests (id, key_name, current_value, proposed_value, reason, requested_by, status) 
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-            [1, 'fine_per_day', '5000', '10000', 'Đề xuất tăng phí phạt theo quý mới nhằm giảm tỷ lệ trả sách trễ hạn', 1, 'pending']
+            [1, 'suspension_days_per_late_day', '1', '2', 'Đề xuất tăng số ngày tạm ngưng mượn trên mỗi ngày trả trễ nhằm giảm tỷ lệ giữ sách quá hạn', 1, 'pending']
         );
 
         // 5. Seed Categories
@@ -171,18 +174,18 @@ async function seed() {
             );
         }
 
-        // 11. Seed Fines (Gắn vào user_id = 3)
-        console.log('💸 Seeding danh sách phạt...');
+        // 11. Seed Violations & Remediation Ledger (Gắn vào user_id = 3)
+        console.log('📋 Seeding sổ vi phạm & kỷ luật mượn...');
         const finesData = [
-            [1, 2, 3, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Lược Sử Thời Gian)', 'unpaid', daysAgo(6), null],
-            [2, 5, 3, 20000.00, 'Quá hạn trả sách 4 ngày (Sách: Rừng Na Uy)', 'unpaid', daysAgo(4), null],
-            [3, 6, 3, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Atomic Habits)', 'paid', daysAgo(20), daysAgo(20)]
+            [1, 2, 3, 0.00, 'Quá hạn 6 ngày - Chưa hoàn trả sách (Sách: Lược Sử Thời Gian)', 'unpaid', 'overdue', 'none', 'active_overdue', daysAgo(6), null, null],
+            [2, 5, 3, 0.00, 'Quá hạn 4 ngày - Chưa hoàn trả sách (Sách: Rừng Na Uy)', 'unpaid', 'overdue', 'none', 'active_overdue', daysAgo(4), null, null],
+            [3, 6, 3, 0.00, 'Đã hoàn trả sách (Trễ hạn 6 ngày • Sách: Atomic Habits)', 'paid', 'overdue', 'none', 'resolved', daysAgo(20), daysAgo(20), daysAgo(20)]
         ];
 
         for (const f of finesData) {
             await db.execute(
-                `INSERT INTO fines (id, borrow_record_id, user_id, amount, reason, status, created_at, paid_at) 
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+                `INSERT INTO fines (id, borrow_record_id, user_id, amount, reason, status, violation_type, severity, remediation_status, created_at, paid_at, resolved_at) 
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
                 f
             );
         }
@@ -225,8 +228,8 @@ async function seed() {
         const notificationsData = [
             // Admin (user_id = 1)
             [1, 1, 'Hệ thống Smart Library đã sẵn sàng', 'Chào mừng Quản trị viên. Toàn bộ các dịch vụ mượn trả, tra cứu và Maker-Checker đang hoạt động bình thường.', 'info', 1, daysAgo(10)],
-            [2, 1, 'Cảnh báo sách quá hạn định kỳ', 'Hệ thống ghi nhận có độc giả mượn sách quá hạn cần đôn đốc thu hồi và nộp phạt.', 'warning', 0, daysAgo(2)],
-            [3, 1, 'Đề xuất cấu hình gửi tới Giám đốc', 'Đề xuất thay đổi tham số mức phí phạt trễ hạn đã được gửi tới Giám đốc / Chủ thư viện.', 'info', 0, daysAgo(1)],
+            [2, 1, 'Cảnh báo sách quá hạn định kỳ', 'Hệ thống ghi nhận có độc giả mượn sách quá hạn cần đôn đốc thu hồi và theo dõi tạm ngưng quyền mượn.', 'warning', 0, daysAgo(2)],
+            [3, 1, 'Đề xuất cấu hình gửi tới Giám đốc', 'Đề xuất thay đổi quy chế số ngày tạm ngưng mượn trễ hạn đã được gửi tới Giám đốc / Chủ thư viện.', 'info', 0, daysAgo(1)],
             
             // Librarian (user_id = 2)
             [4, 2, 'Ca làm việc thủ thư kích hoạt', 'Chào mừng Thủ thư. Bạn có thể sử dụng tính năng quét mã QR để xuất nhập mượn trả sách nhanh chóng.', 'info', 1, daysAgo(10)],
@@ -235,15 +238,15 @@ async function seed() {
             [7, 2, 'Ghi nhận hoàn tất trả sách', 'Độc giả đã hoàn tất trả sách "Đắc Nhân Tâm" vào kho thư viện.', 'info', 0, daysAgo(1)],
 
             // Reader (user_id = 3)
-            [7, 3, 'Chào mừng đến với Smart Library!', 'Chúc mừng bạn đã kích hoạt thẻ thư viện trực tuyến thành công. Thẻ của bạn: LIB-RD-100001.', 'info', 1, daysAgo(10)],
-            [8, 3, 'Cảnh báo quá hạn mượn sách', 'Sách "Rừng Na Uy" của bạn đã quá hạn 4 ngày. Vui lòng làm thủ tục trả sách hoặc gia hạn.', 'warning', 0, daysAgo(4)],
-            [9, 3, 'Thông báo phạt trễ hạn', 'Bạn có khoản phí phạt 30,000đ cho cuốn "Lược Sử Thời Gian". Vui lòng thanh toán tại quầy.', 'warning', 0, daysAgo(6)],
-            [10, 3, 'Sách đặt trước đã sẵn sàng', 'Cuốn sách "Rừng Na Uy" bạn đặt trước đã có mặt tại quầy. Vui lòng đến nhận trong 48 giờ.', 'reminder', 0, daysAgo(2)],
+            [8, 3, 'Chào mừng đến với Smart Library!', 'Chúc mừng bạn đã kích hoạt thẻ thư viện trực tuyến thành công. Thẻ của bạn: LIB-RD-100001.', 'info', 1, daysAgo(10)],
+            [9, 3, 'Cảnh báo quá hạn mượn sách', 'Sách "Rừng Na Uy" của bạn đã quá hạn 4 ngày. Vui lòng làm thủ tục trả sách hoặc gia hạn.', 'warning', 0, daysAgo(4)],
+            [10, 3, 'Tạm khóa quyền mượn do quá hạn', 'Cuốn "Lược Sử Thời Gian" đã quá hạn 6 ngày. Quyền mượn & đặt trước tạm khóa cho đến khi hoàn trả sách.', 'warning', 0, daysAgo(6)],
+            [11, 3, 'Sách đặt trước đã sẵn sàng', 'Cuốn sách "Rừng Na Uy" bạn đặt trước đã có mặt tại quầy. Vui lòng đến nhận trong 48 giờ.', 'reminder', 0, daysAgo(2)],
 
             // Owner (user_id = 4)
-            [11, 4, 'Quyền Giám đốc / Chủ thư viện', 'Chào mừng Chủ thư viện. Bạn có toàn quyền giám sát toàn bộ hoạt động lưu thông, tài chính và phê duyệt Maker-Checker.', 'info', 1, daysAgo(10)],
-            [12, 4, 'Đề xuất thay đổi quy chế mới (Maker-Checker)', 'Admin vừa đề xuất điều chỉnh tham số phí phạt trễ hạn "fine_per_day". Vui lòng vào mục Quản lý hệ thống để phê duyệt.', 'reminder', 0, daysAgo(1)],
-            [13, 4, 'Báo cáo doanh thu & lưu thông định kỳ', 'Tổng lượt mượn sách và doanh thu thu phạt đã được cập nhật tại mục Thống kê & Báo cáo.', 'info', 0, daysAgo(0)]
+            [12, 4, 'Quyền Giám đốc / Chủ thư viện', 'Chào mừng Chủ thư viện. Bạn có toàn quyền giám sát hoạt động lưu thông, tình hình vi phạm kỷ luật và phê duyệt Maker-Checker.', 'info', 1, daysAgo(10)],
+            [13, 4, 'Đề xuất thay đổi quy chế mới (Maker-Checker)', 'Admin vừa đề xuất điều chỉnh quy chế tạm ngưng mượn "suspension_days_per_late_day". Vui lòng vào mục Quản lý hệ thống để phê duyệt.', 'reminder', 0, daysAgo(1)],
+            [14, 4, 'Báo cáo lưu thông & kỷ luật định kỳ', 'Tổng lượt mượn sách và tình hình vi phạm kỷ luật mượn đã được cập nhật tại mục Thống kê & Báo cáo.', 'info', 0, daysAgo(0)]
         ];
 
         for (const n of notificationsData) {
@@ -260,7 +263,7 @@ async function seed() {
             [1, 1, 'SYSTEM_INIT', 'system', null, 'Khởi tạo thành công cơ sở dữ liệu Smart Library.', daysAgo(30)],
             [2, 2, 'BORROW', 'borrow_records', 1, 'Cho độc giả Nguyễn Minh A mượn sách "Mắt Biếc".', daysAgo(10)],
             [3, 2, 'RETURN', 'borrow_records', 3, 'Thủ thư nhận trả sách "Đắc Nhân Tâm" cho độc giả Nguyễn Minh A.', daysAgo(2)],
-            [4, 1, 'PROPOSE_CONFIG', 'config_change_requests', 1, 'Admin gửi đề xuất tăng fine_per_day lên 10.000đ', daysAgo(1)],
+            [4, 1, 'PROPOSE_CONFIG', 'config_change_requests', 1, 'Admin gửi đề xuất tăng suspension_days_per_late_day lên 2 ngày', daysAgo(1)],
             [5, 4, 'SYSTEM_LOGIN', 'users', 4, 'Chủ thư viện Trần Văn Chủ đăng nhập kiểm toán hệ thống.', daysAgo(0)]
         ];
 

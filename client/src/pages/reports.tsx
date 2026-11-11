@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { 
   Download, Printer, BookOpen, CheckCircle, AlertCircle, RefreshCw, 
-  DollarSign, TrendingUp, Clock, ArrowUpRight, ArrowDownLeft, Search, Filter
+  ShieldAlert, TrendingUp, Clock, ArrowUpRight, ArrowDownLeft, Search, Filter
 } from "lucide-react";
 import {
   ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
@@ -15,6 +15,7 @@ import {
 import api from "@/services/api";
 import { toast } from "sonner";
 import * as XLSX from "xlsx";
+import { SmartDemandForecastPanel } from "@/components/smart-demand-forecast-panel";
 
 interface ReportTransaction {
   id: number;
@@ -43,10 +44,15 @@ interface AnalyticsData {
   topBooks: Array<{ id: number; title: string; author_name: string; borrows: number }>;
   categoryShare: Array<{ name: string; value: number }>;
   fineRevenue: Array<{ label: string; v: number }>;
+  violationTrends?: Array<{ label: string; v: number }>;
   summary: {
     totalBorrows: number;
     totalReturns: number;
     totalFineAmount: number;
+    totalViolations?: number;
+    suspendedReadersCount?: number;
+    pendingRemediationsCount?: number;
+    activeOverdueCount?: number;
   };
   transactions: ReportTransaction[];
 }
@@ -110,7 +116,9 @@ export default function ReportsPage() {
         { "Chỉ tiêu": "Tổng lượt mượn trong kỳ", "Giá trị": data.summary.totalBorrows },
         { "Chỉ tiêu": "Tổng lượt trả trong kỳ", "Giá trị": data.summary.totalReturns },
         { "Chỉ tiêu": "Tỷ lệ trả đúng hạn", "Giá trị": `${data.onTimeRate.percentage}% (${data.onTimeRate.onTimeCount}/${data.onTimeRate.totalReturned} lượt)` },
-        { "Chỉ tiêu": "Tổng tiền phạt phát sinh (VNĐ)", "Giá trị": data.summary.totalFineAmount }
+        { "Chỉ tiêu": "Tổng lượt vi phạm / sự cố lưu thông", "Giá trị": data.summary.totalViolations ?? data.summary.totalFineAmount ?? 0 },
+        { "Chỉ tiêu": "Thẻ đang tạm ngưng (đình chỉ)", "Giá trị": data.summary.suspendedReadersCount ?? 0 },
+        { "Chỉ tiêu": "Biên bản sách hỏng/mất chờ khắc phục", "Giá trị": data.summary.pendingRemediationsCount ?? 0 }
       ];
       const summarySheet = XLSX.utils.json_to_sheet(summaryRows);
       XLSX.utils.book_append_sheet(workbook, summarySheet, "Tong_Quan");
@@ -257,19 +265,27 @@ export default function ReportsPage() {
         </Card>
 
         <Card className="border bg-destructive/5">
-          <CardContent className="p-4 flex items-center justify-between">
+          <CardContent className="p-4 flex items-center justify-between gap-2">
             <div>
-              <p className="text-xs text-muted-foreground font-medium">Doanh thu phạt</p>
+              <p className="text-xs text-muted-foreground font-medium">Vi phạm & Kỷ luật</p>
               <p className="text-xl font-bold font-display text-destructive mt-1">
-                {loading ? "..." : `${(data?.summary?.totalFineAmount ?? 0).toLocaleString("vi-VN")}đ`}
+                {loading ? "..." : `${data?.summary?.totalViolations ?? 0} lượt`}
               </p>
+              {!loading && (
+                <p className="text-[10px] text-muted-foreground mt-0.5">
+                  {data?.summary?.suspendedReadersCount ?? 0} đình chỉ • {data?.summary?.pendingRemediationsCount ?? 0} chờ khắc phục
+                </p>
+              )}
             </div>
-            <div className="p-2.5 rounded-xl bg-destructive/10 text-destructive">
-              <DollarSign className="h-5 w-5" />
+            <div className="p-2.5 rounded-xl bg-destructive/10 text-destructive shrink-0">
+              <ShieldAlert className="h-5 w-5" />
             </div>
           </CardContent>
         </Card>
       </div>
+
+      {/* Dự Báo Nhu Cầu & Cảnh Báo Nhập Sách Bằng AI */}
+      <SmartDemandForecastPanel />
 
       {/* Main Charts Grid */}
       {loading ? (
@@ -529,15 +545,15 @@ export default function ReportsPage() {
               </CardContent>
             </Card>
 
-            {/* Fine Revenue Area Chart */}
+            {/* Violation & Incident Area Chart */}
             <Card className="lg:col-span-2">
               <CardHeader className="pb-2">
-                <CardTitle className="font-display text-base">Tiền Phạt Phát Sinh (VNĐ)</CardTitle>
-                <CardDescription className="text-xs">Số tiền phạt trễ hạn ghi nhận trong kỳ ({periodTitle})</CardDescription>
+                <CardTitle className="font-display text-base">Biến Động Vi Phạm & Sự Cố Lưu Thông</CardTitle>
+                <CardDescription className="text-xs">Số lượt quá hạn và biên bản hư hỏng/mất sách ghi nhận trong kỳ ({periodTitle})</CardDescription>
               </CardHeader>
               <CardContent>
                 <ResponsiveContainer width="100%" height={220}>
-                  <AreaChart data={data?.fineRevenue || []}>
+                  <AreaChart data={data?.violationTrends || data?.fineRevenue || []}>
                     <defs>
                       <linearGradient id="grev" x1="0" y1="0" x2="0" y2="1">
                         <stop offset="0%" stopColor="#ef4444" stopOpacity={0.4} />
@@ -551,10 +567,10 @@ export default function ReportsPage() {
                       fontSize={11}
                       interval={period === "day" ? 2 : 0} 
                     />
-                    <YAxis stroke="var(--muted-foreground)" fontSize={11} />
+                    <YAxis stroke="var(--muted-foreground)" fontSize={11} allowDecimals={false} />
                     <Tooltip 
                       contentStyle={{ background: "var(--popover)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12 }} 
-                      formatter={(val: any) => [`${Number(val).toLocaleString('vi-VN')} đ`, "Tiền phạt"]}
+                      formatter={(val: any) => [`${Number(val)} lượt`, "Vi phạm / Sự cố"]}
                       labelFormatter={(lbl: string) => period === "day" ? `Khung giờ: ${lbl}` : `Thời gian: ${lbl}`}
                     />
                     <Area type="monotone" dataKey="v" stroke="#ef4444" strokeWidth={2} fill="url(#grev)" />

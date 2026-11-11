@@ -15,7 +15,7 @@ export interface ConfirmModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title?: string;
-  description?: string;
+  description?: React.ReactNode;
   confirmText?: string;
   cancelText?: string;
   variant?: "default" | "destructive" | "warning";
@@ -66,8 +66,10 @@ export function ConfirmModal({
             )}
             <AlertDialogTitle className="text-lg font-semibold">{title}</AlertDialogTitle>
           </div>
-          <AlertDialogDescription className="pt-2 text-sm text-muted-foreground">
-            {description}
+          <AlertDialogDescription asChild>
+            <div className="pt-2 text-sm text-muted-foreground whitespace-pre-line leading-relaxed w-full">
+              {description}
+            </div>
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter className="mt-4 flex gap-2">

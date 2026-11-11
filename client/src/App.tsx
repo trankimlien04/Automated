@@ -37,7 +37,7 @@ const ROUTE_META: Record<string, { title: string; subtitle: string }> = {
   "/accounts": { title: "Quản lý tài khoản", subtitle: "Phân quyền và tài khoản mặc định hệ thống" },
   "/borrow": { title: "Mượn / Trả qua QR", subtitle: "Giao dịch lưu thông tự động qua mã thẻ & mã sách" },
   "/reservations": { title: "Đặt trước sách", subtitle: "Hàng đợi và thông báo tự động" },
-  "/fines": { title: "Phí phạt", subtitle: "Quản lý vi phạm và thanh toán" },
+  "/fines": { title: "Vi phạm & Kỷ luật mượn", subtitle: "Theo dõi trạng thái quyền mượn, quá hạn, tạm ngưng và khắc phục hư hỏng" },
   "/notifications": { title: "Trung tâm thông báo", subtitle: "Email & in-app realtime" },
   "/recommendations": { title: "Gợi ý sách AI", subtitle: "Content-based + Collaborative Filtering" },
   "/reports": { title: "Thống kê & Báo cáo", subtitle: "Phân tích hành vi đọc" },

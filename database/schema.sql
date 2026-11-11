@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS users (
     card_number VARCHAR(20) UNIQUE,
     card_expiry DATE,
     status ENUM('active', 'locked', 'pending') DEFAULT 'pending',
+    suspended_until DATETIME NULL DEFAULT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -122,12 +123,16 @@ CREATE TABLE IF NOT EXISTS fines (
     id INT AUTO_INCREMENT PRIMARY KEY,
     borrow_record_id INT NOT NULL,
     user_id INT NOT NULL,
-    amount DECIMAL(10, 2) NOT NULL,
+    amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
     reason TEXT,
     status ENUM('unpaid', 'paid') DEFAULT 'unpaid',
-    payment_method ENUM('cash', 'transfer') DEFAULT 'cash',
-    payment_channel ENUM('counter', 'online') DEFAULT 'counter',
-    transaction_ref VARCHAR(100) NULL,
+    violation_type ENUM('overdue', 'damaged', 'lost') DEFAULT 'overdue',
+    severity ENUM('none', 'minor', 'moderate', 'severe', 'lost') DEFAULT 'none',
+    remediation_status ENUM('none', 'active_overdue', 'pending_remediation', 'resolved') DEFAULT 'none',
+    remediation_action TEXT NULL,
+    remediation_note TEXT NULL,
+    resolved_by INT NULL,
+    resolved_at DATETIME NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     paid_at DATETIME NULL,
     FOREIGN KEY (borrow_record_id) REFERENCES borrow_records(id) ON DELETE CASCADE,
@@ -209,13 +214,12 @@ TRUNCATE TABLE system_configs;
 
 -- 2.1. CẤU HÌNH HỆ THỐNG (SYSTEM CONFIGS)
 INSERT INTO system_configs (key_name, value, description) VALUES
-('max_borrow_days', '14', 'Số ngày mượn tối đa cho mỗi sách'),
-('fine_per_day', '5000', 'Số tiền phạt mỗi ngày trễ hạn (VNĐ)'),
-('max_books_per_user', '3', 'Số lượng sách tối đa một độc giả được mượn cùng lúc'),
-('bank_code', 'MB', 'Mã ngân hàng nhận thanh toán VietQR (ví dụ: MB, VCB, TCB, ICB, ACB...)'),
-('bank_name', 'MBBank (Ngân hàng Quân Đội)', 'Tên ngân hàng thụ hưởng'),
-('bank_account_no', '0901111222', 'Số tài khoản ngân hàng nhận tiền phạt'),
-('bank_account_name', 'THU VIEN ATHENAEUM', 'Tên chủ tài khoản thụ hưởng');
+('max_borrow_days', '14', 'Thời hạn mượn mặc định cho mỗi phiếu mượn (ngày)'),
+('max_books_per_user', '5', 'Số lượng sách tối đa một độc giả được mượn cùng lúc (cuốn)'),
+('grace_days', '0', 'Số ngày ân hạn sau hạn trả trước khi tính tạm ngưng quyền mượn (ngày)'),
+('suspension_days_per_late_day', '1', 'Số ngày tạm ngưng quyền mượn áp dụng cho mỗi ngày trả sách trễ (ngày)'),
+('max_suspension_days', '14', 'Số ngày tạm ngưng quyền mượn tối đa cho một lần trễ hạn (ngày)'),
+('block_reserve_when_suspended', '1', 'Không cho phép đặt trước sách trong thời gian đang bị đình chỉ (1 = Có chặn, 0 = Cho phép)');
 
 -- 2.2. NGƯỜI DÙNG (USERS)
 -- Mật khẩu mặc định:
@@ -229,7 +233,7 @@ INSERT INTO users (id, full_name, email, password_hash, role, phone, card_number
 
 -- 2.3. ĐỀ XUẤT CẤU HÌNH MẪU (CONFIG CHANGE REQUESTS)
 INSERT INTO config_change_requests (id, key_name, current_value, proposed_value, reason, requested_by, status, reviewed_by, reviewed_at, review_note) VALUES
-(1, 'fine_per_day', '5000', '10000', 'Đề xuất tăng phí phạt theo quý mới nhằm giảm tỷ lệ trả sách trễ hạn', 1, 'pending', NULL, NULL, NULL);
+(1, 'suspension_days_per_late_day', '1', '2', 'Đề xuất tăng số ngày tạm ngưng mượn trên mỗi ngày trả trễ nhằm hạn chế giữ sách quá hạn', 1, 'pending', NULL, NULL, NULL);
 
 -- 2.4. THỂ LOẠI (CATEGORIES)
 INSERT INTO categories (id, name, parent_id, description) VALUES
@@ -323,11 +327,11 @@ INSERT INTO borrow_records (id, user_id, book_copy_id, borrow_date, due_date, re
 (5, 3, 20, DATE_SUB(NOW(), INTERVAL 18 DAY), DATE_SUB(NOW(), INTERVAL 4 DAY), NULL, 'borrowing', 2),
 (6, 3, 23, DATE_SUB(NOW(), INTERVAL 40 DAY), DATE_SUB(NOW(), INTERVAL 26 DAY), DATE_SUB(NOW(), INTERVAL 20 DAY), 'returned', 2);
 
--- 2.10. TIỀN PHẠT (FINES)
-INSERT INTO fines (id, borrow_record_id, user_id, amount, reason, status, created_at, paid_at) VALUES
-(1, 2, 3, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Lược Sử Thời Gian)', 'unpaid', DATE_SUB(NOW(), INTERVAL 6 DAY), NULL),
-(2, 5, 3, 20000.00, 'Quá hạn trả sách 4 ngày (Sách: Rừng Na Uy)', 'unpaid', DATE_SUB(NOW(), INTERVAL 4 DAY), NULL),
-(3, 6, 3, 30000.00, 'Quá hạn trả sách 6 ngày (Sách: Atomic Habits)', 'paid', DATE_SUB(NOW(), INTERVAL 20 DAY), DATE_SUB(NOW(), INTERVAL 20 DAY));
+-- 2.10. SỔ VI PHẠM & KHẮC PHỤC KỶ LUẬT MƯỢN (VIOLATIONS & REMEDIATION LEDGER)
+INSERT INTO fines (id, borrow_record_id, user_id, amount, reason, status, violation_type, severity, remediation_status, remediation_action, created_at, paid_at, resolved_at) VALUES
+(1, 2, 3, 0.00, 'Quá hạn 6 ngày - Chưa hoàn trả sách (Sách: Lược Sử Thời Gian)', 'unpaid', 'overdue', 'none', 'active_overdue', NULL, DATE_SUB(NOW(), INTERVAL 6 DAY), NULL, NULL),
+(2, 5, 3, 0.00, 'Quá hạn 4 ngày - Chưa hoàn trả sách (Sách: Rừng Na Uy)', 'unpaid', 'overdue', 'none', 'active_overdue', NULL, DATE_SUB(NOW(), INTERVAL 4 DAY), NULL, NULL),
+(3, 6, 3, 0.00, 'Đã hoàn trả sách (Trễ hạn 6 ngày • Sách: Atomic Habits)', 'paid', 'overdue', 'none', 'resolved', NULL, DATE_SUB(NOW(), INTERVAL 20 DAY), DATE_SUB(NOW(), INTERVAL 20 DAY), DATE_SUB(NOW(), INTERVAL 20 DAY));
 
 -- 2.11. ĐẶT TRƯỚC SÁCH (RESERVATIONS)
 INSERT INTO reservations (id, user_id, book_id, reservation_date, status) VALUES
@@ -354,7 +358,7 @@ INSERT INTO read_history (id, user_id, book_id, borrow_record_id, read_date) VAL
 INSERT INTO notifications (id, user_id, title, message, type, is_read, created_at) VALUES
 (1, 3, 'Chào mừng đến với Smart Library!', 'Chúc mừng bạn đã kích hoạt thẻ thư viện trực tuyến thành công. Thẻ của bạn: LIB-RD-100001.', 'info', 1, DATE_SUB(NOW(), INTERVAL 10 DAY)),
 (2, 3, 'Cảnh báo quá hạn mượn sách', 'Sách "Rừng Na Uy" của bạn đã quá hạn 4 ngày. Vui lòng làm thủ tục trả sách hoặc gia hạn.', 'warning', 0, DATE_SUB(NOW(), INTERVAL 4 DAY)),
-(3, 3, 'Thông báo phạt trễ hạn', 'Bạn có khoản phí phạt 30,000đ cho cuốn "Lược Sử Thời Gian". Vui lòng thanh toán tại quầy.', 'warning', 0, DATE_SUB(NOW(), INTERVAL 6 DAY)),
+(3, 3, 'Tạm khóa quyền mượn do quá hạn', 'Cuốn "Lược Sử Thời Gian" đã quá hạn 6 ngày. Quyền mượn & đặt trước tạm khóa cho đến khi hoàn trả sách.', 'warning', 0, DATE_SUB(NOW(), INTERVAL 6 DAY)),
 (4, 3, 'Sách đặt trước đã sẵn sàng', 'Cuốn sách "Rừng Na Uy" bạn đặt trước đã có mặt tại quầy. Vui lòng đến nhận trong 48 giờ.', 'reminder', 0, DATE_SUB(NOW(), INTERVAL 2 DAY));
 
 -- 2.15. NHẬT KÝ HOẠT ĐỘNG (ACTIVITY LOGS)
@@ -362,7 +366,7 @@ INSERT INTO activity_logs (id, user_id, action, target_type, target_id, details,
 (1, 1, 'SYSTEM_INIT', 'system', NULL, 'Khởi tạo hệ thống Smart Library Athenaeum', DATE_SUB(NOW(), INTERVAL 30 DAY)),
 (2, 2, 'BORROW_BOOK', 'borrow_records', 1, 'Thủ thư cho độc giả Nguyễn Minh A mượn sách Mắt Biếc qua mã QR', DATE_SUB(NOW(), INTERVAL 10 DAY)),
 (3, 2, 'RETURN_BOOK', 'borrow_records', 3, 'Thủ thư nhận trả sách Đắc Nhân Tâm', DATE_SUB(NOW(), INTERVAL 2 DAY)),
-(4, 1, 'PROPOSE_CONFIG', 'config_change_requests', 1, 'Admin gửi đề xuất tăng fine_per_day lên 10.000đ', DATE_SUB(NOW(), INTERVAL 1 DAY)),
+(4, 1, 'PROPOSE_CONFIG', 'config_change_requests', 1, 'Admin gửi đề xuất điều chỉnh tham số suspension_days_per_late_day lên 2 ngày', DATE_SUB(NOW(), INTERVAL 1 DAY)),
 (5, 4, 'SYSTEM_LOGIN', 'users', 4, 'Chủ thư viện Trần Văn Chủ đăng nhập kiểm toán hệ thống', NOW());
 
 SET FOREIGN_KEY_CHECKS = 1;

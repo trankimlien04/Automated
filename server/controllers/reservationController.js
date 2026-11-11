@@ -1,5 +1,152 @@
 const db = require('../config/db');
 const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
+const { computeSmartWaitPrediction } = require('../utils/waitTimePredictor');
+const { syncOverdueFines, getReaderCirculationStatus } = require('../services/fineSyncService');
+
+/**
+ * Helper: Tự động tạo hoặc thêm sách đặt trước (khi độc giả bấm "Đồng ý mượn")
+ * vào Phiếu mượn nháp 24h (borrow_drafts + borrow_draft_items) giống hệt luồng Đăng ký mượn online.
+ * Quy trình thống nhất: Đồng ý mượn -> Tạo Phiếu mượn nháp & Khóa giữ chỗ 1 bản sao (24h)
+ * -> Độc giả đến kệ lấy sách & Quét Tem Sách Tại Kệ -> Tới quầy Thủ thư quét duyệt mượn!
+ */
+async function ensureDraftForAcceptedReservation(conn, userId, bookId, notes = 'Chuyển từ Đặt trước sách') {
+    const [activeDrafts] = await conn.execute(
+        `SELECT id, draft_code FROM borrow_drafts WHERE user_id = ? AND status = 'pending' AND expires_at > NOW() ORDER BY id DESC LIMIT 1`,
+        [userId]
+    );
+
+    let draftId;
+    let draftCode;
+
+    if (activeDrafts.length > 0) {
+        draftId = activeDrafts[0].id;
+        draftCode = activeDrafts[0].draft_code;
+        // Giữ nguyên thời hạn expires_at ban đầu của phiếu nháp, không reset lại 24h mỗi lần đồng bộ nền
+    } else {
+        const randomSalt = Math.floor(100 + Math.random() * 900);
+        draftCode = `DRAFT-BRW-${Date.now().toString().slice(-5)}${randomSalt}-${userId}`;
+        const [draftRes] = await conn.execute(
+            `INSERT INTO borrow_drafts (draft_code, user_id, status, notes, expires_at)
+             VALUES (?, ?, 'pending', ?, DATE_ADD(NOW(), INTERVAL 24 HOUR))`,
+            [draftCode, userId, notes]
+        );
+        draftId = draftRes.insertId;
+    }
+
+    const [existItems] = await conn.execute(
+        `SELECT id FROM borrow_draft_items WHERE draft_id = ? AND book_id = ? AND status = 'pending'`,
+        [draftId, bookId]
+    );
+
+    if (existItems.length === 0) {
+        await conn.execute(
+            `INSERT INTO borrow_draft_items (draft_id, book_id, book_copy_id, status)
+             VALUES (?, ?, NULL, 'pending')`,
+            [draftId, bookId]
+        );
+    }
+
+    return { draftId, draftCode };
+}
+
+/**
+ * Tự động đồng bộ hàng đợi đặt trước với tồn kho bản sao thực tế:
+ * 1. Đồng bộ mọi phiếu đặt trước đã 'accepted' vào Phiếu mượn nháp 24h (borrow_drafts) nếu chưa có.
+ * 2. Nếu một cuốn sách đang có người xếp hàng ('waiting', 'pending') NHƯNG trên kệ đang có bản sao rảnh
+ *    (book_copies.status = 'available' chưa bị giữ bởi phiếu nháp 24h hay phiếu đặt trước khác),
+ *    hệ thống lập tức chuyển người đứng đầu hàng chờ sang trạng thái 'notified' (Đã có sách - Giữ ưu tiên 48h).
+ */
+async function syncWaitingReservationsWithStock() {
+    try {
+        // BƯỚC A: Đảm bảo mọi phiếu đặt trước đang ở trạng thái 'accepted' (và chưa hết hạn 24h) đều nằm trong Phiếu mượn nháp của độc giả
+        const [acceptedResvs] = await db.execute(`
+            SELECT id, user_id, book_id
+            FROM reservations
+            WHERE status = 'accepted' AND (expires_at IS NULL OR expires_at > NOW())
+        `);
+        for (const acc of acceptedResvs) {
+            await ensureDraftForAcceptedReservation(db, acc.user_id, acc.book_id);
+        }
+
+        // BƯỚC B: Kiểm tra các sách đang có người chờ ('waiting', 'pending') hoặc đang giữ chỗ
+        const [targetBooks] = await db.execute(`
+            SELECT DISTINCT r.book_id, b.title as book_title
+            FROM reservations r
+            JOIN books b ON r.book_id = b.id
+            WHERE r.status IN ('waiting', 'pending', 'notified', 'accepted', 'ready')
+        `);
+
+        for (const wb of targetBooks) {
+            const bookId = wb.book_id;
+
+            // 1. Tổng số bản sao vật lý đang 'available' trên kệ
+            const [physRows] = await db.execute(
+                `SELECT COUNT(*) as cnt FROM book_copies WHERE book_id = ? AND status = 'available'`,
+                [bookId]
+            );
+            const availPhysical = Number(physRows[0]?.cnt) || 0;
+
+            // 2. Đếm số độc giả (distinct user_id) đang giữ chỗ hợp lệ cho cuốn sách này
+            // (gộp chung giữa Phiếu mượn nháp 24h và Đặt trước 'notified'/'accepted'/'ready' để 1 độc giả không bị trừ 2 lần)
+            const [holdUsers] = await db.execute(`
+                SELECT DISTINCT user_id FROM (
+                    SELECT d.user_id
+                    FROM borrow_draft_items di
+                    JOIN borrow_drafts d ON di.draft_id = d.id
+                    WHERE di.book_id = ? AND di.status = 'pending' AND d.status = 'pending' AND d.expires_at > NOW()
+                    UNION ALL
+                    SELECT r.user_id
+                    FROM reservations r
+                    WHERE r.book_id = ? AND r.status IN ('notified', 'accepted', 'ready')
+                ) as combined_holds
+            `, [bookId, bookId]);
+            let activeHoldCount = holdUsers.length;
+
+            // 3. Số bản sao thực sự còn tự do có thể phân bổ ngay cho người đang chờ trong hàng đợi
+            const freeToAllocate = Math.max(0, availPhysical - activeHoldCount);
+
+            if (freeToAllocate > 0) {
+                const [waiters] = await db.execute(`
+                    SELECT id, user_id
+                    FROM reservations
+                    WHERE book_id = ? AND status IN ('waiting', 'pending')
+                    ORDER BY reservation_date ASC, id ASC
+                    LIMIT ${freeToAllocate}
+                `, [bookId]);
+
+                for (const w of waiters) {
+                    await db.execute(`
+                        UPDATE reservations
+                        SET status = 'notified',
+                            notified_at = NOW(),
+                            expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR)
+                        WHERE id = ?
+                    `, [w.id]);
+
+                    await db.execute(
+                        `INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, 'reminder')`,
+                        [
+                            w.user_id,
+                            '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
+                            `Cuốn sách "${wb.book_title}" bạn đặt trước hiện đã có bản sao sẵn sàng tại thư viện và đang được giữ ưu tiên cho bạn trong 48 giờ. Hãy vào mục "Đặt trước sách" để bấm [Đồng ý mượn & Tạo Phiếu nháp 24h] nhé!`
+                        ]
+                    );
+                    activeHoldCount++;
+                }
+            }
+
+            // Đồng bộ lại books.available_copies phản ánh đúng số bản sao tự do
+            const finalFreeCopies = Math.max(0, availPhysical - activeHoldCount);
+            await db.execute(
+                `UPDATE books SET available_copies = ? WHERE id = ?`,
+                [finalFreeCopies, bookId]
+            );
+        }
+    } catch (err) {
+        console.error('Lỗi đồng bộ hàng đợi đặt trước với tồn kho:', err);
+    }
+}
+exports.syncWaitingReservationsWithStock = syncWaitingReservationsWithStock;
 
 exports.createReservation = async (req, res) => {
     const { bookId } = req.body;
@@ -41,29 +188,16 @@ exports.createReservation = async (req, res) => {
             });
         }
 
-        // Check unpaid fines
-        const [unpaidFines] = await db.execute(
-            'SELECT SUM(amount) as total_unpaid FROM fines WHERE user_id = ? AND status = "unpaid"',
-            [userId]
-        );
-        const unpaidAmount = parseInt(unpaidFines[0]?.total_unpaid || 0);
-        if (unpaidAmount > 0) {
-            return res.status(400).json({
-                message: `Bạn hiện có khoản nợ phí phạt chưa thanh toán (${unpaidAmount.toLocaleString('vi-VN')}đ). Vui lòng thanh toán phí phạt trước khi đặt trước sách!`
-            });
+        // Check multi-cause non-monetary circulation eligibility (OVERDUE / PENDING_REMEDIATION / SUSPENDED / ACCOUNT_LOCKED)
+        await syncOverdueFines(userId);
+        const circStatus = await getReaderCirculationStatus(userId);
+        if (!circStatus) {
+            return res.status(404).json({ message: 'Không tìm thấy thông tin độc giả!' });
         }
-
-        // Check active overdue borrows
-        const todayStr = new Date().toISOString().slice(0, 10);
-        const [overdueBorrows] = await db.execute(`
-            SELECT COUNT(*) as overdue_count 
-            FROM borrow_records 
-            WHERE user_id = ? AND status = 'borrowing' AND due_date < ?
-        `, [userId, todayStr]);
-        const overdueCount = parseInt(overdueBorrows[0]?.overdue_count || 0);
-        if (overdueCount > 0) {
+        if (!circStatus.eligibleToReserve) {
             return res.status(400).json({
-                message: `Bạn hiện có ${overdueCount} cuốn sách mượn quá hạn chưa trả. Vui lòng hoàn trả sách quá hạn trước khi đặt trước!`
+                message: `Không thể đặt trước sách: ${circStatus.reserveBlockReason || circStatus.blockReason}.`,
+                circulationStatus: circStatus
             });
         }
 
@@ -76,12 +210,30 @@ exports.createReservation = async (req, res) => {
             return res.status(400).json({ message: 'Bạn đã đăng ký đặt trước đầu sách này trong hàng đợi rồi!' });
         }
 
-        // Tính toán vị trí trong hàng đợi (Queue position)
+        // Tính toán vị trí trong hàng đợi (Queue position) & Dự báo ngày có sách (Smart Wait-Time Predictor)
         const [queueRows] = await db.execute(
             'SELECT COUNT(*) as count FROM reservations WHERE book_id = ? AND status IN ("waiting", "pending")',
             [bookId]
         );
-        const queuePosition = (queueRows[0]?.count || 0) + 1;
+        const waitingBeforeCount = Number(queueRows[0]?.count) || 0;
+        const queuePosition = waitingBeforeCount + 1;
+
+        const [activeBorrowsForBook] = await db.execute(`
+            SELECT br.due_date
+            FROM borrow_records br
+            JOIN book_copies bc ON br.book_copy_id = bc.id
+            WHERE bc.book_id = ? AND br.status = 'borrowing'
+            ORDER BY br.due_date ASC
+        `, [bookId]);
+
+        const waitPrediction = computeSmartWaitPrediction({
+            bookId,
+            totalCopies: book.total_copies,
+            availableCopies: 0,
+            activeDueDates: activeBorrowsForBook.map(r => r.due_date),
+            waitingCount: waitingBeforeCount,
+            targetQueuePosition: queuePosition
+        });
 
         const [result] = await db.execute(
             'INSERT INTO reservations (user_id, book_id, status) VALUES (?, ?, "waiting")',
@@ -91,30 +243,31 @@ exports.createReservation = async (req, res) => {
         const reservationId = result.insertId;
         const ticketQr = `TICKET-RES-${reservationId}`;
 
-        // Gửi thông báo cho độc giả
+        // Gửi thông báo cho độc giả kèm dự báo ngày có sách
         await db.execute(
             'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
             [
                 userId,
-                'Ghi nhận đặt trước sách vào hàng đợi',
-                `Đầu sách "${book.title}" hiện đang hết bản sao. Yêu cầu đặt trước của bạn đã được ghi nhận vào hàng đợi (Vị trí #${queuePosition}). Ngay khi có người hoàn trả sách về thư viện, hệ thống sẽ ưu tiên giữ sách và thông báo hỏi bạn có muốn mượn không!`
+                'Ghi nhận đặt trước sách & Dự báo ngày có sách',
+                `Đầu sách "${book.title}" đã được ghi nhận vào hàng đợi đặt trước. ${waitPrediction.summary_text}. Ngay khi bản sao được hoàn trả về thư viện, hệ thống sẽ ưu tiên giữ riêng 48h và báo cho bạn!`
             ]
         );
 
         // Gửi thông báo cho ban thư viện
         await notifyAllStaff(
             'Độc giả đặt trước sách (Hàng đợi)',
-            `Độc giả ${user.full_name} (${user.card_number || user.email}) vừa đăng ký đặt trước cuốn "${book.title}" (Hàng đợi vị trí #${queuePosition}, Phiếu #${reservationId}).`,
+            `Độc giả ${user.full_name} (${user.card_number || user.email}) vừa đăng ký đặt trước cuốn "${book.title}" (Vị trí #${queuePosition}, Dự kiến có sách: ${waitPrediction.expected_date_vn}, Phiếu #${reservationId}).`,
             'info',
             userId
         );
 
         res.status(201).json({
-            message: `Đầu sách "${book.title}" hiện đang hết. Hệ thống đã ghi nhận bạn vào hàng đợi đặt trước (Vị trí #${queuePosition}) và sẽ tự động thông báo khi có sách về kho!`,
+            message: `Đã xếp hàng đặt trước cuốn "${book.title}"! ${waitPrediction.summary_text}`,
             status: 'waiting',
             queuePosition,
             reservationId,
-            ticketQrCode: ticketQr
+            ticketQrCode: ticketQr,
+            waitPrediction
         });
     } catch (error) {
         console.error('Lỗi khi tạo đặt trước:', error);
@@ -126,6 +279,9 @@ exports.getReservations = async (req, res) => {
     const { role, id } = req.user;
 
     try {
+        // Tự động đồng bộ: nếu sách đã có bản sao rảnh trong kho thì chuyển ngay phiếu 'waiting' sang 'notified'
+        await syncWaitingReservationsWithStock();
+
         let query = `
             SELECT r.id, r.reservation_date, r.status, r.notified_at, r.expires_at,
                    CONCAT('TICKET-RES-', r.id) as ticket_qr_code,
@@ -148,15 +304,44 @@ exports.getReservations = async (req, res) => {
 
         const [results] = await db.execute(query, params);
 
-        // Bổ sung thông tin vị trí hàng đợi và thời gian còn lại
+        // Bổ sung thông tin vị trí hàng đợi, thời gian còn lại & Dự báo ngày có sách (Smart Wait-Time Predictor)
         const enriched = await Promise.all(results.map(async (r) => {
             let queuePosition = null;
+            let waitPrediction = null;
             if (r.status === 'waiting' || r.status === 'pending') {
                 const [qRes] = await db.execute(
-                    'SELECT COUNT(*) as pos FROM reservations WHERE book_id = ? AND status IN ("waiting", "pending") AND reservation_date <= ?',
-                    [r.book_id, r.reservation_date]
+                    'SELECT COUNT(*) as pos FROM reservations WHERE book_id = ? AND status IN ("waiting", "pending") AND (reservation_date < ? OR (reservation_date = ? AND id <= ?))',
+                    [r.book_id, r.reservation_date, r.reservation_date, r.id]
                 );
                 queuePosition = qRes[0]?.pos || 1;
+
+                const [activeBorrows] = await db.execute(`
+                    SELECT br.due_date
+                    FROM borrow_records br
+                    JOIN book_copies bc ON br.book_copy_id = bc.id
+                    WHERE bc.book_id = ? AND br.status = 'borrowing'
+                    ORDER BY br.due_date ASC
+                `, [r.book_id]);
+
+                const [activeHolds] = await db.execute(`
+                    SELECT expires_at FROM reservations
+                    WHERE book_id = ? AND status IN ('notified', 'accepted', 'ready') AND expires_at IS NOT NULL
+                    UNION ALL
+                    SELECT d.expires_at
+                    FROM borrow_draft_items di
+                    JOIN borrow_drafts d ON di.draft_id = d.id
+                    WHERE di.book_id = ? AND di.status = 'pending' AND d.status = 'pending' AND d.expires_at > NOW()
+                `, [r.book_id, r.book_id]);
+
+                waitPrediction = computeSmartWaitPrediction({
+                    bookId: r.book_id,
+                    totalCopies: r.total_copies,
+                    availableCopies: r.available_copies,
+                    activeDueDates: activeBorrows.map(b => b.due_date),
+                    holdExpiryDates: activeHolds.map(h => h.expires_at),
+                    waitingCount: Math.max(0, queuePosition - 1),
+                    targetQueuePosition: queuePosition
+                });
             }
 
             let timeLeftHours = null;
@@ -165,10 +350,36 @@ exports.getReservations = async (req, res) => {
                 timeLeftHours = Math.max(0, Math.round(diffMs / (1000 * 60 * 60)));
             }
 
+            // Nếu đã xác nhận mượn ('accepted' / 'ready'), lấy thông tin Phiếu mượn nháp 24h liên kết
+            let draftCode = null;
+            let draftId = null;
+            let copyQrCode = null;
+            if (r.status === 'accepted' || r.status === 'ready') {
+                const [draftRows] = await db.execute(`
+                    SELECT d.id as draft_id, d.draft_code, bc.qr_code as copy_qr_code
+                    FROM borrow_draft_items di
+                    JOIN borrow_drafts d ON di.draft_id = d.id
+                    LEFT JOIN book_copies bc ON di.book_copy_id = bc.id
+                    WHERE d.user_id = ? AND di.book_id = ? AND d.status = 'pending' AND di.status = 'pending' AND d.expires_at > NOW()
+                    ORDER BY d.id DESC
+                    LIMIT 1
+                `, [r.user_id, r.book_id]);
+
+                if (draftRows.length > 0) {
+                    draftId = draftRows[0].draft_id;
+                    draftCode = draftRows[0].draft_code;
+                    copyQrCode = draftRows[0].copy_qr_code || null;
+                }
+            }
+
             return {
                 ...r,
                 queue_position: queuePosition,
-                time_left_hours: timeLeftHours
+                time_left_hours: timeLeftHours,
+                wait_prediction: waitPrediction,
+                draft_id: draftId,
+                draft_code: draftCode,
+                copy_qr_code: copyQrCode
             };
         }));
 
@@ -219,46 +430,53 @@ exports.respondReservation = async (req, res) => {
 
         try {
             if (action === 'accept') {
+                await syncOverdueFines(resv.user_id);
+                const circStatus = await getReaderCirculationStatus(resv.user_id, connection);
+                if (circStatus && !circStatus.eligibleToBorrow) {
+                    await connection.rollback();
+                    return res.status(400).json({
+                        message: `Chưa thể xác nhận mượn sách đặt trước: ${circStatus.blockReason}. Vui lòng xử lý các điều kiện lưu thông trước!`,
+                        circulationStatus: circStatus
+                    });
+                }
+
                 // ĐỘC GIẢ ĐỒNG Ý MƯỢN:
-                // Cập nhật trạng thái thành 'accepted' (sẵn sàng chờ độc giả tới nhận tại quầy)
+                // Quy về luồng chuẩn giống Đăng ký mượn online:
+                // Tạo Phiếu mượn nháp & Khóa giữ chỗ 1 bản sao (24h) -> Độc giả đến kệ lấy sách quét tem -> Tới quầy Thủ thư quét duyệt mượn!
                 await connection.execute(
-                    'UPDATE reservations SET status = "accepted" WHERE id = ?',
+                    'UPDATE reservations SET status = "accepted", expires_at = DATE_ADD(NOW(), INTERVAL 24 HOUR) WHERE id = ?',
                     [id]
                 );
 
-                // Đồng thời thêm vào giỏ mượn / yêu cầu mượn borrow_requests để khi quét thẻ tại quầy sẽ hiện ra ngay
-                const [existRequest] = await connection.execute(
-                    'SELECT id FROM borrow_requests WHERE user_id = ? AND book_id = ? AND status = "pending"',
-                    [resv.user_id, resv.book_real_id]
+                const { draftId, draftCode } = await ensureDraftForAcceptedReservation(
+                    connection,
+                    resv.user_id,
+                    resv.book_real_id,
+                    `Tạo từ Đặt trước sách #RES-${id}`
                 );
-                if (existRequest.length === 0) {
-                    await connection.execute(
-                        'INSERT INTO borrow_requests (user_id, book_id, status, expires_at) VALUES (?, ?, "pending", DATE_ADD(NOW(), INTERVAL 24 HOUR))',
-                        [resv.user_id, resv.book_real_id]
-                    );
-                }
 
                 // Gửi thông báo cho độc giả
-                const expiryStr = resv.expires_at ? new Date(resv.expires_at).toLocaleDateString('vi-VN') : '48 giờ tới';
                 await connection.execute(
                     'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
                     [
                         resv.user_id,
-                        'Đã xác nhận mượn sách đặt trước',
-                        `Bạn đã xác nhận mượn cuốn sách "${resv.book_title}". Sách đang được giữ riêng cho bạn tại quầy thư viện. Vui lòng đến nhận trước ngày ${expiryStr}!`
+                        'Đã tạo Phiếu mượn nháp (24h) từ Đặt trước sách',
+                        `Bạn đã đồng ý mượn cuốn "${resv.book_title}". Hệ thống đã chuyển sách vào Phiếu mượn nháp (${draftCode}) và khóa giữ riêng 1 bản sao trên kệ trong 24 giờ. Hãy đến đúng vị trí kệ lấy sách, bấm "Quét Tem Sách Tại Kệ", rồi mang ra quầy để Thủ thư quét duyệt mượn!`
                     ]
                 );
 
                 // Gửi thông báo cho ban thư viện
                 await notifyAllStaff(
-                    'Độc giả xác nhận mượn sách đặt trước',
-                    `Độc giả ${resv.reader_name} (${resv.card_number}) đã xác nhận đồng ý mượn cuốn "${resv.book_title}". Sách đang chờ độc giả tới quầy nhận.`,
+                    'Độc giả xác nhận mượn sách đặt trước (Tạo Phiếu nháp 24h)',
+                    `Độc giả ${resv.reader_name} (${resv.card_number}) đã xác nhận mượn cuốn "${resv.book_title}" -> Hệ thống đã tạo/cập nhật Phiếu mượn nháp ${draftCode} (giữ chỗ 24h chờ độc giả đến kệ quét sách và ra quầy duyệt).`,
                     'info'
                 );
 
                 await connection.commit();
                 return res.status(200).json({
-                    message: `Xác nhận mượn cuốn "${resv.book_title}" thành công! Sách đang được giữ riêng cho bạn tại quầy. Vui lòng đến xuất trình Thẻ độc giả QR để nhận sách.`
+                    message: `Đã tạo Phiếu mượn nháp (${draftCode}) & khóa giữ chỗ 1 bản sao trong 24h cho cuốn "${resv.book_title}"! Bạn hãy đến kệ lấy sách, bấm "Quét Tem Sách Tại Kệ" rồi ra quầy để Thủ thư quét duyệt mượn.`,
+                    draftCode,
+                    draftId
                 });
             } else {
                 // ĐỘC GIẢ TỪ CHỐI / HỦY NHƯỜNG LƯỢT:
@@ -367,6 +585,25 @@ exports.cancelReservation = async (req, res) => {
                 'UPDATE borrow_requests SET status = "cancelled" WHERE user_id = ? AND book_id = ? AND status = "pending"',
                 [resv.user_id, resv.book_real_id]
             );
+
+            // Đồng thời xóa sách này khỏi Phiếu mượn nháp đang hoạt động của độc giả (nếu có)
+            const [draftItemsToRemove] = await connection.execute(`
+                SELECT di.id as item_id, di.draft_id
+                FROM borrow_draft_items di
+                JOIN borrow_drafts d ON di.draft_id = d.id
+                WHERE d.user_id = ? AND di.book_id = ? AND d.status = 'pending' AND di.status = 'pending'
+            `, [resv.user_id, resv.book_real_id]);
+
+            for (const ditem of draftItemsToRemove) {
+                await connection.execute('DELETE FROM borrow_draft_items WHERE id = ?', [ditem.item_id]);
+                const [rem] = await connection.execute(
+                    'SELECT COUNT(*) as cnt FROM borrow_draft_items WHERE draft_id = ? AND status = "pending"',
+                    [ditem.draft_id]
+                );
+                if ((rem[0]?.cnt || 0) === 0) {
+                    await connection.execute("UPDATE borrow_drafts SET status = 'cancelled' WHERE id = ?", [ditem.draft_id]);
+                }
+            }
 
             // Nếu phiếu này đang giữ sách ('notified', 'ready', 'accepted'), chuyển lượt cho người tiếp theo hoặc trả sách về kho
             if (['notified', 'ready', 'accepted'].includes(resv.status)) {

@@ -28,6 +28,12 @@ import api from "@/services/api";
 
 interface SearchResults {
   role?: string;
+  didYouMean?: string | null;
+  detectedConcepts?: Array<{
+    id: string;
+    label: string;
+    icon: string;
+  }>;
   books?: Array<{
     id: number;
     title: string;
@@ -37,6 +43,9 @@ interface SearchResults {
     category_name?: string;
     available_copies: number;
     total_copies: number;
+    match_score?: number;
+    match_type?: string;
+    match_badge?: string;
   }>;
   users?: Array<{
     id: number;
@@ -203,9 +212,9 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
     setIsOpen(false);
   };
 
-  const handleSelectBook = (bookId: number) => {
+  const handleSelectBook = (bookTitle?: string) => {
     setIsOpen(false);
-    navigate(`/books?search=${encodeURIComponent(query.trim())}`);
+    navigate(`/books?search=${encodeURIComponent((bookTitle || query).trim())}`);
   };
 
   const handleSelectUser = (u: { id: number; role: string; card_number?: string; email: string }) => {
@@ -342,7 +351,7 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
                         {results.books.map((b) => (
                           <div
                             key={b.id}
-                            onClick={() => handleSelectBook(b.id)}
+                            onClick={() => handleSelectBook(b.title)}
                             className="flex items-center justify-between gap-2 rounded-lg p-2 hover:bg-accent cursor-pointer transition text-left"
                           >
                             <div className="flex items-center gap-2.5 min-w-0">
@@ -448,15 +457,15 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
                     </div>
                   )}
 
-                  {/* KHOẢN PHẠT CỦA TÔI (READER) */}
+                  {/* VI PHẠM & KỶ LUẬT MƯỢN (READER) */}
                   {role === "reader" && results.fines && results.fines.length > 0 && (
                     <div>
                       <div className="flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider border-t border-border/50 pt-2">
                         <CreditCard className="h-3.5 w-3.5 text-amber-500" />
-                        <span>Khoản phạt của tôi ({results.fines.length})</span>
+                        <span>Vi phạm & Kỷ luật mượn ({results.fines.length})</span>
                       </div>
                       <div className="space-y-1 mt-1">
-                        {results.fines.map((f) => (
+                        {results.fines.map((f: any) => (
                           <div
                             key={f.id}
                             onClick={handleSelectFine}
@@ -464,17 +473,27 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
                           >
                             <div className="min-w-0">
                               <p className="text-xs font-semibold text-foreground truncate">
-                                {Number(f.amount).toLocaleString("vi-VN")}đ • {f.book_title || "Phí vi phạm"}
+                                {f.violation_type === "lost"
+                                  ? "Mất sách"
+                                  : f.violation_type === "damaged"
+                                  ? "Hư hỏng sách"
+                                  : "Trễ hạn"} • {f.book_title || "Lưu thông thư viện"}
                               </p>
                               <p className="text-[10px] text-muted-foreground truncate">{f.reason}</p>
                             </div>
                             <Badge
                               variant="outline"
                               className={`text-[9px] capitalize shrink-0 ${
-                                f.status === "unpaid" ? "text-destructive border-destructive/30" : "text-emerald-500 border-emerald-500/30"
+                                f.status === "unpaid" || f.remediation_status === "pending_remediation"
+                                  ? "text-destructive border-destructive/30"
+                                  : "text-emerald-500 border-emerald-500/30"
                               }`}
                             >
-                              {f.status === "unpaid" ? "Chưa nộp" : "Đã thanh toán"}
+                              {f.remediation_status === "pending_remediation"
+                                ? "Chờ khắc phục"
+                                : f.status === "unpaid"
+                                ? "Đang khóa"
+                                : "Đã xử lý"}
                             </Badge>
                           </div>
                         ))}

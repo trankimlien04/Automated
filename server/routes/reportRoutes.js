@@ -9,4 +9,7 @@ router.get('/dashboard', authenticateToken, requireRole(['admin', 'librarian', '
 // Get filtered analytics data (day, week, month, year)
 router.get('/analytics', authenticateToken, requireRole(['admin', 'librarian', 'owner']), reportController.getAnalytics);
 
+// Smart Restock & Demand Forecasting (Dự báo nhu cầu & Cảnh báo nhập sách bằng AI)
+router.get('/demand-forecast', authenticateToken, requireRole(['admin', 'librarian', 'owner']), reportController.getDemandForecast);
+
 module.exports = router;

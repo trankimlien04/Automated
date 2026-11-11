@@ -123,7 +123,14 @@ export default function RecommendationsPage() {
       const catParam = catFilter && catFilter !== "all" ? `&category_id=${catFilter}` : "";
       const response = await api.get(`/recommendations?mode=${mode}&limit=12${catParam}`);
       if (response.data) {
-        setRecs(response.data.recommendations || []);
+        const rawRecs = Array.isArray(response.data.recommendations) ? response.data.recommendations : [];
+        setRecs(
+          rawRecs.map((b: any) => {
+            const total = Math.max(0, Number(b.total_copies) || 0);
+            const avail = Math.min(total, Math.max(0, Number(b.available_copies) || 0));
+            return { ...b, total_copies: total, available_copies: avail };
+          })
+        );
         setUserInsights(response.data.user_insights || null);
 
         // Nếu là độc giả mới (Cold Start) và chưa cấu hình, gợi ý mở modal thiết lập sở thích

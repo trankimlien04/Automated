@@ -2,10 +2,23 @@ const db = require('../config/db');
 const bcrypt = require('bcrypt');
 const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
 const { validateEmail, validatePhone } = require('../utils/validators');
+const { syncOverdueFines, getReaderCirculationStatus } = require('../services/fineSyncService');
 
 exports.getAllUsers = async (req, res) => {
     try {
-        const [users] = await db.execute('SELECT id, full_name, email, role, phone, avatar_url, card_number, card_expiry, status, created_at FROM users ORDER BY id ASC');
+        let query = `
+            SELECT u.id, u.full_name, u.email, u.role, u.phone, u.avatar_url, u.card_number,
+                   u.card_expiry, u.status, u.suspended_until, u.created_at,
+                   (SELECT COUNT(*) FROM borrow_records br WHERE br.user_id = u.id AND br.status = 'borrowing' AND DATE(br.due_date) < CURDATE()) as overdue_count,
+                   (SELECT COUNT(*) FROM fines f WHERE f.user_id = u.id AND (f.remediation_status = 'pending_remediation' OR (f.violation_type IN ('damaged', 'lost') AND f.status = 'unpaid'))) as pending_remediation_count
+            FROM users u
+        `;
+        const params = [];
+        if (req.user && req.user.role === 'librarian') {
+            query += ' WHERE u.role = "reader"';
+        }
+        query += ' ORDER BY u.id ASC';
+        const [users] = await db.execute(query, params);
         res.status(200).json(users);
     } catch (error) {
         console.error('Lỗi khi lấy danh sách người dùng:', error);
@@ -17,13 +30,29 @@ exports.updateUserStatus = async (req, res) => {
     const { status } = req.body;
     const targetUserId = req.params.id;
     try {
+        const [users] = await db.execute('SELECT id, full_name, role, card_number FROM users WHERE id = ?', [targetUserId]);
+        if (users.length === 0) {
+            return res.status(404).json({ message: 'Không tìm thấy người dùng' });
+        }
+        const targetUser = users[0];
+
+        // RBAC enforcement:
+        if (req.user && req.user.role === 'librarian' && targetUser.role !== 'reader') {
+            return res.status(403).json({ message: 'Thủ thư chỉ có quyền quản lý tài khoản của độc giả!' });
+        }
+        if (req.user && req.user.role === 'admin' && targetUser.role === 'owner') {
+            return res.status(403).json({ message: 'Quản trị viên không thể thay đổi trạng thái của Chủ thư viện!' });
+        }
+        if (req.user && Number(targetUser.id) === Number(req.user.id)) {
+            return res.status(400).json({ message: 'Bạn không thể tự khóa tài khoản của chính mình!' });
+        }
+
         if (status === 'active') {
-            const [users] = await db.execute('SELECT id, full_name, role, card_number FROM users WHERE id = ?', [targetUserId]);
-            if (users.length > 0 && users[0].role === 'reader') {
-                const cardNumber = users[0].card_number || ('LIB-RD-' + String(targetUserId).padStart(6, '0'));
+            if (targetUser.role === 'reader') {
+                const cardNumber = targetUser.card_number || ('LIB-RD-' + String(targetUserId).padStart(6, '0'));
                 const expiryDate = new Date();
                 expiryDate.setFullYear(expiryDate.getFullYear() + 4);
-                
+
                 await db.execute(
                     'UPDATE users SET status = ?, card_number = ?, card_expiry = ? WHERE id = ?',
                     [status, cardNumber, expiryDate.toISOString().slice(0, 10), targetUserId]
@@ -42,12 +71,12 @@ exports.updateUserStatus = async (req, res) => {
                 // Notify all staff
                 await notifyAllStaff(
                     'Kích hoạt thẻ thư viện độc giả',
-                    `Độc giả ${users[0].full_name} đã được phê duyệt tài khoản và cấp mã thẻ ${cardNumber}.`,
+                    `Độc giả ${targetUser.full_name} đã được phê duyệt tài khoản và cấp mã thẻ ${cardNumber}.`,
                     'info'
                 );
 
                 return res.status(200).json({ message: 'Phê duyệt tài khoản và cấp thẻ thư viện thành công', cardNumber });
-            } else if (users.length > 0) {
+            } else {
                 await db.execute('UPDATE users SET status = ? WHERE id = ?', [status, targetUserId]);
                 await db.execute(
                     'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
@@ -108,7 +137,7 @@ exports.getMyProfile = async (req, res) => {
     const userId = req.user.id;
     try {
         const [users] = await db.execute(
-            'SELECT id, full_name, email, role, phone, avatar_url, card_number, card_expiry, status, created_at FROM users WHERE id = ?',
+            'SELECT id, full_name, email, role, phone, avatar_url, card_number, card_expiry, status, suspended_until, created_at FROM users WHERE id = ?',
             [userId]
         );
 
@@ -120,6 +149,9 @@ exports.getMyProfile = async (req, res) => {
         let stats = {};
 
         if (user.role === 'reader') {
+            await syncOverdueFines(userId);
+            const circulationStatus = await getReaderCirculationStatus(userId);
+
             // Thống kê dành cho Độc giả
             const [borrowing] = await db.execute(
                 'SELECT COUNT(*) as count FROM borrow_records WHERE user_id = ? AND status = "borrowing"',
@@ -129,20 +161,33 @@ exports.getMyProfile = async (req, res) => {
                 'SELECT COUNT(*) as count FROM borrow_records WHERE user_id = ?',
                 [userId]
             );
-            const [unpaidFines] = await db.execute(
-                'SELECT COALESCE(SUM(amount), 0) as total FROM fines WHERE user_id = ? AND status = "unpaid"',
-                [userId]
-            );
             const [reservations] = await db.execute(
-                'SELECT COUNT(*) as count FROM reservations WHERE user_id = ? AND status IN ("pending", "ready")',
+                'SELECT COUNT(*) as count FROM reservations WHERE user_id = ? AND status IN ("waiting", "pending", "notified", "ready", "accepted")',
                 [userId]
             );
 
             stats = {
                 currentlyBorrowing: borrowing[0].count,
                 totalBorrowed: totalBorrowed[0].count,
-                unpaidFines: Number(unpaidFines[0].total),
+                unpaidFines: 0,
                 activeReservations: reservations[0].count,
+                circulationStatus: circulationStatus
+                    ? {
+                        primaryStatus: circulationStatus.primaryStatus,
+                        restrictions: circulationStatus.restrictions,
+                        isOverdue: circulationStatus.isOverdue,
+                        overdueCount: circulationStatus.overdueCount,
+                        isSuspended: circulationStatus.isSuspended,
+                        suspendedUntil: circulationStatus.suspendedUntil,
+                        suspendedUntilFormatted: circulationStatus.suspendedUntilFormatted,
+                        suspensionRemainingDays: circulationStatus.suspensionRemainingDays,
+                        isPendingRemediation: circulationStatus.isPendingRemediation,
+                        pendingRemediationCount: circulationStatus.pendingRemediationCount,
+                        eligibleToBorrow: circulationStatus.eligibleToBorrow,
+                        eligibleToReserve: circulationStatus.eligibleToReserve,
+                        blockReason: circulationStatus.blockReason
+                    }
+                    : null
             };
         } else if (user.role === 'librarian') {
             // Thống kê dành cho Thủ thư
@@ -277,6 +322,11 @@ exports.createUser = async (req, res) => {
             return res.status(400).json({ message: 'Vui lòng cung cấp đầy đủ họ tên, email, mật khẩu và vai trò' });
         }
 
+        // RBAC enforcement: Admin cannot create Owner account
+        if (req.user && req.user.role === 'admin' && role === 'owner') {
+            return res.status(403).json({ message: 'Quản trị viên không có quyền tạo tài khoản Chủ thư viện / Giám đốc!' });
+        }
+
         const emailCheck = validateEmail(email);
         if (!emailCheck.isValid) {
             return res.status(400).json({ message: emailCheck.message });
@@ -296,7 +346,7 @@ exports.createUser = async (req, res) => {
         }
 
         const hashedPassword = await bcrypt.hash(password, 10);
-        
+
         let cardExpiry = null;
         if (role === 'reader') {
             const expiryDate = new Date();

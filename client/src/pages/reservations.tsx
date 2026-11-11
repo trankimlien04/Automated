@@ -67,14 +67,28 @@ interface Reservation {
   expires_at?: string;
   queue_position?: number;
   time_left_hours?: number;
+  wait_prediction?: {
+    estimated_wait_days: number;
+    expected_available_date: string;
+    expected_date_vn: string;
+    earliest_due_date: string;
+    earliest_due_date_vn: string;
+    waiting_ahead_count: number;
+    queue_position: number;
+    active_borrowed_count: number;
+    summary_text: string;
+  } | null;
+  draft_id?: number | null;
+  draft_code?: string | null;
+  copy_qr_code?: string | null;
 }
 
 const statusMap: Record<string, { label: string; cls: string; desc: string }> = {
   waiting: { label: "Đang chờ sách về kho", cls: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30", desc: "Xếp hàng đợi khi có sách trả về" },
   pending: { label: "Đang chờ sách về kho", cls: "bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30", desc: "Xếp hàng đợi khi có sách trả về" },
   notified: { label: "Chờ độc giả xác nhận", cls: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30 animate-pulse font-semibold", desc: "Sách đã về kho, giữ ưu tiên 48h" },
-  accepted: { label: "Đã xác nhận • Giữ tại quầy", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold", desc: "Độc giả đã đồng ý mượn, sách chờ tại quầy" },
-  ready: { label: "Sẵn sàng nhận tại quầy", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold", desc: "Sách đang giữ sẵn sàng tại quầy" },
+  accepted: { label: "Đã tạo Phiếu nháp 24h • Chờ quét tại kệ", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold", desc: "Đã tạo Phiếu mượn nháp 24h, chờ độc giả đến kệ quét sách & ra quầy duyệt" },
+  ready: { label: "Đã tạo Phiếu nháp 24h • Chờ quét tại kệ", cls: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 font-semibold", desc: "Đã tạo Phiếu mượn nháp 24h, chờ độc giả đến kệ quét sách & ra quầy duyệt" },
   completed: { label: "Đã giao sách", cls: "bg-muted text-muted-foreground border-muted-foreground/20", desc: "Thủ thư đã trao sách cho độc giả" },
   cancelled: { label: "Đã hủy / Nhường lượt", cls: "bg-destructive/10 text-destructive border-destructive/20", desc: "Phiếu đặt trước đã hủy" },
   expired: { label: "Đã hết hạn", cls: "bg-muted text-muted-foreground border-muted-foreground/20", desc: "Quá 48h chưa xác nhận" },
@@ -353,16 +367,45 @@ export default function ReservationsPage() {
   const handleRespondReservation = (id: number, action: "accept" | "decline", bookTitle: string) => {
     if (action === "accept") {
       confirm({
-        title: "Xác nhận đồng ý mượn cuốn sách này?",
-        description: `Bạn đồng ý mượn cuốn sách "${bookTitle}". Sách sẽ được giữ riêng tại quầy thủ thư cho bạn. Bạn chỉ cần tới quầy xuất trình Thẻ độc giả (mã QR cá nhân) để nhận sách.`,
-        confirmText: "Đồng ý mượn & Giữ sách",
+        title: "Đồng ý mượn & Tạo Phiếu mượn nháp (Giữ chỗ 24h)?",
+        description: (
+          <div className="space-y-3 text-left mt-1">
+            <p className="text-xs text-muted-foreground">
+              Khi bấm xác nhận, cuốn sách <strong className="text-foreground">«{bookTitle}»</strong> sẽ được quy về luồng <strong>Phiếu mượn nháp 24h</strong> giống hệt Đăng ký mượn online:
+            </p>
+            <div className="space-y-2 text-xs">
+              <div className="flex items-start gap-2.5 p-2 rounded-lg bg-indigo-50/70 dark:bg-indigo-950/30 border border-indigo-200/70 dark:border-indigo-800/40">
+                <span className="h-5 w-5 rounded-full bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
+                <div>
+                  <p className="font-semibold text-indigo-950 dark:text-indigo-200">Tạo Phiếu mượn nháp & Khóa giữ chỗ 1 bản sao (24h)</p>
+                  <p className="text-[11px] text-muted-foreground">Hệ thống tự động khóa giữ riêng 1 suất bản sao trên kệ trong 24 giờ và sinh mã <strong>Phiếu mượn nháp</strong> cho bạn.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-2.5 p-2 rounded-lg bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/70 dark:border-amber-800/40">
+                <span className="h-5 w-5 rounded-full bg-amber-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
+                <div>
+                  <p className="font-semibold text-amber-950 dark:text-amber-200">Đến kệ tự lấy sách & Quét Tem Sách Tại Kệ</p>
+                  <p className="text-[11px] text-muted-foreground">Bạn đến đúng vị trí kệ lấy sách và bấm <strong>"Quét Tem Sách Tại Kệ"</strong> để ghi nhận mã QR bản sao vào phiếu nháp.</p>
+                </div>
+              </div>
+              <div className="flex items-start gap-2.5 p-2 rounded-lg bg-emerald-50/70 dark:bg-emerald-950/30 border border-emerald-200/70 dark:border-emerald-800/40">
+                <span className="h-5 w-5 rounded-full bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
+                <div>
+                  <p className="font-semibold text-emerald-950 dark:text-emerald-200">Tới quầy Thủ thư quét duyệt mượn</p>
+                  <p className="text-[11px] text-muted-foreground">Đưa mã <strong>Phiếu mượn nháp</strong> hoặc <strong>Thẻ độc giả</strong> để Thủ thư quét đối soát chuyển sang <strong>Phiếu mượn chính thức</strong>.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        ),
+        confirmText: "Đồng ý & Tạo Phiếu nháp 24h",
         cancelText: "Trở lại",
         variant: "default",
         onConfirm: async () => {
           try {
             const res = await api.post(`/reservations/${id}/respond`, { action: "accept" });
-            toast.success(res.data.message || "Đã xác nhận mượn sách thành công! Vui lòng tới quầy nhận sách.");
-            fetchReservations();
+            toast.success(res.data.message || "Đã tạo Phiếu mượn nháp & khóa giữ chỗ 1 bản sao 24h!");
+            await fetchReservations();
           } catch (error: any) {
             console.error("Lỗi khi xác nhận:", error);
             toast.error(error.response?.data?.message || "Không thể xác nhận mượn sách");
@@ -494,8 +537,8 @@ export default function ReservationsPage() {
                 <span>Khi sách có người trả về, hệ thống giữ sách ưu tiên và hỏi bạn có muốn mượn không.</span>
               </div>
               <div className="flex items-start gap-2">
-                <span className="font-bold text-emerald-600 dark:text-emerald-400 shrink-0">3. Nhận tại quầy:</span>
-                <span>Bạn bấm <strong>[Đồng ý mượn]</strong> và đến thư viện lấy sách đem đến quầy đưa Thẻ độc giả + mã sách để thủ thư quét xác nhận giao sách.</span>
+                <span className="font-bold text-emerald-600 dark:text-emerald-400 shrink-0">3. Phiếu nháp 24h & Quét tại kệ:</span>
+                <span>Khi bấm <strong>[Đồng ý mượn]</strong>, hệ thống tự động tạo <strong>Phiếu mượn nháp & khóa giữ chỗ 1 bản sao (24h)</strong>. Bạn đến kệ lấy sách, quét tem sách tại kệ rồi tới quầy Thủ thư quét duyệt mượn!</span>
               </div>
             </div>
           </div>
@@ -514,7 +557,7 @@ export default function ReservationsPage() {
                         🎉 Sách Bạn Đặt Trước Đã Có Mặt Tại Thư Viện! ({readerNotifiedList.length})
                       </CardTitle>
                       <CardDescription className="text-xs text-amber-700/80 dark:text-amber-400/80">
-                        Đầu sách đã được hoàn trả về kho và đang ưu tiên giữ riêng cho bạn trong 48 giờ. Vui lòng xác nhận bạn có muốn mượn không.
+                        Đầu sách đã được hoàn trả về kho và đang ưu tiên giữ riêng cho bạn trong 48 giờ. Bấm <strong>[Đồng ý mượn & Tạo Phiếu nháp 24h]</strong> để khóa giữ bản sao và đến kệ lấy sách!
                       </CardDescription>
                     </div>
                   </div>
@@ -554,12 +597,12 @@ export default function ReservationsPage() {
                           </span>
                         </div>
                         <div className="flex items-center gap-1.5 text-xs text-muted-foreground font-mono mt-1">
-                          <span>📍 Vị trí trong thư viện:</span>
+                          <span>📍 Vị trí kệ trong thư viện:</span>
                           <span className="font-semibold text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
                           <button
                             type="button"
                             onClick={() => handleOpenMiniMap({ location: resv.book_location || resv.location, title: resv.book_title, cover_image: resv.cover_image })}
-                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5"
+                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5 cursor-pointer"
                             title="Xem sơ đồ chỉ đường"
                           >
                             🗺️ Sơ đồ
@@ -573,16 +616,16 @@ export default function ReservationsPage() {
                       <Button
                         size="sm"
                         onClick={() => handleRespondReservation(resv.id, "accept", resv.book_title)}
-                        className="h-8 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-xs"
+                        className="h-8 text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-xs cursor-pointer"
                       >
                         <ThumbsUp className="h-3.5 w-3.5" />
-                        <span>Đồng ý mượn & Giữ sách</span>
+                        <span>Đồng ý mượn & Tạo Phiếu nháp 24h</span>
                       </Button>
                       <Button
                         size="sm"
                         variant="outline"
                         onClick={() => handleRespondReservation(resv.id, "decline", resv.book_title)}
-                        className="h-8 text-xs gap-1.5 text-muted-foreground hover:text-destructive hover:border-destructive/30"
+                        className="h-8 text-xs gap-1.5 text-muted-foreground hover:text-destructive hover:border-destructive/30 cursor-pointer"
                       >
                         <RotateCcw className="h-3.5 w-3.5" />
                         <span>Không mượn / Nhường lượt</span>
@@ -594,23 +637,23 @@ export default function ReservationsPage() {
             </Card>
           )}
 
-          {/* KHU VỰC 2: SÁCH ĐÃ XÁC NHẬN - SẴN SÀNG NHẬN TẠI QUẦY (ACCEPTED / READY) */}
+          {/* KHU VỰC 2: ĐÃ TẠO PHIẾU MƯỢN NHÁP & KHÓA GIỮ CHỖ 1 BẢN SAO (24H) (ACCEPTED / READY) */}
           {readerReadyList.length > 0 && (
             <Card className="border-emerald-500/40 bg-emerald-500/[0.03] shadow-xs">
               <CardHeader className="pb-3 border-b border-emerald-500/20">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="h-5 w-5 text-emerald-600" />
                     <div>
                       <CardTitle className="font-display text-base text-emerald-800 dark:text-emerald-300">
-                        Sách Đã Xác Nhận - Sẵn Sàng Nhận Tại Quầy ({readerReadyList.length})
+                        Đã Tạo Phiếu Mượn Nháp & Khóa Giữ Chỗ 1 Bản Sao 24h ({readerReadyList.length})
                       </CardTitle>
                       <CardDescription className="text-xs">
-                        Sách đang được giữ riêng tại quầy thủ thư. Bạn không cần tìm trên kệ, chỉ cần đến quầy xuất trình Thẻ độc giả.
+                        Sách đã được chuyển vào <strong>Phiếu mượn nháp (24h)</strong> của bạn (giống Đăng ký mượn online). Hãy đến đúng vị trí kệ lấy sách, bấm <strong>"Quét Tem Sách Tại Kệ"</strong> rồi tới quầy để Thủ thư quét duyệt mượn!
                       </CardDescription>
                     </div>
                   </div>
-                  <Badge className="bg-emerald-600 text-white text-[10px]">Giữ tại quầy</Badge>
+                  <Badge className="bg-emerald-600 text-white text-[10px]">Đã khóa giữ chỗ 24h</Badge>
                 </div>
               </CardHeader>
               <CardContent className="p-4 space-y-3">
@@ -630,22 +673,41 @@ export default function ReservationsPage() {
                         )}
                       </div>
                       <div className="space-y-1">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <h4 className="font-bold text-xs text-foreground">{resv.book_title}</h4>
-                          <Badge variant="outline" className="text-[9px] bg-emerald-50 text-emerald-700 border-emerald-300">
-                            Đã giữ sách
-                          </Badge>
+                          {resv.draft_code && (
+                            <Badge className="text-[10px] font-mono bg-indigo-600 text-white">
+                              Phiếu nháp: {resv.draft_code}
+                            </Badge>
+                          )}
+                          {resv.copy_qr_code ? (
+                            <Badge className="text-[10px] font-mono bg-emerald-600 text-white">
+                              ✓ Đã quét tại kệ: {resv.copy_qr_code}
+                            </Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[9px] bg-amber-50 text-amber-800 border-amber-300 font-semibold">
+                              🔒 Đã khóa giữ chỗ 1 bản sao (24h) • Chờ quét tại kệ
+                            </Badge>
+                          )}
                         </div>
                         <p className="text-[11px] text-muted-foreground">
-                          Thủ thư đang giữ sẵn ấn phẩm này tại quầy lưu thông. Khi đến nhận, bạn chỉ cần mở mục <strong>Mượn / Trả qua QR</strong> để đưa Thẻ độc giả QR.
+                          {resv.copy_qr_code ? (
+                            <span>
+                              Bạn đã quét tem bản sao <strong>{resv.copy_qr_code}</strong> tại kệ. Hãy mang sách ra quầy đưa <strong>Mã Phiếu mượn nháp ({resv.draft_code})</strong> hoặc <strong>Thẻ độc giả</strong> để Thủ thư quét duyệt mượn!
+                            </span>
+                          ) : (
+                            <span>
+                              <strong>Bước 2:</strong> Đến kệ sách bên dưới tự lấy 1 bản sao và bấm <strong>"Quét Tem Sách Tại Kệ"</strong>, sau đó mang ra quầy để Thủ thư quét duyệt mượn.
+                            </span>
+                          )}
                         </p>
                         <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground font-mono mt-1">
-                          <span>📍 Vị trí lưu kho gốc:</span>
+                          <span>📍 Vị trí kệ lấy sách:</span>
                           <span className="font-semibold text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
                           <button
                             type="button"
                             onClick={() => handleOpenMiniMap({ location: resv.book_location || resv.location, title: resv.book_title, cover_image: resv.cover_image })}
-                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5"
+                            className="text-[10px] text-primary hover:underline font-bold ml-1 flex items-center gap-0.5 cursor-pointer"
                             title="Xem sơ đồ chỉ đường"
                           >
                             🗺️ Sơ đồ
@@ -654,20 +716,30 @@ export default function ReservationsPage() {
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0 pt-2 md:pt-0 border-t md:border-t-0">
+                    <div className="flex items-center gap-2 shrink-0 pt-2 md:pt-0 border-t md:border-t-0 flex-wrap">
+                      {!resv.copy_qr_code && (
+                        <Button
+                          size="sm"
+                          onClick={() => navigate("/borrow?scan=shelf")}
+                          className="h-8 text-xs gap-1.5 bg-amber-600 hover:bg-amber-700 text-white font-semibold cursor-pointer"
+                        >
+                          <Camera className="h-3.5 w-3.5" />
+                          <span>Quét Tem Sách Tại Kệ</span>
+                        </Button>
+                      )}
                       <Button
                         size="sm"
                         onClick={() => navigate("/borrow")}
-                        className="h-8 text-xs gap-1.5 bg-primary hover:bg-primary/90 text-primary-foreground font-semibold"
+                        className="h-8 text-xs gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white font-semibold cursor-pointer"
                       >
                         <QrCode className="h-3.5 w-3.5" />
-                        <span>Mở Thẻ QR Độc Giả</span>
+                        <span>Xem Phiếu Mượn Nháp</span>
                       </Button>
                       <Button
                         size="sm"
                         variant="ghost"
                         onClick={() => handleCancel(resv.id, resv.book_title)}
-                        className="h-8 text-xs text-destructive hover:bg-destructive/10"
+                        className="h-8 text-xs text-destructive hover:bg-destructive/10 cursor-pointer"
                         title="Hủy không nhận sách này nữa"
                       >
                         <X className="h-3.5 w-3.5 mr-0.5" /> Hủy giữ
@@ -739,9 +811,23 @@ export default function ReservationsPage() {
                               Đăng ký: {new Date(resv.reservation_date).toLocaleDateString("vi-VN")}
                             </span>
                           </div>
-                          <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">
-                            Sách hiện đang được độc giả khác mượn. Khi có người trả sách về thư viện, hệ thống sẽ ưu tiên gửi thông báo cho bạn.
-                          </p>
+                          {resv.wait_prediction ? (
+                            <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2 text-[11px] space-y-0.5 mt-1">
+                              <p className="font-bold text-amber-800 dark:text-amber-300 flex items-center gap-1">
+                                <Clock className="h-3 w-3 text-amber-600 shrink-0" />
+                                <span>
+                                  Dự kiến có sách sau ~{resv.wait_prediction.estimated_wait_days} ngày nữa ({resv.wait_prediction.expected_date_vn})
+                                </span>
+                              </p>
+                              <p className="text-[10px] text-amber-900/85 dark:text-amber-200/85 leading-snug">
+                                Bản sao sớm nhất sẽ hoàn trả vào <strong>{resv.wait_prediction.earliest_due_date_vn}</strong> • Bạn đứng thứ <strong>#{resv.wait_prediction.queue_position}</strong> trong hàng chờ
+                              </p>
+                            </div>
+                          ) : (
+                            <p className="text-[10px] text-muted-foreground leading-relaxed mt-1">
+                              Sách hiện đang được độc giả khác mượn. Khi có người trả sách về thư viện, hệ thống sẽ ưu tiên gửi thông báo cho bạn.
+                            </p>
+                          )}
                           <div className="flex items-center gap-1 text-[10px] text-muted-foreground font-mono mt-1">
                             <span>📍 Vị trí kệ:</span>
                             <span className="font-medium text-foreground">{resv.book_location || resv.location || 'Phòng 01 - Kệ 01 - Ngăn 01'}</span>
@@ -998,9 +1084,16 @@ export default function ReservationsPage() {
                             })}
                           </div>
                           {["waiting", "pending"].includes(r.status) && (
-                            <Badge variant="outline" className="text-[9px] mt-0.5 bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20">
-                              Hàng đợi #{r.queue_position || 1}
-                            </Badge>
+                            <div className="space-y-0.5 mt-0.5">
+                              <Badge variant="outline" className="text-[9px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20">
+                                Hàng đợi #{r.queue_position || 1}
+                              </Badge>
+                              {r.wait_prediction && (
+                                <span className="block text-[10px] font-medium text-amber-700 dark:text-amber-300">
+                                  ⏳ Dự kiến: ~{r.wait_prediction.estimated_wait_days} ngày ({r.wait_prediction.expected_date_vn})
+                                </span>
+                              )}
+                            </div>
                           )}
                           {r.status === "notified" && (
                             <span className="text-[10px] text-blue-600 dark:text-blue-400 font-semibold block mt-0.5">

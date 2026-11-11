@@ -8,46 +8,33 @@ function initCronJobs() {
     // Immediately run overdue fine sync on startup
     syncOverdueFines().catch(err => console.error('Initial fine sync error:', err));
 
-    // Run every day at 00:00 AM to calculate fines and lock severely overdue accounts
+    // Run every day at 00:00 AM to sync overdue discipline records and send reminders
     cron.schedule('0 0 * * *', async () => {
-        console.log('🔄 [CRON JOB] Running daily midnight maintenance (Fines & Account locking)...');
+        console.log('🔄 [CRON JOB] Running daily midnight discipline sync...');
         try {
-            // 1. Sync all overdue fines using standard normalized calendar calculation
+            // 1. Sync all overdue violations using normalized calendar calculation
             await syncOverdueFines();
 
-            // 2. Find all unreturned records that are past due_date to check for auto-lock
+            // 2. Find unreturned overdue records to alert readers and staff
             const [overdueRecords] = await db.execute(`
                 SELECT br.*, u.id as u_id, u.full_name, u.status as user_status, b.title
                 FROM borrow_records br
                 JOIN users u ON br.user_id = u.id
                 JOIN book_copies bc ON br.book_copy_id = bc.id
                 JOIN books b ON bc.book_id = b.id
-                WHERE br.status = 'borrowing' AND br.due_date < NOW()
+                WHERE br.status = 'borrowing' AND DATE(br.due_date) < CURDATE()
             `);
 
             for (const record of overdueRecords) {
                 const { overdueDays } = calculateOverdue(record.due_date);
 
-                // Auto lock account if overdue by 7 days or more (UC24)
-                if (overdueDays >= 7 && record.user_status !== 'locked') {
-                    await db.execute('UPDATE users SET status = "locked" WHERE id = ?', [record.u_id]);
+                // Case 1 (OVERDUE) blocks borrow & reserve automatically via getReaderCirculationStatus without changing account status
+                if (overdueDays > 0 && overdueDays % 3 === 1) {
                     await db.execute('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")', [
                         record.u_id,
-                        'Tài khoản đã bị khóa tự động',
-                        `Tài khoản của bạn đã bị khóa do mượn sách "${record.title}" quá hạn ${overdueDays} ngày. Vui lòng liên hệ thủ thư.`
+                        'Nhắc trả sách quá hạn — Quyền mượn tạm khóa',
+                        `Sách "${record.title}" đã quá hạn ${overdueDays} ngày. Quyền mượn & đặt trước sách hiện đang tạm khóa cho đến khi bạn hoàn trả đầy đủ sách quá hạn.`
                     ]);
-                    await db.execute('INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (NULL, "AUTO_LOCK", "users", ?, ?)', [
-                        record.u_id,
-                        `Tự động khóa tài khoản độc giả ${record.full_name} do trễ hạn ${overdueDays} ngày`
-                    ]);
-
-                    // Also notify all staff
-                    const { notifyAllStaff } = require('./notificationService');
-                    await notifyAllStaff(
-                        'Độc giả bị khóa tài khoản do quá hạn',
-                        `Tài khoản của độc giả ${record.full_name} đã bị khóa tự động do mượn sách "${record.title}" quá hạn ${overdueDays} ngày.`,
-                        'warning'
-                    );
                 }
             }
 
@@ -55,7 +42,7 @@ function initCronJobs() {
                 const { notifyAllStaff } = require('./notificationService');
                 await notifyAllStaff(
                     'Báo cáo tự động: Sách mượn quá hạn',
-                    `Hệ thống phát hiện ${overdueRecords.length} lượt mượn quá hạn cần theo dõi thu hồi và xử lý phạt.`,
+                    `Hệ thống ghi nhận ${overdueRecords.length} lượt mượn đang quá hạn chưa trả cần theo dõi đôn đốc thu hồi tài liệu.`,
                     'warning'
                 );
             }

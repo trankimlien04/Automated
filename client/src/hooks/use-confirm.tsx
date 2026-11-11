@@ -1,9 +1,9 @@
-import { useState } from "react";
+import React, { useState } from "react";
 import { ConfirmModal } from "@/components/confirm-modal";
 
 export interface ConfirmOptions {
   title: string;
-  description: string;
+  description: React.ReactNode;
   confirmText?: string;
   cancelText?: string;
   variant?: "default" | "destructive" | "warning";

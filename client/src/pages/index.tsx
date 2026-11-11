@@ -7,7 +7,7 @@ import { Progress } from "@/components/ui/progress";
 import {
   BookOpen, Users, ArrowRightLeft, AlertTriangle, TrendingUp, Sparkles,
   ArrowUpRight, ArrowDownRight, QrCode, Clock, BookMarked, Wallet, Award,
-  Shield, BarChart3, Crown
+  Shield, BarChart3, Crown, RefreshCw, Activity, ShieldCheck, Zap
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -16,6 +16,7 @@ import {
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
+import { SmartDemandForecastPanel } from "@/components/smart-demand-forecast-panel";
 
 interface DashboardData {
   stats: {
@@ -25,6 +26,8 @@ interface DashboardData {
     currentlyBorrowing: number;
     activeReservations: number;
     overdueCount: number;
+    suspendedReadersCount?: number;
+    pendingRemediationCount?: number;
     unpaidFinesSum: number;
   };
   popularBooks: Array<{ id: number; title: string; author_name: string; borrow_count: number }>;
@@ -34,6 +37,9 @@ interface DashboardData {
     id: number;
     amount: number;
     reason: string;
+    violation_type?: string;
+    severity?: string;
+    remediation_status?: string;
     created_at: string;
     user_id: number;
     reader_name: string;
@@ -60,6 +66,21 @@ export default function Dashboard() {
   const [readerHistory, setReaderHistory] = useState<any[]>([]);
   const [readerFines, setReaderFines] = useState<any[]>([]);
   const [readerReservations, setReaderReservations] = useState<any[]>([]);
+  const [readerCirculationStatus, setReaderCirculationStatus] = useState<any>(null);
+  const [renewingId, setRenewingId] = useState<number | null>(null);
+
+  const handleQuickRenewDashboard = async (borrowRecordId: number) => {
+    setRenewingId(borrowRecordId);
+    try {
+      const res = await api.post("/borrow/renew", { borrowRecordId });
+      toast.success(res.data?.message || "Gia hạn nhanh +7 ngày thành công!");
+      await fetchReaderData();
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || "Không thể gia hạn cuốn sách này");
+    } finally {
+      setRenewingId(null);
+    }
+  };
 
   const fetchLibrarianStats = async () => {
     try {
@@ -75,14 +96,18 @@ export default function Dashboard() {
 
   const fetchReaderData = async () => {
     try {
-      const [historyRes, finesRes, resRes] = await Promise.all([
+      const [historyRes, finesRes, resRes, statusRes] = await Promise.all([
         api.get("/borrow/records"),
         api.get("/fines"),
-        api.get("/reservations")
+        api.get("/reservations"),
+        api.get("/fines/circulation-status").catch(() => null)
       ]);
       setReaderHistory(historyRes.data);
       setReaderFines(finesRes.data);
       setReaderReservations(resRes.data);
+      if (statusRes?.data) {
+        setReaderCirculationStatus(statusRes.data);
+      }
     } catch (error) {
       console.error("Lỗi khi tải thông tin độc giả:", error);
     } finally {
@@ -112,7 +137,7 @@ export default function Dashboard() {
   // Render LIBRARIAN / ADMIN / OWNER dashboard
   if (isStaffOrOwner && data) {
     const { stats, popularBooks, borrowTrends, recentTransactions } = data;
-    
+
     return (
       <div className="space-y-6">
         {/* Hero strip */}
@@ -120,15 +145,26 @@ export default function Dashboard() {
           <CardContent className="flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between">
             <div>
               <Badge className="bg-primary-foreground/15 text-primary-foreground hover:bg-primary-foreground/20 border-0">
-                <Sparkles className="mr-1 h-3 w-3 animate-pulse" /> {isOwner ? "👑 Trung tâm Điều hành Giám đốc" : "Hôm nay, " + new Date().toLocaleDateString("vi-VN")}
+                <Sparkles className="mr-1 h-3 w-3 animate-pulse" />
+                {isOwner
+                  ? "👑 Trung tâm Điều hành Giám đốc"
+                  : user?.role === "admin"
+                    ? "🛡️ Quản trị IT & An ninh Hệ thống"
+                    : "📖 Nghiệp vụ Bàn Lưu thông Thủ thư"}
               </Badge>
               <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight md:text-4xl">
-                {isOwner ? `${getTimeBasedGreeting()}, Giám đốc ${user?.fullName}` : `${getTimeBasedGreeting()}, ${user?.fullName}.`}
+                {isOwner
+                  ? `${getTimeBasedGreeting()}, Giám đốc ${user?.fullName}`
+                  : user?.role === "admin"
+                    ? `${getTimeBasedGreeting()}, Quản trị viên ${user?.fullName}`
+                    : `${getTimeBasedGreeting()}, Thủ thư ${user?.fullName}`}
               </h2>
               <p className="mt-1 max-w-xl text-sm text-primary-foreground/80">
-                {isOwner 
-                  ? `Tổng quan toàn diện: ${stats.totalCopies} cuốn sách, ${stats.activeReaders} độc giả, ${stats.currentlyBorrowing} lượt đang lưu thông và ${Number(stats.unpaidFinesSum || 0).toLocaleString("vi-VN")}đ nợ phạt cần kiểm soát.`
-                  : `Hệ thống ghi nhận đang có ${stats.currentlyBorrowing} lượt mượn sách hoạt động và ${stats.overdueCount} lượt bị quá hạn cần nhắc nhở.`}
+                {isOwner
+                  ? `Tổng quan toàn diện: ${stats.totalCopies} cuốn sách, ${stats.activeReaders} độc giả, ${stats.currentlyBorrowing} lượt đang lưu thông, ${stats.overdueCount} quá hạn, ${stats.suspendedReadersCount || 0} thẻ tạm ngưng và ${stats.pendingRemediationCount || 0} sách chờ khắc phục.`
+                  : user?.role === "admin"
+                    ? `Hạ tầng IT vận hành ổn định: ${stats.totalBooks} đầu sách (${stats.totalCopies} bản sao), ${stats.activeReaders} tài khoản độc giả và toàn bộ nhật ký audit được ghi nhận an toàn.`
+                    : `Bàn lưu thông hôm nay ghi nhận đang có ${stats.currentlyBorrowing} lượt mượn sách hoạt động, ${stats.overdueCount} lượt quá hạn và ${stats.pendingRemediationCount || 0} hồ sơ chờ khắc phục.`}
               </p>
             </div>
             <div className="flex flex-wrap gap-2">
@@ -141,10 +177,24 @@ export default function Dashboard() {
                     <BarChart3 className="h-4 w-4" /> Báo cáo quản trị
                   </Button>
                 </>
+              ) : user?.role === "admin" ? (
+                <>
+                  <Button size="lg" variant="secondary" onClick={() => navigate("/accounts")} className="gap-2 shadow-sm font-semibold">
+                    <ShieldCheck className="h-4 w-4" /> Quản lý tài khoản
+                  </Button>
+                  <Button size="lg" variant="outline" onClick={() => navigate("/activity-logs")} className="gap-2 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/20 border-primary-foreground/30">
+                    <Activity className="h-4 w-4" /> Nhật ký an ninh (Audit)
+                  </Button>
+                </>
               ) : (
-                <Button size="lg" variant="secondary" onClick={() => navigate("/borrow")} className="gap-2 shadow-sm">
-                  <QrCode className="h-4 w-4" /> Quét QR mượn / trả
-                </Button>
+                <>
+                  <Button size="lg" variant="secondary" onClick={() => navigate("/borrow")} className="gap-2 shadow-sm font-semibold">
+                    <Zap className="h-4 w-4" /> Quầy Đa Năng Mượn / Trả
+                  </Button>
+                  <Button size="lg" variant="outline" onClick={() => navigate("/books")} className="gap-2 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/20 border-primary-foreground/30">
+                    <BookOpen className="h-4 w-4" /> Kho Sách & Mã QR
+                  </Button>
+                </>
               )}
             </div>
           </CardContent>
@@ -175,6 +225,9 @@ export default function Dashboard() {
             </Card>
           ))}
         </div>
+
+        {/* Dự Báo Nhu Cầu & Cảnh Báo Nhập Sách Bằng AI (Smart Restock & Demand Forecasting) */}
+        <SmartDemandForecastPanel />
 
         {/* Charts & Popular */}
         <div className="grid gap-6 lg:grid-cols-3">
@@ -215,59 +268,69 @@ export default function Dashboard() {
             <CardHeader className="pb-2">
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle className="font-display text-base">Phí phạt tồn đọng</CardTitle>
+                  <CardTitle className="font-display text-base">Vi phạm & Chờ khắc phục</CardTitle>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    Tổng nợ: <strong className="text-destructive font-bold">{(Number(stats.unpaidFinesSum) || 0).toLocaleString("vi-VN")}đ</strong>
+                    Quá hạn: <strong className="text-destructive font-bold">{stats.overdueCount || 0}</strong> • Đình chỉ:{" "}
+                    <strong className="text-amber-600 font-bold">{stats.suspendedReadersCount || 0}</strong> • Chờ khắc phục:{" "}
+                    <strong className="text-orange-600 font-bold">{stats.pendingRemediationCount || 0}</strong>
                   </p>
                 </div>
-                <Button 
-                  variant="ghost" 
-                  size="sm" 
-                  onClick={() => navigate("/fines")} 
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => navigate("/fines")}
                   className="text-xs h-7 text-primary hover:text-primary gap-1 px-2"
                 >
-                  Sổ phạt <ArrowUpRight className="h-3.5 w-3.5" />
+                  Sổ kỷ luật <ArrowUpRight className="h-3.5 w-3.5" />
                 </Button>
               </div>
             </CardHeader>
             <CardContent className="flex-1 flex flex-col justify-between pt-1 pb-4">
               {!data.unpaidFinesList || data.unpaidFinesList.length === 0 ? (
                 <div className="py-12 text-center text-xs text-muted-foreground">
-                  <Wallet className="h-8 w-8 text-muted-foreground/30 mx-auto mb-1.5" />
-                  <p>Không có khoản nợ phạt nào đang tồn đọng</p>
+                  <AlertTriangle className="h-8 w-8 text-muted-foreground/30 mx-auto mb-1.5" />
+                  <p>Không có hồ sơ quá hạn hoặc chờ khắc phục</p>
                 </div>
               ) : (
                 <div className="space-y-2 max-h-[200px] overflow-y-auto pr-1">
-                  {data.unpaidFinesList.map((f) => (
-                    <div 
-                      key={f.id} 
-                      onClick={() => navigate("/fines")}
-                      className="p-2 rounded-lg border bg-muted/20 hover:bg-destructive/5 hover:border-destructive/30 transition cursor-pointer flex items-center justify-between text-xs gap-2"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <p className="font-semibold truncate text-foreground flex items-center gap-1.5">
-                          <span>{f.reader_name}</span>
-                          <span className="font-mono text-[10px] text-muted-foreground">({f.card_number})</span>
-                        </p>
-                        <p className="text-[11px] text-muted-foreground truncate mt-0.5">
-                          {f.book_title ? `Sách: ${f.book_title}` : f.reason}
-                        </p>
+                  {data.unpaidFinesList.map((f) => {
+                    const isPendingRem = f.remediation_status === "pending_remediation" || f.violation_type === "damaged" || f.violation_type === "lost";
+                    return (
+                      <div
+                        key={f.id}
+                        onClick={() => navigate("/fines")}
+                        className="p-2 rounded-lg border bg-muted/20 hover:bg-destructive/5 hover:border-destructive/30 transition cursor-pointer flex items-center justify-between text-xs gap-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <p className="font-semibold truncate text-foreground flex items-center gap-1.5">
+                            <span>{f.reader_name}</span>
+                            <span className="font-mono text-[10px] text-muted-foreground">({f.card_number})</span>
+                          </p>
+                          <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                            {f.book_title ? `Sách: ${f.book_title}` : f.reason}
+                          </p>
+                        </div>
+                        <Badge
+                          variant={isPendingRem ? "outline" : "destructive"}
+                          className={`text-[10px] font-semibold shrink-0 py-0.5 ${
+                            isPendingRem ? "border-orange-500/40 text-orange-700 dark:text-orange-300" : ""
+                          }`}
+                        >
+                          {isPendingRem ? "Chờ khắc phục" : "Đang quá hạn"}
+                        </Badge>
                       </div>
-                      <Badge variant="destructive" className="text-[10px] font-semibold shrink-0 py-0.5">
-                        {f.amount.toLocaleString("vi-VN")}đ
-                      </Badge>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
 
-              <Button 
-                variant="outline" 
-                size="sm" 
+              <Button
+                variant="outline"
+                size="sm"
                 className="w-full text-xs h-8 gap-1.5 mt-3 border-destructive/20 text-destructive hover:bg-destructive/10"
                 onClick={() => navigate("/fines")}
               >
-                <Wallet className="h-3.5 w-3.5" /> Mở Sổ Quản Lý & Thu Phí Phạt
+                <AlertTriangle className="h-3.5 w-3.5" /> Mở Sổ Vi Phạm & Kỷ Luật Mượn
               </Button>
             </CardContent>
           </Card>
@@ -327,8 +390,26 @@ export default function Dashboard() {
   }
 
   // Render READER / STUDENT dashboard
+  const isDateOverdue = (dueDateStr: string) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const due = new Date(dueDateStr);
+    due.setHours(0, 0, 0, 0);
+    return today.getTime() > due.getTime();
+  };
+
+  const getDaysDiff = (dueDateStr: string) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const due = new Date(dueDateStr);
+    due.setHours(0, 0, 0, 0);
+    return Math.round((due.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+  };
+
   const activeBorrows = readerHistory.filter(h => h.status === 'borrowing');
-  const unpaidFines = readerFines.filter(f => f.status === 'unpaid');
+  const overdueActiveBorrows = activeBorrows.filter(b => isDateOverdue(b.due_date));
+  const resolvedViolationsCount = readerFines.filter(f => f.status === 'paid').length;
+
   const activeReservationsCount = readerReservations.filter(r => r.status === 'pending' || r.status === 'ready').length;
 
   return (
@@ -343,8 +424,12 @@ export default function Dashboard() {
             <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight md:text-4xl">
               {getTimeBasedGreeting()}, {user?.fullName}!
             </h2>
-            <p className="mt-1 max-w-xl text-sm text-white/80">
-              Chúc bạn có những giờ phút đọc sách thú vị. Bạn đang có <strong>{activeBorrows.length}</strong> cuốn sách đang mượn và <strong>{unpaidFines.length}</strong> khoản phí phạt chưa đóng.
+            <p className="mt-1 max-w-2xl text-sm text-white/85 leading-relaxed">
+              Chúc bạn có những giờ phút đọc sách thú vị. Bạn đang giữ <strong>{activeBorrows.length}</strong> cuốn sách đang mượn và có{" "}
+              <strong>{overdueActiveBorrows.length}</strong> cuốn sách quá hạn cần hoàn trả.
+              {readerCirculationStatus && !readerCirculationStatus.eligibleToBorrow && (
+                <span> {readerCirculationStatus.blockReason}.</span>
+              )}
             </p>
           </div>
           <div className="flex gap-2">
@@ -358,9 +443,42 @@ export default function Dashboard() {
       {/* Reader Stats Grid */}
       <div className="grid gap-4 md:grid-cols-3">
         {[
-          { label: "Sách đang mượn", value: activeBorrows.length.toString(), icon: BookOpen, accent: "var(--chart-1)", desc: "Hãy chú ý hạn trả trên phiếu mượn" },
-          { label: "Phiếu đặt trước", value: activeReservationsCount.toString(), icon: Clock, accent: "var(--chart-3)", desc: "Sách đang xếp hàng đợi bạn" },
-          { label: "Hóa đơn phí phạt", value: `${unpaidFines.reduce((s, f) => s + (Number(f.amount) || 0), 0).toLocaleString("vi-VN")}đ`, icon: Wallet, accent: "var(--chart-2)", desc: `${unpaidFines.length} khoản phí quá hạn` }
+          {
+            label: "Sách đang mượn",
+            value: activeBorrows.length.toString(),
+            icon: BookOpen,
+            accent: "var(--chart-1)",
+            desc:
+              overdueActiveBorrows.length > 0
+                ? `Có ${overdueActiveBorrows.length} cuốn đã quá hạn cần mang trả`
+                : "Tất cả sách đang mượn đều còn trong hạn"
+          },
+          {
+            label: "Phiếu đặt trước",
+            value: activeReservationsCount.toString(),
+            icon: Clock,
+            accent: "var(--chart-3)",
+            desc: "Sách đang xếp hàng đợi bạn"
+          },
+          {
+            label: "Vi phạm & Kỷ luật thẻ",
+            value:
+              readerCirculationStatus?.eligibleToBorrow === false
+                ? readerCirculationStatus.primaryStatus === "SUSPENDED"
+                  ? `Tạm ngưng ${readerCirculationStatus.suspensionRemainingDays || 0} ngày`
+                  : readerCirculationStatus.primaryStatus === "PENDING_REMEDIATION"
+                  ? `${readerCirculationStatus.pendingRemediationCount || 0} chờ khắc phục`
+                  : `${overdueActiveBorrows.length} quá hạn`
+                : "Đủ điều kiện",
+            icon: AlertTriangle,
+            accent: "var(--chart-2)",
+            desc:
+              readerCirculationStatus?.eligibleToBorrow === false
+                ? readerCirculationStatus.blockReason || "Quyền mượn tạm ngưng theo quy chế"
+                : resolvedViolationsCount > 0
+                  ? `Không còn vi phạm hiện hành (Đã xử lý ${resolvedViolationsCount} lượt trước đây)`
+                  : "Không quá hạn, không tạm ngưng • Đủ điều kiện mượn sách"
+          }
         ].map((s, idx) => (
           <Card key={idx} className="relative overflow-hidden">
             <div className="absolute inset-x-0 top-0 h-1" style={{ background: `linear-gradient(90deg, ${s.accent}, transparent)` }} />
@@ -383,7 +501,7 @@ export default function Dashboard() {
         <Card className="md:col-span-2">
           <CardHeader>
             <CardTitle className="font-display">Sách bạn đang mượn đọc</CardTitle>
-            <p className="text-xs text-muted-foreground">Danh sách bản sao sách bạn đang sở hữu. Vui lòng hoàn trả đúng hạn.</p>
+            <p className="text-xs text-muted-foreground">Danh sách bản sao sách bạn đang giữ. Vui lòng hoàn trả đúng hạn về thư viện.</p>
           </CardHeader>
           <CardContent className="p-0">
             {activeBorrows.length === 0 ? (
@@ -394,18 +512,121 @@ export default function Dashboard() {
             ) : (
               <div className="divide-y max-h-96 overflow-y-auto px-4 pb-4">
                 {activeBorrows.map((b) => {
-                  const isOverdue = new Date() > new Date(b.due_date);
+                  const isOverdue = isDateOverdue(b.due_date);
+                  const diffDays = getDaysDiff(b.due_date);
+                  const overdueDays = Math.max(1, Math.abs(diffDays));
+                  const isDueToday = !isOverdue && diffDays === 0;
+                  const isDueSoon = !isOverdue && diffDays >= 1 && diffDays <= 3;
+                  const renewalCount = Number(b.renewal_count || 0);
+                  const waitingRes = Number(b.waiting_reservations_count || 0);
+                  const canQuickRenew = !isOverdue && renewalCount === 0 && waitingRes === 0;
+
                   return (
-                    <div key={b.id} className="py-3 flex items-center justify-between">
+                    <div
+                      key={b.id}
+                      className={`py-3 px-2.5 my-1 rounded-xl border transition flex flex-col sm:flex-row sm:items-center justify-between gap-2 ${isOverdue
+                          ? "border-destructive/40 bg-destructive/[0.04]"
+                          : isDueToday
+                            ? "border-amber-500/45 bg-amber-500/[0.06]"
+                            : isDueSoon
+                              ? "border-sky-500/35 bg-sky-500/[0.04]"
+                              : "border-transparent"
+                        }`}
+                    >
                       <div>
-                        <p className="font-medium text-sm">{b.book_title}</p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-sm">{b.book_title}</p>
+                          {b.qr_code && (
+                            <code className="text-[10px] font-mono font-semibold text-primary/80 bg-primary/5 px-1.5 py-0.5 rounded border border-primary/15">
+                              [{b.qr_code}]
+                            </code>
+                          )}
+                        </div>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          Hạn trả: <span className={isOverdue ? "text-destructive font-semibold" : "font-semibold"}>{new Date(b.due_date).toLocaleDateString("vi-VN")}</span>
+                          Hạn trả:{" "}
+                          <span
+                            className={
+                              isOverdue
+                                ? "text-destructive font-semibold"
+                                : isDueToday
+                                  ? "text-amber-600 dark:text-amber-400 font-semibold"
+                                  : "font-semibold"
+                            }
+                          >
+                            {new Date(b.due_date).toLocaleDateString("vi-VN")}
+                          </span>
+                          {isOverdue && (
+                            <span className="ml-1.5 text-[11px] text-destructive font-medium">
+                              • 🔴 Quá hạn {overdueDays} ngày (Đang tạm khóa mượn mới — Hãy trả sách để mở khóa)
+                            </span>
+                          )}
+                          {isDueToday && (
+                            <span className="ml-1.5 text-[11px] text-amber-700 dark:text-amber-300 font-medium">
+                              • 🟠 Đúng ngày đến hạn — Trả tại Quầy hoặc thả qua Hòm 24/7
+                            </span>
+                          )}
+                          {isDueSoon && (
+                            <span className="ml-1.5 text-[11px] text-sky-700 dark:text-sky-300 font-medium">
+                              • 🔔 Còn {diffDays} ngày đến hạn {canQuickRenew ? "(Chưa có người đặt trước — Có thể gia hạn nhanh)" : ""}
+                            </span>
+                          )}
                         </p>
                       </div>
-                      <Badge variant={isOverdue ? "destructive" : "outline"} className="text-[10px]">
-                        {isOverdue ? "Quá hạn" : "Đang mượn"}
-                      </Badge>
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        {isOverdue ? (
+                          <Badge
+                            variant="destructive"
+                            className="text-[10px] cursor-pointer"
+                            onClick={() => navigate("/borrow")}
+                          >
+                            🔴 Quá hạn {overdueDays} ngày • Tạm khóa mượn mới
+                          </Badge>
+                        ) : isDueToday ? (
+                          <>
+                            <Badge
+                              variant="outline"
+                              onClick={() => navigate("/borrow")}
+                              className="text-[10px] cursor-pointer bg-amber-500/15 text-amber-800 dark:text-amber-200 border-amber-500/40 font-semibold"
+                            >
+                              🟠 Đến hạn hôm nay • Trả tại Quầy / Hòm 24/7
+                            </Badge>
+                            {canQuickRenew && (
+                              <Button
+                                size="sm"
+                                disabled={renewingId === b.id}
+                                onClick={() => handleQuickRenewDashboard(b.id)}
+                                className="h-6 px-2 text-[10px] gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
+                              >
+                                <RefreshCw className={`h-3 w-3 ${renewingId === b.id ? "animate-spin" : ""}`} />
+                                <span>Gia hạn nhanh 1-Chạm (+7 ngày)</span>
+                              </Button>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            {isDueSoon && canQuickRenew && (
+                              <Button
+                                size="sm"
+                                disabled={renewingId === b.id}
+                                onClick={() => handleQuickRenewDashboard(b.id)}
+                                className="h-6 px-2.5 text-[10px] gap-1 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold shadow-xs cursor-pointer"
+                              >
+                                <RefreshCw className={`h-3 w-3 ${renewingId === b.id ? "animate-spin" : ""}`} />
+                                <span>Gia hạn nhanh 1-Chạm (+7 ngày)</span>
+                              </Button>
+                            )}
+                            <Badge
+                              variant="outline"
+                              className={`text-[10px] ${isDueSoon
+                                  ? "bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/30 font-semibold"
+                                  : ""
+                                }`}
+                            >
+                              {isDueSoon ? `🔔 Sắp đến hạn (Còn ${diffDays} ngày)` : `Đang mượn (Còn ${diffDays} ngày)`}
+                            </Badge>
+                          </>
+                        )}
+                      </div>
                     </div>
                   );
                 })}

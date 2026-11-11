@@ -236,7 +236,7 @@ export function NotificationDispatchModal({ open, onOpenChange }: NotificationDi
                       ⚠️ T - 0 Ngày: Hạn chót hoàn trả hôm nay (Hướng dẫn Hòm 24/7)
                     </SelectItem>
                     <SelectItem value="overdue_warning">
-                      🚨 T + 1 Ngày: Cảnh báo quá hạn & Phát sinh phí phạt trễ hạn
+                      🚨 T + 1 Ngày: Cảnh báo quá hạn & Quy chế kỷ luật trễ hạn
                     </SelectItem>
                     <SelectItem value="drop_box_receipt">
                       📦 Hòm trả 24/7: Biên nhận tự động tiếp nhận sách ngoài giờ

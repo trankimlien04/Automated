@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo } from "react";
 import {
   Dialog,
   DialogContent,
@@ -6,100 +6,123 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
 import {
-  Compass,
   MapPin,
-  Layers,
-  Footprints,
   BookOpen,
-  ArrowRight,
-  Sparkles,
-  Info,
+  Building2,
+  Layers,
   Copy,
-  Check,
-  Building,
   CheckCircle2,
-  Share2,
-  Volume2,
-  VolumeX,
-  Play,
-  RotateCcw,
-  ZoomIn,
-  ZoomOut,
-  Maximize2,
-  QrCode,
-  Eye,
-  Navigation,
-  ShieldCheck,
-  Inbox,
-  Flame,
-  Search,
-  Download,
+  ArrowRight,
+  Footprints,
+  DoorOpen,
+  Sparkles,
+  Plus,
+  Minus,
+  Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
-import { QRCodeCanvas } from "qrcode.react";
+import api from "@/services/api";
+import { useAuth } from "@/contexts/AuthContext";
 
-export interface LibraryLocationParsed {
-  raw: string;
-  roomNum: number;
-  shelfNum: number;
-  rackNum: number;
-  floorNum: number;
-  roomLabel: string;
-  shelfLabel: string;
-  rackLabel: string;
-}
-
-export function parseLibraryLocation(locStr?: string): LibraryLocationParsed {
-  const fallback: LibraryLocationParsed = {
-    raw: locStr || "Phòng 01 - Kệ 01 - Ngăn 01",
-    roomNum: 1,
-    shelfNum: 1,
-    rackNum: 1,
-    floorNum: 1,
-    roomLabel: "Phòng 01",
-    shelfLabel: "Kệ 01",
-    rackLabel: "Ngăn 01",
-  };
-
-  if (!locStr) return fallback;
-
-  // Regex extract Room, Shelf, Rack
-  const roomMatch = locStr.match(/(?:Phòng|Phong|Room|P)\s*0?(\d+)/i);
-  const shelfMatch = locStr.match(/(?:Kệ|Ke|Shelf|K)\s*0?(\d+)/i);
-  const rackMatch = locStr.match(/(?:Ngăn|Ngan|Rack|Tầng|Tang|Level|N)\s*0?(\d+)/i);
-
-  const roomNum = roomMatch ? Math.max(1, parseInt(roomMatch[1], 10)) : 1;
-  const shelfNum = shelfMatch ? Math.max(1, parseInt(shelfMatch[1], 10)) : 1;
-  const rackNum = rackMatch ? Math.max(1, parseInt(rackMatch[1], 10)) : 1;
-
-  // Floor heuristic: Room 1, 2, 3 -> Floor 1; Room 4, 5, 6 -> Floor 2
-  const floorNum = roomNum > 3 ? 2 : 1;
-
-  const pad = (n: number) => (n < 10 ? `0${n}` : `${n}`);
-
-  return {
-    raw: locStr,
-    roomNum,
-    shelfNum,
-    rackNum,
-    floorNum,
-    roomLabel: `Phòng ${pad(roomNum)}`,
-    shelfLabel: `Kệ ${pad(shelfNum)}`,
-    rackLabel: `Ngăn ${pad(rackNum)}`,
-  };
-}
-
-interface LibraryMiniMapModalProps {
+export interface LibraryMiniMapModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   location?: string;
   bookTitle?: string;
   authorName?: string;
   coverImage?: string;
+  books?: Array<{
+    id?: number;
+    title?: string;
+    location?: string;
+    category_name?: string;
+    available_copies?: number;
+    total_copies?: number;
+  }>;
+}
+
+export interface ParsedLibraryLocation {
+  roomNum: number;
+  shelfNum: number;
+  rackNum: number;
+  roomLabel: string;
+  shelfLabel: string;
+  rackLabel: string;
+  raw: string;
+}
+
+export interface LibraryLayoutConfig {
+  maxRoom: number;
+  shelvesPerRoom: Record<number, number>;
+  racksPerShelf: Record<string, number>;
+}
+
+const LAYOUT_STORAGE_KEY = "athenaeum_library_layout_v1";
+const LAYOUT_EVENT_NAME = "athenaeum-layout-updated";
+
+export const pad2 = (n: number) => (n < 10 ? `0${n}` : `${n}`);
+
+export function loadLibraryLayoutConfig(): LibraryLayoutConfig {
+  try {
+    const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (!raw) {
+      return { maxRoom: 3, shelvesPerRoom: {}, racksPerShelf: {} };
+    }
+    const parsed = JSON.parse(raw);
+    return {
+      maxRoom: typeof parsed.maxRoom === "number" && parsed.maxRoom >= 3 ? parsed.maxRoom : 3,
+      shelvesPerRoom: parsed.shelvesPerRoom || {},
+      racksPerShelf: parsed.racksPerShelf || {},
+    };
+  } catch {
+    return { maxRoom: 3, shelvesPerRoom: {}, racksPerShelf: {} };
+  }
+}
+
+export function saveLibraryLayoutConfig(config: LibraryLayoutConfig) {
+  try {
+    localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(config));
+    window.dispatchEvent(new CustomEvent(LAYOUT_EVENT_NAME, { detail: config }));
+  } catch (e) {
+    console.error("Failed to save library layout config", e);
+  }
+}
+
+/**
+ * Parse a location string like "Phòng 02 - Kệ 07 - Ngăn 06" into structured labels & numbers.
+ * Supports arbitrary room, shelf, and rack numbers (no hardcoded upper limit).
+ */
+export function parseLibraryLocation(loc?: string): ParsedLibraryLocation {
+  const defaultLoc = "Phòng 01 - Kệ 01 - Ngăn 01";
+  const raw = loc && loc.trim().length > 0 ? loc.trim() : defaultLoc;
+  const parts = raw.split("-").map((p) => p.trim());
+
+  const extractNum = (str: string | undefined, fallback: number) => {
+    if (!str) return fallback;
+    const match = str.match(/\d+/);
+    return match ? Math.max(1, parseInt(match[0], 10)) : fallback;
+  };
+
+  const roomNum = extractNum(parts[0], 1);
+  const shelfNum = extractNum(parts[1], 1);
+  const rackNum = extractNum(parts[2], 1);
+
+  const roomLabel = parts[0] && parts[0].length > 0 ? parts[0] : `Phòng ${pad2(roomNum)}`;
+  const shelfLabel = parts[1] && parts[1].length > 0 ? parts[1] : `Kệ ${pad2(shelfNum)}`;
+  const rackLabel = parts[2] && parts[2].length > 0 ? parts[2] : `Ngăn ${pad2(rackNum)}`;
+
+  return {
+    roomNum,
+    shelfNum,
+    rackNum,
+    roomLabel,
+    shelfLabel,
+    rackLabel,
+    raw,
+  };
 }
 
 export function LibraryMiniMapModal({
@@ -108,1124 +131,833 @@ export function LibraryMiniMapModal({
   location,
   bookTitle,
   authorName,
-  coverImage,
+  books: externalBooks,
 }: LibraryMiniMapModalProps) {
+  const { user } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "librarian";
+
   const parsed = useMemo(() => parseLibraryLocation(location), [location]);
-  const [activeFloor, setActiveFloor] = useState<number>(parsed.floorNum);
-  const [copied, setCopied] = useState(false);
-  const [activeTab, setActiveTab] = useState<"map" | "shelf" | "steps" | "mobile">("map");
 
-  // Interactive Map Controls
-  const [zoomLevel, setZoomLevel] = useState<number>(1);
-  const [selectedShelf, setSelectedShelf] = useState<{ room: number; shelf: number } | null>(null);
-  const [isSimulating, setIsSimulating] = useState<boolean>(false);
-  const [simStep, setSimStep] = useState<number>(0);
-  const simTimerRef = useRef<any>(null);
+  const [fetchedBooks, setFetchedBooks] = useState<any[]>([]);
+  const [activeRoomNum, setActiveRoomNum] = useState<number>(parsed.roomNum);
+  const [activeShelfNum, setActiveShelfNum] = useState<number>(parsed.shelfNum);
+  const [layoutConfig, setLayoutConfig] = useState<LibraryLayoutConfig>(() =>
+    loadLibraryLayoutConfig()
+  );
 
-  // Audio Voice Guidance (Web Speech API)
-  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
-
-  // Sync floor when target location changes
+  // Sync active room & shelf whenever modal opens or target location changes
   useEffect(() => {
-    setActiveFloor(parsed.floorNum);
-    setSelectedShelf({ room: parsed.roomNum, shelf: parsed.shelfNum });
-  }, [parsed.floorNum, parsed.roomNum, parsed.shelfNum]);
+    if (open) {
+      setActiveRoomNum(parsed.roomNum);
+      setActiveShelfNum(parsed.shelfNum);
+      setLayoutConfig(loadLibraryLayoutConfig());
+    }
+  }, [open, parsed.roomNum, parsed.shelfNum]);
 
-  // Clean up timers & speech on unmount or close
+  // Listen for layout config changes from anywhere in the app
   useEffect(() => {
-    if (!open) {
-      if (simTimerRef.current) clearInterval(simTimerRef.current);
-      setIsSimulating(false);
-      setSimStep(0);
-      if (window.speechSynthesis) window.speechSynthesis.cancel();
-      setIsSpeaking(false);
+    const handler = () => {
+      setLayoutConfig(loadLibraryLayoutConfig());
+    };
+    window.addEventListener(LAYOUT_EVENT_NAME, handler);
+    return () => window.removeEventListener(LAYOUT_EVENT_NAME, handler);
+  }, []);
+
+  // Fetch all books in the library when modal opens so the map always reflects newly added rooms/shelves/racks
+  useEffect(() => {
+    if (!open) return;
+    if (externalBooks && externalBooks.length > 0) {
+      setFetchedBooks(externalBooks);
+      return;
     }
-  }, [open]);
+    let mounted = true;
+    api
+      .get("/books")
+      .then((res) => {
+        if (!mounted) return;
+        const data = Array.isArray(res.data) ? res.data : res.data?.books || [];
+        setFetchedBooks(data);
+      })
+      .catch(() => {
+        // Fallback silently if offline
+      });
+    return () => {
+      mounted = false;
+    };
+  }, [open, externalBooks]);
 
-  // Shelf coordinates inside rooms (designed with clear walking aisles):
-  // Canvas ViewBox: 0 0 940 600
-  // Room 1: x: 40..400, y: 40..275. Shelves Row 1: y=115, Row 2: y=185
-  // Room 2: x: 540..900, y: 40..275. Shelves Row 1: y=115, Row 2: y=185
-  // Room 3: x: 40..400, y: 310..545. Shelves Row 1: y=385, Row 2: y=455
-  // Shelf coordinates inside rooms (designed with clear walking aisles):
-  // Canvas ViewBox: 0 0 940 600
-  // Room 1: x: 40..400, y: 40..275. Shelves Row 1: y=120, Row 2: y=205. Width: 80, Height: 34
-  // Room 2: x: 540..900, y: 40..275. Shelves Row 1: y=120, Row 2: y=205. Width: 80, Height: 34
-  // Room 3: x: 40..400, y: 310..550. Shelves Row 1: y=390, Row 2: y=475. Width: 80, Height: 34
-  const getShelfPosition = (room: number, shelf: number) => {
-    const s = Math.min(6, Math.max(1, shelf));
-    const col = (s - 1) % 3; // 0, 1, 2
-    const row = Math.floor((s - 1) / 3); // 0 (row 1) or 1 (row 2)
-    const normRoom = ((room - 1) % 3) + 1; // 1, 2, or 3
+  const allBooks = externalBooks && externalBooks.length > 0 ? externalBooks : fetchedBooks;
 
-    if (normRoom === 1) {
-      return { x: 70 + col * 110, y: 120 + row * 85, w: 80, h: 34 };
-    } else if (normRoom === 2) {
-      return { x: 570 + col * 110, y: 120 + row * 85, w: 80, h: 34 };
-    } else {
-      // Room 3
-      return { x: 70 + col * 110, y: 390 + row * 85, w: 80, h: 34 };
-    }
-  };
+  /**
+   * Dynamically compute the entire library structure (Rooms -> Shelves -> Racks)
+   * from:
+   *  1) Librarian's configured rooms/shelves/racks (layoutConfig)
+   *  2) Actual book locations in DB (allBooks)
+   *  3) Current target location (parsed)
+   */
+  const dynamicLayout = useMemo(() => {
+    let maxRoom = Math.max(3, layoutConfig.maxRoom, parsed.roomNum);
+    const roomBooksMap = new Map<number, any[]>();
 
-  const targetRoom = parsed.roomNum;
-  const targetShelf = parsed.shelfNum;
-  const normRoom = ((targetRoom - 1) % 3) + 1;
-  const targetShelfPos = getShelfPosition(targetRoom, targetShelf);
-  const isRow2 = targetShelf > 3;
+    allBooks.forEach((b) => {
+      const p = parseLibraryLocation(b.location);
+      if (p.roomNum > maxRoom) maxRoom = p.roomNum;
+      const list = roomBooksMap.get(p.roomNum) || [];
+      list.push({ ...b, _parsed: p });
+      roomBooksMap.set(p.roomNum, list);
+    });
 
-  // Realistic Wayfinding Waypoints (Path walks down dedicated center aisles, NEVER cutting across shelf text!)
-  const waypoints = useMemo(() => {
-    const entrance = { x: 635, y: 520 };
-    const corridorCenter = { x: 470, y: 520 };
-    const shelfCenterX = targetShelfPos.x + targetShelfPos.w / 2;
+    const rooms: Array<{
+      roomNum: number;
+      roomLabel: string;
+      bookCount: number;
+      maxShelf: number;
+      minRequiredShelf: number;
+      categories: string[];
+    }> = [];
 
-    if (normRoom === 1) {
-      const door = { x: 400, y: 180 };
-      const aisleY = 180;
-      // Approach shelf face directly from the aisle without cutting into the shelf
-      const targetArrivalY = isRow2 ? targetShelfPos.y - 6 : targetShelfPos.y + targetShelfPos.h + 6;
-      return [
-        entrance,
-        corridorCenter,
-        { x: 470, y: 180 },
-        door,
-        { x: shelfCenterX, y: aisleY },
-        { x: shelfCenterX, y: targetArrivalY }
-      ];
-    } else if (normRoom === 2) {
-      const door = { x: 540, y: 180 };
-      const aisleY = 180;
-      const targetArrivalY = isRow2 ? targetShelfPos.y - 6 : targetShelfPos.y + targetShelfPos.h + 6;
-      return [
-        entrance,
-        corridorCenter,
-        { x: 470, y: 180 },
-        door,
-        { x: shelfCenterX, y: aisleY },
-        { x: shelfCenterX, y: targetArrivalY }
-      ];
-    } else {
-      // Room 3
-      const door = { x: 400, y: 450 };
-      const aisleY = 450;
-      const targetArrivalY = isRow2 ? targetShelfPos.y - 6 : targetShelfPos.y + targetShelfPos.h + 6;
-      return [
-        entrance,
-        corridorCenter,
-        { x: 470, y: 450 },
-        door,
-        { x: shelfCenterX, y: aisleY },
-        { x: shelfCenterX, y: targetArrivalY }
-      ];
-    }
-  }, [normRoom, targetShelfPos, isRow2]);
-
-  // Construct SVG Path String
-  const pathD = useMemo(() => {
-    return waypoints.reduce((acc, pt, idx) => {
-      return idx === 0 ? `M ${pt.x} ${pt.y}` : `${acc} L ${pt.x} ${pt.y}`;
-    }, "");
-  }, [waypoints]);
-
-  // Simulation Walking Logic
-  const handleToggleSimulation = () => {
-    if (isSimulating) {
-      if (simTimerRef.current) clearInterval(simTimerRef.current);
-      setIsSimulating(false);
-    } else {
-      setIsSimulating(true);
-      setSimStep(0);
-      if (simTimerRef.current) clearInterval(simTimerRef.current);
-
-      const totalSteps = 100;
-      let current = 0;
-      simTimerRef.current = setInterval(() => {
-        current += 2;
-        if (current > totalSteps) {
-          clearInterval(simTimerRef.current);
-          setIsSimulating(false);
-          setSimStep(totalSteps);
-          toast.success("Đã đến đúng kệ sách mục tiêu!");
-        } else {
-          setSimStep(current);
+    for (let r = 1; r <= maxRoom; r++) {
+      const rBooks = roomBooksMap.get(r) || [];
+      let minReqShelf = 6;
+      if (r === parsed.roomNum && parsed.shelfNum > minReqShelf) {
+        minReqShelf = parsed.shelfNum;
+      }
+      const catSet = new Set<string>();
+      rBooks.forEach((b) => {
+        if (b._parsed.shelfNum > minReqShelf) {
+          minReqShelf = b._parsed.shelfNum;
         }
-      }, 70);
+        if (b.category_name) catSet.add(b.category_name);
+      });
+
+      const configuredShelf = layoutConfig.shelvesPerRoom[r] || 6;
+      const maxShelfInRoom = Math.max(minReqShelf, configuredShelf);
+
+      rooms.push({
+        roomNum: r,
+        roomLabel: `Phòng ${pad2(r)}`,
+        bookCount: rBooks.length,
+        maxShelf: maxShelfInRoom,
+        minRequiredShelf: minReqShelf,
+        categories: Array.from(catSet).slice(0, 3),
+      });
     }
-  };
 
-  // Calculate current walker position along path
-  const walkerPos = useMemo(() => {
-    if (waypoints.length < 2) return waypoints[0] || { x: 0, y: 0 };
-    const segmentCount = waypoints.length - 1;
-    const progressNorm = simStep / 100;
-    const targetSegFloat = progressNorm * segmentCount;
-    const segIdx = Math.min(Math.floor(targetSegFloat), segmentCount - 1);
-    const segProgress = targetSegFloat - segIdx;
+    const currentRoomInfo = rooms.find((rm) => rm.roomNum === activeRoomNum) || {
+      roomNum: activeRoomNum,
+      roomLabel: `Phòng ${pad2(activeRoomNum)}`,
+      bookCount: 0,
+      maxShelf: Math.max(
+        6,
+        layoutConfig.shelvesPerRoom[activeRoomNum] || 6,
+        activeRoomNum === parsed.roomNum ? parsed.shelfNum : 6
+      ),
+      minRequiredShelf: 6,
+      categories: [],
+    };
 
-    const pA = waypoints[segIdx];
-    const pB = waypoints[segIdx + 1];
+    const currentRoomBooks = roomBooksMap.get(activeRoomNum) || [];
+    const shelves: Array<{
+      shelfNum: number;
+      shelfLabel: string;
+      bookCount: number;
+      maxRack: number;
+      minRequiredRack: number;
+      booksOnShelf: any[];
+    }> = [];
+
+    for (let s = 1; s <= currentRoomInfo.maxShelf; s++) {
+      const sBooks = currentRoomBooks.filter((b) => b._parsed.shelfNum === s);
+      let minReqRack = 5;
+      if (
+        activeRoomNum === parsed.roomNum &&
+        s === parsed.shelfNum &&
+        parsed.rackNum > minReqRack
+      ) {
+        minReqRack = parsed.rackNum;
+      }
+      sBooks.forEach((b) => {
+        if (b._parsed.rackNum > minReqRack) {
+          minReqRack = b._parsed.rackNum;
+        }
+      });
+
+      const rackKey = `${activeRoomNum}_${s}`;
+      const configuredRack = layoutConfig.racksPerShelf[rackKey] || 5;
+      const maxRackOnShelf = Math.max(minReqRack, configuredRack);
+
+      shelves.push({
+        shelfNum: s,
+        shelfLabel: `Kệ ${pad2(s)}`,
+        bookCount: sBooks.length,
+        maxRack: maxRackOnShelf,
+        minRequiredRack: minReqRack,
+        booksOnShelf: sBooks,
+      });
+    }
+
+    const currentShelfInfo = shelves.find((sh) => sh.shelfNum === activeShelfNum) || {
+      shelfNum: activeShelfNum,
+      shelfLabel: `Kệ ${pad2(activeShelfNum)}`,
+      bookCount: 0,
+      maxRack: Math.max(
+        5,
+        layoutConfig.racksPerShelf[`${activeRoomNum}_${activeShelfNum}`] || 5,
+        activeRoomNum === parsed.roomNum && activeShelfNum === parsed.shelfNum
+          ? parsed.rackNum
+          : 5
+      ),
+      minRequiredRack: 5,
+      booksOnShelf: [],
+    };
+
+    const racks: Array<{
+      rackNum: number;
+      rackLabel: string;
+      booksInRack: any[];
+    }> = [];
+
+    for (let rk = currentShelfInfo.maxRack; rk >= 1; rk--) {
+      const rkBooks = currentShelfInfo.booksOnShelf.filter((b) => b._parsed.rackNum === rk);
+      racks.push({
+        rackNum: rk,
+        rackLabel: `Ngăn ${pad2(rk)}`,
+        booksInRack: rkBooks,
+      });
+    }
 
     return {
-      x: pA.x + (pB.x - pA.x) * segProgress,
-      y: pA.y + (pB.y - pA.y) * segProgress,
+      rooms,
+      currentRoomInfo,
+      shelves,
+      currentShelfInfo,
+      racks,
     };
-  }, [waypoints, simStep]);
+  }, [allBooks, parsed, activeRoomNum, activeShelfNum, layoutConfig]);
 
-  // AI Voice Guidance (Web Speech Synthesis)
-  const handleToggleVoice = () => {
-    if (!("speechSynthesis" in window)) {
-      toast.error("Trình duyệt của bạn không hỗ trợ đọc giọng nói");
-      return;
-    }
+  const isViewingTargetRoom = activeRoomNum === parsed.roomNum;
+  const isViewingTargetShelf = isViewingTargetRoom && activeShelfNum === parsed.shelfNum;
 
-    if (isSpeaking) {
-      window.speechSynthesis.cancel();
-      setIsSpeaking(false);
-      return;
-    }
-
-    const titleText = bookTitle ? `cuốn sách ${bookTitle}` : "cuốn sách bạn đang tìm";
-    const speechText = `Chào bạn. Để tìm ${titleText}, bạn đang ở Tầng ${parsed.floorNum}. Hãy đi thẳng từ Cửa vào chính dọc theo hành lang trung tâm. Rẽ vào ${parsed.roomLabel}, tìm dãy ${parsed.shelfLabel}. Cuốn sách được xếp ở ${parsed.rackLabel}, ngay tầm mắt của bạn. Chúc bạn tìm sách thuận lợi!`;
-
-    const utterance = new SpeechSynthesisUtterance(speechText);
-    utterance.lang = "vi-VN";
-    utterance.rate = 0.95;
-
-    const voices = window.speechSynthesis.getVoices();
-    const viVoice = voices.find((v) => v.lang.includes("vi"));
-    if (viVoice) utterance.voice = viVoice;
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
-
-    window.speechSynthesis.speak(utterance);
+  // Librarian actions directly inside Mini Map
+  const handleAddRoomInMap = () => {
+    const nextRoom = dynamicLayout.rooms.length + 1;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      maxRoom: nextRoom,
+      shelvesPerRoom: { ...layoutConfig.shelvesPerRoom, [nextRoom]: 6 },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    setActiveRoomNum(nextRoom);
+    setActiveShelfNum(1);
+    toast.success(`Đã thêm Phòng ${pad2(nextRoom)} vào sơ đồ thư viện!`);
   };
 
-  const handleCopyGuide = () => {
-    const text = `🗺️ SƠ ĐỒ ĐỊNH VỊ SÁCH ATHENAEUM: «${bookTitle || "Ấn phẩm thư viện"}»\n• Vị trí: ${parsed.roomLabel} - ${parsed.shelfLabel} - ${parsed.rackLabel}\n• Tầng: Tầng ${parsed.floorNum}\n• Khoảng cách: ~18 mét (khoảng 25 bước chân từ cửa chính)\n• Hướng dẫn chi tiết: Đi vào từ Cửa chính -> Dọc hành lang trung tâm -> Rẽ vào ${parsed.roomLabel} -> Dãy ${parsed.shelfLabel} -> Lấy sách tại ${parsed.rackLabel} (Tầng ${parsed.rackNum} từ dưới lên).`;
+  const handleRemoveRoomInMap = (roomToRemove?: number) => {
+    const targetRm = roomToRemove ?? (activeRoomNum > 3 ? activeRoomNum : dynamicLayout.rooms.length);
+    if (targetRm <= 3) {
+      toast.error("Không thể xóa 3 phòng tiêu chuẩn mặc định (Phòng 01 - Phòng 03).");
+      return;
+    }
+    const rmInfo = dynamicLayout.rooms.find((r) => r.roomNum === targetRm);
+    if (rmInfo && rmInfo.bookCount > 0) {
+      toast.error(`${rmInfo.roomLabel} đang chứa ${rmInfo.bookCount} đầu sách, không thể xóa!`);
+      return;
+    }
+    if (targetRm === parsed.roomNum) {
+      toast.error(`Không thể xóa ${ parsed.roomLabel } vì đang là phòng đích của cuốn sách đang xem!`);
+      return;
+    }
+
+    const currentMax = dynamicLayout.rooms.length;
+    const nextMax = Math.max(3, currentMax - 1);
+    const nextShelvesPerRoom = { ...layoutConfig.shelvesPerRoom };
+    delete nextShelvesPerRoom[targetRm];
+    delete nextShelvesPerRoom[currentMax];
+
+    const nextRacksPerShelf = { ...layoutConfig.racksPerShelf };
+    Object.keys(nextRacksPerShelf).forEach((k) => {
+      if (k.startsWith(`${targetRm}_`) || k.startsWith(`${currentMax}_`)) {
+        delete nextRacksPerShelf[k];
+      }
+    });
+
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      maxRoom: nextMax,
+      shelvesPerRoom: nextShelvesPerRoom,
+      racksPerShelf: nextRacksPerShelf,
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    setActiveRoomNum(parsed.roomNum <= nextMax ? parsed.roomNum : nextMax);
+    setActiveShelfNum(parsed.roomNum <= nextMax ? parsed.shelfNum : 1);
+    toast.info(`Đã xóa Phòng ${pad2(targetRm)} khỏi sơ đồ thư viện.`);
+  };
+
+  const handleAddShelfInRoom = () => {
+    const nextShelf = dynamicLayout.currentRoomInfo.maxShelf + 1;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      shelvesPerRoom: {
+        ...layoutConfig.shelvesPerRoom,
+        [activeRoomNum]: nextShelf,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    setActiveShelfNum(nextShelf);
+    toast.success(
+      `Đã thêm Kệ ${pad2(nextShelf)} vào ${dynamicLayout.currentRoomInfo.roomLabel}!`
+    );
+  };
+
+  const handleRemoveLastShelfInRoom = () => {
+    const currentMax = dynamicLayout.currentRoomInfo.maxShelf;
+    if (currentMax <= 1) return;
+    if (currentMax <= dynamicLayout.currentRoomInfo.minRequiredShelf && currentMax <= 6) {
+      toast.error("Không thể xóa kệ mặc định hoặc kệ đang chứa sách!");
+      return;
+    }
+    const lastShelfObj = dynamicLayout.shelves.find((s) => s.shelfNum === currentMax);
+    if (lastShelfObj && lastShelfObj.bookCount > 0) {
+      toast.error(
+        `Kệ ${pad2(currentMax)} đang có ${lastShelfObj.bookCount} đầu sách, không thể xóa!`
+      );
+      return;
+    }
+    const nextMax = currentMax - 1;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      shelvesPerRoom: {
+        ...layoutConfig.shelvesPerRoom,
+        [activeRoomNum]: nextMax,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    if (activeShelfNum > nextMax) setActiveShelfNum(nextMax);
+    toast.info(
+      `Đã thu gọn Kệ ${pad2(currentMax)} khỏi ${dynamicLayout.currentRoomInfo.roomLabel}.`
+    );
+  };
+
+  const handleAddRackOnShelf = () => {
+    const nextRack = dynamicLayout.currentShelfInfo.maxRack + 1;
+    const key = `${activeRoomNum}_${activeShelfNum}`;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      racksPerShelf: {
+        ...layoutConfig.racksPerShelf,
+        [key]: nextRack,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.success(
+      `Đã thêm Ngăn ${pad2(nextRack)} lên ${dynamicLayout.currentShelfInfo.shelfLabel} (${dynamicLayout.currentRoomInfo.roomLabel})!`
+    );
+  };
+
+  const handleRemoveTopRackOnShelf = () => {
+    const currentMax = dynamicLayout.currentShelfInfo.maxRack;
+    if (currentMax <= 1) return;
+    const topRackObj = dynamicLayout.racks.find((r) => r.rackNum === currentMax);
+    if (topRackObj && topRackObj.booksInRack.length > 0) {
+      toast.error(
+        `Ngăn ${pad2(currentMax)} đang chứa ${topRackObj.booksInRack.length} đầu sách, không thể xóa!`
+      );
+      return;
+    }
+    if (currentMax <= 5) {
+      toast.error("Mỗi kệ tiêu chuẩn có tối thiểu 5 ngăn (Ngăn 01 - Ngăn 05).");
+      return;
+    }
+    const key = `${activeRoomNum}_${activeShelfNum}`;
+    const nextConfig: LibraryLayoutConfig = {
+      ...layoutConfig,
+      racksPerShelf: {
+        ...layoutConfig.racksPerShelf,
+        [key]: currentMax - 1,
+      },
+    };
+    saveLibraryLayoutConfig(nextConfig);
+    setLayoutConfig(nextConfig);
+    toast.info(
+      `Đã xóa Ngăn ${pad2(currentMax)} trên ${dynamicLayout.currentShelfInfo.shelfLabel}.`
+    );
+  };
+
+  const handleCopyLocation = () => {
+    const text = `${bookTitle ? `Sách: ${bookTitle} — ` : ""}Vị trí: ${parsed.roomLabel} - ${parsed.shelfLabel} - ${parsed.rackLabel}`;
     navigator.clipboard.writeText(text);
-    setCopied(true);
-    toast.success("Đã sao chép lộ trình định vị kệ sách vào bộ nhớ tạm!");
-    setTimeout(() => setCopied(false), 2000);
+    toast.success("Đã sao chép vị trí sách!");
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl w-[96vw] sm:w-full p-0 overflow-hidden max-h-[92vh] flex flex-col rounded-2xl border-2 border-primary/30 shadow-2xl bg-card">
-        <style>{`
-          @keyframes laserFlow {
-            to {
-              stroke-dashoffset: -36;
-            }
-          }
-          @keyframes radarPing {
-            0% { transform: scale(0.8); opacity: 1; }
-            50% { transform: scale(1.6); opacity: 0.35; }
-            100% { transform: scale(2.2); opacity: 0; }
-          }
-          @keyframes haloGlow {
-            0%, 100% { filter: drop-shadow(0 0 6px rgba(6, 182, 212, 0.7)); }
-            50% { filter: drop-shadow(0 0 16px rgba(59, 130, 246, 0.9)); }
-          }
-          .animate-laser-flow {
-            stroke-dasharray: 10 8;
-            animation: laserFlow 1.2s linear infinite;
-          }
-          .animate-radar-ring {
-            animation: radarPing 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
-            transform-origin: center;
-          }
-          .animate-halo-glow {
-            animation: haloGlow 2.5s ease-in-out infinite;
-          }
-        `}</style>
-
-        {/* ========================================================================= */}
-        {/* 1. HERO HEADER: High-Tech Glassmorphism Header with Coordinates & IPS */}
-        {/* ========================================================================= */}
-        <DialogHeader className="p-4 sm:p-5 pb-3 border-b bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 text-white relative shrink-0">
-          <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3.5">
-            {/* Title & Live IPS Status */}
-            <div className="space-y-1.5">
+      <DialogContent className="max-w-4xl p-0 overflow-hidden border bg-background shadow-xl rounded-2xl max-h-[92vh] flex flex-col">
+        {/* 1. HEADER: ĐƠN GIẢN, RÕ RÀNG */}
+        <DialogHeader className="p-4 sm:p-5 border-b bg-muted/30 shrink-0">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pr-6">
+            <div className="space-y-1 min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
-                <div className="h-8 w-8 rounded-xl bg-cyan-500/20 text-cyan-300 border border-cyan-400/40 grid place-items-center shadow-xs">
-                  <Compass className="h-4.5 w-4.5 animate-spin" style={{ animationDuration: "20s" }} />
-                </div>
-                <div>
-                  <DialogTitle className="font-display text-base sm:text-lg font-black text-white flex items-center gap-2">
-                    <span>Sơ Đồ Dẫn Đường Không Gian Số (Indoor IPS)</span>
-                  </DialogTitle>
-                </div>
-                <Badge className="bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 text-[10px] font-mono font-bold px-2 py-0.5">
-                  🛰️ Định Vị Trực Tiếp • Sai Số &lt; 0.5m
+                <Badge className="bg-primary text-primary-foreground text-[11px] font-semibold px-2.5 py-0.5">
+                  <MapPin className="h-3 w-3 mr-1" />
+                  Sơ Đồ Dẫn Đường Tìm Sách
                 </Badge>
+                <span className="text-xs text-muted-foreground">
+                  Tự động cập nhật theo số Phòng • Kệ • Ngăn trong kho
+                </span>
               </div>
-              <DialogDescription className="text-slate-300 text-xs">
-                Hệ thống định vị thông minh dẫn đường chính xác từ cửa vào tới từng ngăn sách trên giá
+              <DialogTitle className="font-display text-base sm:text-lg font-bold text-foreground truncate">
+                {bookTitle || "Định vị kệ & ngăn sách trong thư viện"}
+              </DialogTitle>
+              <DialogDescription className="text-xs text-muted-foreground truncate">
+                {authorName ? `Tác giả: ${authorName} • ` : ""}
+                Làm theo 3 bước bên dưới để đến đúng kệ và ngăn lấy sách.
               </DialogDescription>
             </div>
 
-            {/* Target Book Pill with Protected Whitespace (Không bao giờ rớt dòng xấu xí!) */}
-            <div className="flex items-center gap-3 bg-white/10 backdrop-blur-md p-2.5 sm:px-3.5 rounded-2xl border border-white/20 shadow-md">
-              {coverImage ? (
-                <img
-                  src={coverImage}
-                  alt={bookTitle || "Sách"}
-                  className="h-12 w-9 object-cover rounded-md shadow-md border border-white/30 shrink-0"
-                />
-              ) : (
-                <div className="h-12 w-9 rounded-md bg-cyan-600/30 text-cyan-200 border border-cyan-400/30 grid place-items-center text-sm font-bold shrink-0">
-                  📖
-                </div>
-              )}
-              <div className="min-w-0 pr-1">
-                <p className="font-bold text-xs sm:text-sm text-white truncate max-w-[220px] sm:max-w-[300px]">
-                  {bookTitle || "Ấn phẩm thư viện"}
-                </p>
-                <p className="text-[11px] text-slate-300 truncate">
-                  {authorName ? `Tác giả: ${authorName}` : "Thư viện Athenaeum"}
-                </p>
-                <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                  <span className="text-[11px] font-mono font-bold text-cyan-200 bg-cyan-500/30 px-2.5 py-0.5 rounded-md border border-cyan-400/40 whitespace-nowrap shrink-0">
-                    📍 {parsed.roomLabel} • {parsed.shelfLabel} • {parsed.rackLabel}
-                  </span>
-                  <Badge variant="outline" className="text-[10px] text-emerald-300 border-emerald-400/40 bg-emerald-500/10 whitespace-nowrap shrink-0">
-                    Tầng {parsed.floorNum}
-                  </Badge>
-                </div>
-              </div>
+            {/* Target Coordinate Pill */}
+            <div className="flex items-center gap-1.5 bg-primary/10 border border-primary/25 px-3 py-2 rounded-xl shrink-0 self-start sm:self-center">
+              <span className="text-xs font-bold text-primary font-mono">
+                📍 {parsed.roomLabel}
+              </span>
+              <ArrowRight className="h-3.5 w-3.5 text-primary/70" />
+              <span className="text-xs font-bold text-primary font-mono">
+                {parsed.shelfLabel}
+              </span>
+              <ArrowRight className="h-3.5 w-3.5 text-primary/70" />
+              <span className="text-xs font-bold bg-primary text-primary-foreground px-2 py-0.5 rounded-md font-mono">
+                {parsed.rackLabel}
+              </span>
             </div>
           </div>
 
-          {/* Sub Navigation Bar: Floors, View Modes, Voice AI & Sharing */}
-          <div className="flex flex-wrap items-center justify-between gap-2.5 pt-3 mt-3 border-t border-white/10">
-            {/* Floor Switcher */}
-            <div className="flex items-center gap-1 bg-black/30 p-1 rounded-xl border border-white/10 text-xs">
-              <button
-                type="button"
-                onClick={() => setActiveFloor(1)}
-                className={`px-3 py-1 rounded-lg transition-all font-medium flex items-center gap-1.5 cursor-pointer ${
-                  activeFloor === 1
-                    ? "bg-cyan-600 text-white shadow-md font-bold"
-                    : "text-slate-300 hover:text-white"
-                }`}
-              >
-                <Building className="h-3.5 w-3.5" />
-                <span>Tầng 1 (Kho A - C &amp; Quầy Lưu Thông)</span>
-                {parsed.floorNum === 1 && (
-                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
-                )}
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveFloor(2)}
-                className={`px-3 py-1 rounded-lg transition-all font-medium flex items-center gap-1.5 cursor-pointer ${
-                  activeFloor === 2
-                    ? "bg-cyan-600 text-white shadow-md font-bold"
-                    : "text-slate-300 hover:text-white"
-                }`}
-              >
-                <Building className="h-3.5 w-3.5" />
-                <span>Tầng 2 (Kho D - F &amp; Phòng Nghiên Cứu)</span>
-                {parsed.floorNum === 2 && (
-                  <span className="h-2 w-2 rounded-full bg-emerald-400 animate-ping" />
-                )}
-              </button>
+          {/* 3-Step Quick Guide Strip */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-3 mt-3 border-t border-border/60">
+            <div className="flex items-center gap-2.5 bg-background px-3 py-2 rounded-xl border text-xs">
+              <span className="h-6 w-6 rounded-full bg-primary text-primary-foreground font-bold flex items-center justify-center shrink-0 text-[11px]">
+                1
+              </span>
+              <div className="min-w-0">
+                <p className="font-semibold text-foreground truncate">Vào {parsed.roomLabel}</p>
+                <p className="text-[11px] text-muted-foreground truncate">Từ sảnh chính / Quầy thủ thư</p>
+              </div>
             </div>
 
-            {/* View Mode Tabs */}
-            <div className="flex items-center gap-2 flex-wrap">
-              <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as any)}>
-                <TabsList className="h-8 text-xs bg-black/40 p-1 rounded-xl border border-white/10 text-slate-300">
-                  <TabsTrigger value="map" className="h-6 text-[11px] gap-1 px-2.5 cursor-pointer data-[state=active]:bg-white/20 data-[state=active]:text-white">
-                    <Compass className="h-3.5 w-3.5 text-cyan-300" /> Bản đồ mặt bằng
-                  </TabsTrigger>
-                  <TabsTrigger value="shelf" className="h-6 text-[11px] gap-1 px-2.5 cursor-pointer data-[state=active]:bg-white/20 data-[state=active]:text-white">
-                    <Layers className="h-3.5 w-3.5 text-amber-300" /> Mặt cắt giá kệ
-                  </TabsTrigger>
-                  <TabsTrigger value="steps" className="h-6 text-[11px] gap-1 px-2.5 cursor-pointer data-[state=active]:bg-white/20 data-[state=active]:text-white">
-                    <Footprints className="h-3.5 w-3.5 text-emerald-300" /> Lộ trình bước
-                  </TabsTrigger>
-                  <TabsTrigger value="mobile" className="h-6 text-[11px] gap-1 px-2.5 cursor-pointer data-[state=active]:bg-white/20 data-[state=active]:text-white">
-                    <QrCode className="h-3.5 w-3.5 text-pink-300" /> Mang theo mobile
-                  </TabsTrigger>
-                </TabsList>
-              </Tabs>
+            <div className="flex items-center gap-2.5 bg-background px-3 py-2 rounded-xl border text-xs">
+              <span className="h-6 w-6 rounded-full bg-primary text-primary-foreground font-bold flex items-center justify-center shrink-0 text-[11px]">
+                2
+              </span>
+              <div className="min-w-0">
+                <p className="font-semibold text-foreground truncate">Tìm dãy {parsed.shelfLabel}</p>
+                <p className="text-[11px] text-muted-foreground truncate">Đi theo lối đi chính trong phòng</p>
+              </div>
+            </div>
 
-              {/* AI Voice Guidance Button */}
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleToggleVoice}
-                className={`h-8 text-xs gap-1.5 px-3 rounded-xl border cursor-pointer transition-all ${
-                  isSpeaking
-                    ? "bg-rose-500 hover:bg-rose-600 text-white border-rose-400 animate-pulse"
-                    : "bg-white/10 hover:bg-white/20 text-white border-white/20"
-                }`}
-                title="Nghe chỉ đường bằng giọng nói AI"
-              >
-                {isSpeaking ? <VolumeX className="h-3.5 w-3.5" /> : <Volume2 className="h-3.5 w-3.5 text-cyan-300" />}
-                <span className="hidden sm:inline">{isSpeaking ? "Dừng giọng nói" : "Nghe thuyết minh"}</span>
-              </Button>
-
-              {/* Copy Guide Button */}
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={handleCopyGuide}
-                className="h-8 text-xs gap-1 px-3 rounded-xl bg-white/10 hover:bg-white/20 text-white border-white/20 cursor-pointer"
-                title="Sao chép lộ trình chỉ dẫn"
-              >
-                {copied ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
-                <span className="hidden md:inline">{copied ? "Đã chép" : "Chép chỉ đường"}</span>
-              </Button>
+            <div className="flex items-center gap-2.5 bg-emerald-500/10 border-emerald-500/30 px-3 py-2 rounded-xl border text-xs">
+              <span className="h-6 w-6 rounded-full bg-emerald-600 text-white font-bold flex items-center justify-center shrink-0 text-[11px]">
+                3
+              </span>
+              <div className="min-w-0">
+                <p className="font-bold text-emerald-700 dark:text-emerald-400 truncate">
+                  Lấy sách ở {parsed.rackLabel}
+                </p>
+                <p className="text-[11px] text-muted-foreground truncate">
+                  Đếm từ ngăn đáy (Ngăn 01) lên
+                </p>
+              </div>
             </div>
           </div>
         </DialogHeader>
 
-        {/* ========================================================================= */}
-        {/* 2. MODAL BODY: Interactive Content Area based on Selected Tab */}
-        {/* ========================================================================= */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4 bg-muted/10">
-          {/* TAB 1: 2.5D HIGH-TECH ARCHITECTURAL BLUEPRINT MAP */}
-          {activeTab === "map" && (
-            <div className="space-y-3.5 animate-in fade-in-50 duration-200">
-              {/* Map Floating Toolbar & Telemetry */}
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-2xl bg-card border border-border/70 shadow-xs">
-                <div className="flex items-center gap-3 text-xs flex-wrap">
-                  <span className="inline-flex items-center gap-1.5 font-bold text-foreground">
-                    <Navigation className="h-4 w-4 text-cyan-500" />
-                    Lộ trình:
-                  </span>
-                  <span className="text-muted-foreground font-mono">
-                    ~18m • 25 bước chân • ~30 giây đi bộ
-                  </span>
-                  <Badge variant="outline" className="font-mono text-[10px] bg-primary/5 text-primary border-primary/20">
-                    Độ chính xác: 99.8%
-                  </Badge>
-                </div>
-
-                <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
-                  {/* Simulation Walking Controls */}
-                  <Button
-                    size="sm"
-                    variant={isSimulating ? "destructive" : "default"}
-                    onClick={handleToggleSimulation}
-                    className="h-7 text-xs gap-1.5 px-3 rounded-lg shadow-xs cursor-pointer"
+        {/* 2. BODY: SƠ ĐỒ MẶT BẰNG KỆ (TRÁI) & SƠ ĐỒ NGĂN TRÊN KỆ (PHẢI) */}
+        <div className="flex-1 overflow-y-auto p-4 sm:p-5 space-y-4">
+          {/* Room Selector Bar (Tự động hiển thị tất cả các Phòng hiện có + Nút Thêm Phòng cho Thủ thư) */}
+          <div className="flex flex-wrap items-center justify-between gap-2 bg-muted/40 p-2.5 rounded-xl border">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-xs font-semibold text-muted-foreground px-1.5 flex items-center gap-1">
+                <Building2 className="h-3.5 w-3.5 text-primary" />
+                Chọn phòng:
+              </span>
+              {dynamicLayout.rooms.map((rm) => {
+                const isTarget = rm.roomNum === parsed.roomNum;
+                const isSelected = rm.roomNum === activeRoomNum;
+                return (
+                  <button
+                    key={rm.roomNum}
+                    type="button"
+                    onClick={() => {
+                      setActiveRoomNum(rm.roomNum);
+                      setActiveShelfNum(rm.roomNum === parsed.roomNum ? parsed.shelfNum : 1);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer border ${
+                      isSelected
+                        ? "bg-primary text-primary-foreground border-primary shadow-xs"
+                        : isTarget
+                        ? "bg-primary/10 text-primary border-primary/40 hover:bg-primary/20"
+                        : "bg-background text-foreground border-border hover:bg-muted"
+                    }`}
                   >
-                    {isSimulating ? (
-                      <>
-                        <RotateCcw className="h-3.5 w-3.5" /> Dừng mô phỏng ({simStep}%)
-                      </>
-                    ) : (
-                      <>
-                        <Play className="h-3.5 w-3.5 fill-current" /> 🚶‍♂️ Mô phỏng bước đi
-                      </>
+                    <span>{rm.roomLabel}</span>
+                    <span
+                      className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                        isSelected
+                          ? "bg-primary-foreground/20 text-primary-foreground"
+                          : "bg-muted text-muted-foreground"
+                      }`}
+                    >
+                      {rm.maxShelf} kệ
+                    </span>
+                    {isTarget && (
+                      <span className="text-[10px] bg-amber-400 text-slate-950 font-bold px-1.5 rounded">
+                        ★ Đích
+                      </span>
                     )}
+                  </button>
+                );
+              })}
+
+              {canManage && (
+                <div className="flex items-center gap-1">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleAddRoomInMap}
+                    className="h-7 px-2.5 text-xs gap-1 border-dashed border-primary/50 text-primary hover:bg-primary/10 cursor-pointer"
+                    title="Thủ thư: Thêm phòng mới vào sơ đồ thư viện"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    Thêm Phòng
                   </Button>
 
-                  {/* Zoom Controls */}
-                  <div className="flex items-center gap-1 bg-muted/60 p-0.5 rounded-lg border">
-                    <button
+                  {dynamicLayout.rooms.length > 3 && (
+                    <Button
                       type="button"
-                      onClick={() => setZoomLevel((z) => Math.max(0.8, Number((z - 0.15).toFixed(2))))}
-                      className="h-6 w-6 grid place-items-center rounded hover:bg-card text-muted-foreground hover:text-foreground cursor-pointer"
-                      title="Thu nhỏ"
+                      size="sm"
+                      variant="outline"
+                      onClick={() =>
+                        handleRemoveRoomInMap(
+                          activeRoomNum > 3 ? activeRoomNum : dynamicLayout.rooms.length
+                        )
+                      }
+                      className="h-7 px-2.5 text-xs gap-1 border-destructive/40 text-destructive hover:bg-destructive/10 cursor-pointer"
+                      title="Thủ thư: Xóa phòng đã thêm (khi phòng chưa có sách)"
                     >
-                      <ZoomOut className="h-3.5 w-3.5" />
-                    </button>
-                    <span className="text-[10px] font-mono px-1 font-semibold text-foreground">
-                      {Math.round(zoomLevel * 100)}%
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setZoomLevel((z) => Math.min(1.6, Number((z + 0.15).toFixed(2))))}
-                      className="h-6 w-6 grid place-items-center rounded hover:bg-card text-muted-foreground hover:text-foreground cursor-pointer"
-                      title="Phóng to"
-                    >
-                      <ZoomIn className="h-3.5 w-3.5" />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setZoomLevel(1)}
-                      className="h-6 w-6 grid place-items-center rounded hover:bg-card text-muted-foreground hover:text-foreground cursor-pointer"
-                      title="Mặc định"
-                    >
-                      <Maximize2 className="h-3.5 w-3.5" />
-                    </button>
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Xóa Phòng {pad2(activeRoomNum > 3 ? activeRoomNum : dynamicLayout.rooms.length)}
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {(!isViewingTargetRoom || !isViewingTargetShelf) && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setActiveRoomNum(parsed.roomNum);
+                  setActiveShelfNum(parsed.shelfNum);
+                }}
+                className="h-7 text-xs gap-1 border-primary/30 text-primary hover:bg-primary/10 cursor-pointer"
+              >
+                <MapPin className="h-3 w-3" />
+                Quay về vị trí sách ({parsed.roomLabel} - {parsed.shelfLabel})
+              </Button>
+            )}
+          </div>
+
+          {/* Main 2-Column Visual Map */}
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+            {/* LEFT COLUMN (7 cols): SƠ ĐỒ MẶT BẰNG PHÒNG & DÃY KỆ */}
+            <div className="lg:col-span-7 rounded-2xl border bg-card p-4 flex flex-col justify-between space-y-4 shadow-2xs">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2 border-b pb-2.5 flex-wrap">
+                  <div>
+                    <h4 className="font-display font-bold text-sm text-foreground flex items-center gap-1.5 flex-wrap">
+                      <Building2 className="h-4 w-4 text-primary" />
+                      <span>
+                        Sơ Đồ Mặt Bằng {dynamicLayout.currentRoomInfo.roomLabel}
+                      </span>
+                      {isViewingTargetRoom && (
+                        <Badge variant="secondary" className="text-[10px] bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/30">
+                          Phòng chứa sách cần tìm
+                        </Badge>
+                      )}
+                    </h4>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      Tổng cộng <strong>{dynamicLayout.shelves.length} dãy kệ</strong> trong phòng này (bấm vào kệ bất kỳ để xem các ngăn).
+                    </p>
                   </div>
+
+                  {/* Nút Thêm / Bớt Kệ & Xóa Phòng trực tiếp cho Thủ thư */}
+                  {canManage && (
+                    <div className="flex items-center gap-1 flex-wrap">
+                      {activeRoomNum > 3 && dynamicLayout.currentRoomInfo.bookCount === 0 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => handleRemoveRoomInMap(activeRoomNum)}
+                          className="h-7 px-2 text-[11px] text-destructive hover:bg-destructive/10 cursor-pointer gap-1"
+                          title={`Xóa ${dynamicLayout.currentRoomInfo.roomLabel} khỏi sơ đồ`}
+                        >
+                          <Trash2 className="h-3 w-3" /> Xóa {dynamicLayout.currentRoomInfo.roomLabel}
+                        </Button>
+                      )}
+                      {dynamicLayout.currentRoomInfo.maxShelf > 6 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={handleRemoveLastShelfInRoom}
+                          className="h-7 px-2 text-[11px] text-muted-foreground hover:text-destructive cursor-pointer"
+                          title="Xóa kệ trống cuối cùng"
+                        >
+                          <Minus className="h-3 w-3 mr-0.5" /> Bớt kệ
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={handleAddShelfInRoom}
+                        className="h-7 px-2.5 text-xs gap-1 border-primary/40 text-primary hover:bg-primary/10 font-semibold cursor-pointer"
+                        title="Thủ thư: Thêm dãy kệ mới vào phòng này"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Thêm Kệ ({`Kệ ${pad2(dynamicLayout.currentRoomInfo.maxShelf + 1)}`})
+                      </Button>
+                    </div>
+                  )}
                 </div>
-              </div>
 
-              {/* 2D / 2.5D SVG Floor Plan Display (viewBox: 0 0 940 600 - Rộng rãi, không bao giờ bị cắt!) */}
-              <div className="relative w-full rounded-2xl border-2 border-slate-800 bg-[#0A0F1D] overflow-hidden shadow-xl">
-                {/* Compass & North Direction */}
-                <div className="absolute top-3.5 right-3.5 z-10 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-full border border-cyan-500/30 text-[11px] font-mono shadow-md text-cyan-200">
-                  <span className="font-bold">Bắc (N)</span>
-                  <Compass className="h-4 w-4 text-cyan-400 animate-spin" style={{ animationDuration: "16s" }} />
-                </div>
+                {/* Room Floorplan Box */}
+                <div className="rounded-xl border-2 border-dashed border-border bg-muted/20 p-3.5 space-y-3 relative">
+                  {/* Entrance & Librarian Counter Indicator at Top of Room */}
+                  <div className="flex items-center justify-between gap-2 pb-2.5 border-b border-border/70">
+                    <div className="flex items-center gap-2 bg-emerald-500/10 border border-emerald-500/30 text-emerald-800 dark:text-emerald-300 px-3 py-1.5 rounded-lg text-xs font-semibold">
+                      <DoorOpen className="h-4 w-4 text-emerald-600 shrink-0" />
+                      <span>Lối vào {dynamicLayout.currentRoomInfo.roomLabel}</span>
+                    </div>
 
-                {/* Level Tag Overlay */}
-                <div className="absolute top-3.5 left-3.5 z-10 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10 text-[11px] font-mono shadow-md text-white">
-                  <Building className="h-3.5 w-3.5 text-cyan-400" />
-                  <span className="font-bold">Mặt Bằng Tầng {activeFloor}</span>
-                  <span className="text-slate-400">• Cao độ +{activeFloor === 1 ? "0.0m" : "3.8m"}</span>
-                </div>
-
-                {/* SVG Blueprint Canvas */}
-                <div
-                  className="w-full overflow-auto transition-transform duration-200"
-                  style={{ transform: `scale(${zoomLevel})`, transformOrigin: "center center" }}
-                >
-                  <svg
-                    viewBox="0 0 940 600"
-                    className="w-full h-auto aspect-[940/600] select-none font-sans min-h-[320px] sm:min-h-[480px]"
-                  >
-                    <defs>
-                      {/* Blueprint Grid */}
-                      <pattern id="archGrid" width="24" height="24" patternUnits="userSpaceOnUse">
-                        <path d="M 24 0 L 0 0 0 24" fill="none" stroke="#1E293B" strokeWidth="0.8" />
-                      </pattern>
-                      <pattern id="majorGrid" width="120" height="120" patternUnits="userSpaceOnUse">
-                        <path d="M 120 0 L 0 0 0 120" fill="none" stroke="#334155" strokeWidth="1.2" strokeOpacity="0.4" />
-                      </pattern>
-
-                      {/* Neon Gradients */}
-                      <linearGradient id="neonLaserGrad" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0%" stopColor="#06b6d4" />
-                        <stop offset="50%" stopColor="#3b82f6" />
-                        <stop offset="100%" stopColor="#10b981" />
-                      </linearGradient>
-
-                      <linearGradient id="targetShelfNeon" x1="0" y1="0" x2="1" y2="0">
-                        <stop offset="0%" stopColor="#06b6d4" stopOpacity="0.95" />
-                        <stop offset="100%" stopColor="#2563eb" stopOpacity="1" />
-                      </linearGradient>
-
-                      <linearGradient id="roomBgGlow" x1="0" y1="0" x2="1" y2="1">
-                        <stop offset="0%" stopColor="#1e293b" stopOpacity="0.75" />
-                        <stop offset="100%" stopColor="#0f172a" stopOpacity="0.95" />
-                      </linearGradient>
-
-                      {/* Arrow Head */}
-                      <marker id="neonArrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                        <path d="M 0 1 L 9 5 L 0 9 z" fill="#06b6d4" />
-                      </marker>
-                    </defs>
-
-                    {/* Canvas Background & Blueprint Grids */}
-                    <rect width="940" height="600" fill="#090E1A" />
-                    <rect width="940" height="600" fill="url(#archGrid)" />
-                    <rect width="940" height="600" fill="url(#majorGrid)" />
-
-                    {/* ======================================================== */}
-                    {/* ZONE 1 (TOP-LEFT): ROOM 01 (TẦNG 1) / ROOM 04 (TẦNG 2) */}
-                    {/* ======================================================== */}
-                    <g className={`transition-all duration-300 ${activeFloor === parsed.floorNum && normRoom === 1 ? "opacity-100" : "opacity-80"}`}>
-                      <rect
-                        x="40"
-                        y="40"
-                        width="360"
-                        height="240"
-                        rx="16"
-                        fill="url(#roomBgGlow)"
-                        stroke={activeFloor === parsed.floorNum && normRoom === 1 ? "#06b6d4" : "#334155"}
-                        strokeWidth={activeFloor === parsed.floorNum && normRoom === 1 ? "2.5" : "1.5"}
-                        className={activeFloor === parsed.floorNum && normRoom === 1 ? "animate-halo-glow" : ""}
-                      />
-                      {/* Entry Door on Right Wall (Aisle 2 at y=180) */}
-                      <rect x="396" y="160" width="8" height="40" fill="#06b6d4" rx="2" fillOpacity={activeFloor === parsed.floorNum && normRoom === 1 ? 0.9 : 0.3} />
-                      <text x="390" y="184" fontSize="9" fill="#94A3B8" textAnchor="end" fontWeight="bold">🚪 Cửa</text>
-
-                      {/* Room Header & Icon (Spacious & Compact, No Overflow) */}
-                      <rect x="55" y="50" width="28" height="28" rx="8" fill="#06b6d4" fillOpacity="0.2" />
-                      <text x="69" y="69" fontSize="14" fill="#38bdf8" textAnchor="middle">🧪</text>
-                      <text x="92" y="64" fontSize="12.5" fontWeight="bold" fill="#F8FAFC">
-                        {activeFloor === 1 ? "Phòng 01 — Kho Sách A" : "Phòng 04 — Kho Sách D"}
-                      </text>
-                      <text x="92" y="78" fontSize="10" fill="#38BDF8" fontWeight="600">
-                        {activeFloor === 1 ? "Khoa Học Tự Nhiên & Nghiên Cứu" : "Kinh Tế & Quản Trị Kinh Doanh"}
-                      </text>
-                      <text x="92" y="91" fontSize="8.5" fill="#94A3B8">
-                        {activeFloor === 1 ? "Toán • Lý • Hóa • Sinh học • Kỷ yếu" : "Tài chính • Marketing • Khởi nghiệp"}
-                      </text>
-
-                      {/* 6 Shelves in Room 1 (K-01 to K-06) */}
-                      {[1, 2, 3, 4, 5, 6].map((sNum) => {
-                        const pos = getShelfPosition(1, sNum);
-                        const isTarget = activeFloor === parsed.floorNum && normRoom === 1 && targetShelf === sNum;
-                        return (
-                          <g
-                            key={`r1-shelf-${sNum}`}
-                            className="cursor-pointer group"
-                            onClick={() => {
-                              setSelectedShelf({ room: activeFloor === 1 ? 1 : 4, shelf: sNum });
-                              toast.info(`Đã chọn Kệ K-0${sNum} (Phòng 0${activeFloor === 1 ? 1 : 4})`);
-                            }}
-                          >
-                            <rect
-                              x={pos.x}
-                              y={pos.y}
-                              width={pos.w}
-                              height={pos.h}
-                              rx="8"
-                              fill={isTarget ? "url(#targetShelfNeon)" : "#1E293B"}
-                              stroke={isTarget ? "#38bdf8" : "#475569"}
-                              strokeWidth={isTarget ? "2.5" : "1"}
-                              className="transition-all duration-200 group-hover:stroke-cyan-400 group-hover:brightness-125"
-                            />
-                            {isTarget ? (
-                              <g>
-                                <text
-                                  x={pos.x + pos.w / 2}
-                                  y={pos.y + 14}
-                                  fontSize="9.5"
-                                  fontWeight="900"
-                                  fill="#FFFFFF"
-                                  textAnchor="middle"
-                                >
-                                  KỆ 0{sNum}
-                                </text>
-                                <text
-                                  x={pos.x + pos.w / 2}
-                                  y={pos.y + 26}
-                                  fontSize="8.5"
-                                  fontWeight="bold"
-                                  fill="#FDE047"
-                                  textAnchor="middle"
-                                >
-                                  ★ {parsed.rackLabel}
-                                </text>
-                                <circle cx={pos.x + pos.w / 2} cy={pos.y + pos.h / 2} r="26" fill="none" stroke="#06b6d4" strokeWidth="2" className="animate-radar-ring" />
-                                <circle cx={pos.x + pos.w / 2} cy={pos.y + pos.h / 2} r="16" fill="none" stroke="#3b82f6" strokeWidth="1.5" className="animate-radar-ring" style={{ animationDelay: "1s" }} />
-                              </g>
-                            ) : (
-                              <text
-                                x={pos.x + pos.w / 2}
-                                y={pos.y + pos.h / 2 + 4}
-                                fontSize="11"
-                                fontWeight="bold"
-                                fill="#CBD5E1"
-                                textAnchor="middle"
-                              >
-                                K-0{sNum}
-                              </text>
-                            )}
-                          </g>
-                        );
-                      })}
-                    </g>
-
-                    {/* ======================================================== */}
-                    {/* ZONE 2 (TOP-RIGHT): ROOM 02 (TẦNG 1) / ROOM 05 (TẦNG 2) */}
-                    {/* ======================================================== */}
-                    <g className={`transition-all duration-300 ${activeFloor === parsed.floorNum && normRoom === 2 ? "opacity-100" : "opacity-80"}`}>
-                      <rect
-                        x="540"
-                        y="40"
-                        width="360"
-                        height="240"
-                        rx="16"
-                        fill="url(#roomBgGlow)"
-                        stroke={activeFloor === parsed.floorNum && normRoom === 2 ? "#06b6d4" : "#334155"}
-                        strokeWidth={activeFloor === parsed.floorNum && normRoom === 2 ? "2.5" : "1.5"}
-                        className={activeFloor === parsed.floorNum && normRoom === 2 ? "animate-halo-glow" : ""}
-                      />
-                      {/* Entry Door on Left Wall (Aisle 2 at y=180) */}
-                      <rect x="536" y="160" width="8" height="40" fill="#06b6d4" rx="2" fillOpacity={activeFloor === parsed.floorNum && normRoom === 2 ? 0.9 : 0.3} />
-                      <text x="548" y="184" fontSize="9" fill="#94A3B8" fontWeight="bold">🚪 Cửa</text>
-
-                      {/* Room Header & Icon */}
-                      <rect x="555" y="50" width="28" height="28" rx="8" fill="#a855f7" fillOpacity="0.2" />
-                      <text x="569" y="69" fontSize="14" fill="#c084fc" textAnchor="middle">🎭</text>
-                      <text x="592" y="64" fontSize="12.5" fontWeight="bold" fill="#F8FAFC">
-                        {activeFloor === 1 ? "Phòng 02 — Kho Sách B" : "Phòng 05 — Kho Sách E"}
-                      </text>
-                      <text x="592" y="78" fontSize="10" fill="#C084FC" fontWeight="600">
-                        {activeFloor === 1 ? "Văn Học, Lịch Sử & Nghệ Thuật" : "Ngoại Ngữ & Từ Điển Quốc Tế"}
-                      </text>
-                      <text x="592" y="91" fontSize="8.5" fill="#94A3B8">
-                        {activeFloor === 1 ? "Tiểu thuyết • Thơ ca • Triết học • Mỹ thuật" : "Tiếng Anh • Nhật • Hàn • Pháp"}
-                      </text>
-
-                      {/* 6 Shelves in Room 2 (K-01 to K-06) */}
-                      {[1, 2, 3, 4, 5, 6].map((sNum) => {
-                        const pos = getShelfPosition(2, sNum);
-                        const isTarget = activeFloor === parsed.floorNum && normRoom === 2 && targetShelf === sNum;
-                        return (
-                          <g
-                            key={`r2-shelf-${sNum}`}
-                            className="cursor-pointer group"
-                            onClick={() => {
-                              setSelectedShelf({ room: activeFloor === 1 ? 2 : 5, shelf: sNum });
-                              toast.info(`Đã chọn Kệ K-0${sNum} (Phòng 0${activeFloor === 1 ? 2 : 5})`);
-                            }}
-                          >
-                            <rect
-                              x={pos.x}
-                              y={pos.y}
-                              width={pos.w}
-                              height={pos.h}
-                              rx="8"
-                              fill={isTarget ? "url(#targetShelfNeon)" : "#1E293B"}
-                              stroke={isTarget ? "#38bdf8" : "#475569"}
-                              strokeWidth={isTarget ? "2.5" : "1"}
-                              className="transition-all duration-200 group-hover:stroke-cyan-400 group-hover:brightness-125"
-                            />
-                            {isTarget ? (
-                              <g>
-                                <text
-                                  x={pos.x + pos.w / 2}
-                                  y={pos.y + 14}
-                                  fontSize="9.5"
-                                  fontWeight="900"
-                                  fill="#FFFFFF"
-                                  textAnchor="middle"
-                                >
-                                  KỆ 0{sNum}
-                                </text>
-                                <text
-                                  x={pos.x + pos.w / 2}
-                                  y={pos.y + 26}
-                                  fontSize="8.5"
-                                  fontWeight="bold"
-                                  fill="#FDE047"
-                                  textAnchor="middle"
-                                >
-                                  ★ {parsed.rackLabel}
-                                </text>
-                                <circle cx={pos.x + pos.w / 2} cy={pos.y + pos.h / 2} r="26" fill="none" stroke="#06b6d4" strokeWidth="2" className="animate-radar-ring" />
-                                <circle cx={pos.x + pos.w / 2} cy={pos.y + pos.h / 2} r="16" fill="none" stroke="#3b82f6" strokeWidth="1.5" className="animate-radar-ring" style={{ animationDelay: "1s" }} />
-                              </g>
-                            ) : (
-                              <text
-                                x={pos.x + pos.w / 2}
-                                y={pos.y + pos.h / 2 + 4}
-                                fontSize="11"
-                                fontWeight="bold"
-                                fill="#CBD5E1"
-                                textAnchor="middle"
-                              >
-                                K-0{sNum}
-                              </text>
-                            )}
-                          </g>
-                        );
-                      })}
-                    </g>
-
-                    {/* ======================================================== */}
-                    {/* ZONE 3 (BOTTOM-LEFT): ROOM 03 (TẦNG 1) / ROOM 06 (TẦNG 2) */}
-                    {/* ======================================================== */}
-                    <g className={`transition-all duration-300 ${activeFloor === parsed.floorNum && normRoom === 3 ? "opacity-100" : "opacity-80"}`}>
-                      <rect
-                        x="40"
-                        y="310"
-                        width="360"
-                        height="240"
-                        rx="16"
-                        fill="url(#roomBgGlow)"
-                        stroke={activeFloor === parsed.floorNum && normRoom === 3 ? "#06b6d4" : "#334155"}
-                        strokeWidth={activeFloor === parsed.floorNum && normRoom === 3 ? "2.5" : "1.5"}
-                        className={activeFloor === parsed.floorNum && normRoom === 3 ? "animate-halo-glow" : ""}
-                      />
-                      {/* Entry Door on Right Wall (Aisle 2 at y=450) */}
-                      <rect x="396" y="430" width="8" height="40" fill="#06b6d4" rx="2" fillOpacity={activeFloor === parsed.floorNum && normRoom === 3 ? 0.9 : 0.3} />
-                      <text x="390" y="454" fontSize="9" fill="#94A3B8" textAnchor="end" fontWeight="bold">🚪 Cửa</text>
-
-                      {/* Room Header & Icon */}
-                      <rect x="55" y="320" width="28" height="28" rx="8" fill="#10b981" fillOpacity="0.2" />
-                      <text x="69" y="339" fontSize="14" fill="#34d399" textAnchor="middle">💻</text>
-                      <text x="92" y="334" fontSize="12.5" fontWeight="bold" fill="#F8FAFC">
-                        {activeFloor === 1 ? "Phòng 03 — Kho Sách C" : "Phòng 06 — Kho Sách F"}
-                      </text>
-                      <text x="92" y="348" fontSize="10" fill="#34D399" fontWeight="600">
-                        {activeFloor === 1 ? "Công Nghệ Thông Tin & Kỹ Năng Số" : "Báo Chí & Tài Liệu Đa Phương Tiện"}
-                      </text>
-                      <text x="92" y="361" fontSize="8.5" fill="#94A3B8">
-                        {activeFloor === 1 ? "Lập trình • AI • Cloud • Dữ liệu • An ninh mạng" : "Báo chí • Tạp chí chuyên ngành • Luận án"}
-                      </text>
-
-                      {/* 6 Shelves in Room 3 (K-01 to K-06) */}
-                      {[1, 2, 3, 4, 5, 6].map((sNum) => {
-                        const pos = getShelfPosition(3, sNum);
-                        const isTarget = activeFloor === parsed.floorNum && normRoom === 3 && targetShelf === sNum;
-                        return (
-                          <g
-                            key={`r3-shelf-${sNum}`}
-                            className="cursor-pointer group"
-                            onClick={() => {
-                              setSelectedShelf({ room: activeFloor === 1 ? 3 : 6, shelf: sNum });
-                              toast.info(`Đã chọn Kệ K-0${sNum} (Phòng 0${activeFloor === 1 ? 3 : 6})`);
-                            }}
-                          >
-                            <rect
-                              x={pos.x}
-                              y={pos.y}
-                              width={pos.w}
-                              height={pos.h}
-                              rx="8"
-                              fill={isTarget ? "url(#targetShelfNeon)" : "#1E293B"}
-                              stroke={isTarget ? "#38bdf8" : "#475569"}
-                              strokeWidth={isTarget ? "2.5" : "1"}
-                              className="transition-all duration-200 group-hover:stroke-cyan-400 group-hover:brightness-125"
-                            />
-                            {isTarget ? (
-                              <g>
-                                <text
-                                  x={pos.x + pos.w / 2}
-                                  y={pos.y + 14}
-                                  fontSize="9.5"
-                                  fontWeight="900"
-                                  fill="#FFFFFF"
-                                  textAnchor="middle"
-                                >
-                                  KỆ 0{sNum}
-                                </text>
-                                <text
-                                  x={pos.x + pos.w / 2}
-                                  y={pos.y + 26}
-                                  fontSize="8.5"
-                                  fontWeight="bold"
-                                  fill="#FDE047"
-                                  textAnchor="middle"
-                                >
-                                  ★ {parsed.rackLabel}
-                                </text>
-                                <circle cx={pos.x + pos.w / 2} cy={pos.y + pos.h / 2} r="26" fill="none" stroke="#06b6d4" strokeWidth="2" className="animate-radar-ring" />
-                                <circle cx={pos.x + pos.w / 2} cy={pos.y + pos.h / 2} r="16" fill="none" stroke="#3b82f6" strokeWidth="1.5" className="animate-radar-ring" style={{ animationDelay: "1s" }} />
-                              </g>
-                            ) : (
-                              <text
-                                x={pos.x + pos.w / 2}
-                                y={pos.y + pos.h / 2 + 4}
-                                fontSize="11"
-                                fontWeight="bold"
-                                fill="#CBD5E1"
-                                textAnchor="middle"
-                              >
-                                K-0{sNum}
-                              </text>
-                            )}
-                          </g>
-                        );
-                      })}
-                    </g>
-
-                    {/* ======================================================== */}
-                    {/* ZONE 4: QUẦY THỦ THƯ LƯU THÔNG (BOTTOM-RIGHT - LIBRARIAN) */}
-                    {/* ======================================================== */}
-                    <g>
-                      <rect
-                        x="540"
-                        y="310"
-                        width="180"
-                        height="145"
-                        rx="14"
-                        fill="#0F172A"
-                        stroke="#334155"
-                        strokeWidth="1.5"
-                      />
-                      <rect x="555" y="325" width="24" height="24" rx="6" fill="#f59e0b" fillOpacity="0.2" />
-                      <text x="567" y="342" fontSize="13" fill="#fbbf24" textAnchor="middle">🛎️</text>
-                      <text x="586" y="338" fontSize="12" fontWeight="bold" fill="#F8FAFC">
-                        Quầy Thủ Thư
-                      </text>
-                      <text x="586" y="352" fontSize="9" fill="#94A3B8">
-                        Bàn mượn trả &amp; tiếp đón
-                      </text>
-
-                      {/* Service Counter Table */}
-                      <rect x="555" y="385" width="150" height="26" rx="6" fill="#1E293B" stroke="#475569" strokeWidth="1" />
-                      <text x="630" y="402" fontSize="9" fontWeight="bold" fill="#38bdf8" textAnchor="middle">
-                        🖥️ Quét mã &amp; Cấp sách
-                      </text>
-                    </g>
-
-                    {/* ======================================================== */}
-                    {/* ZONE 5: PHÒNG ĐỌC YÊN TĨNH & CO-WORKING (STUDY LOUNGE) */}
-                    {/* ======================================================== */}
-                    <g>
-                      <rect
-                        x="745"
-                        y="310"
-                        width="155"
-                        height="165"
-                        rx="14"
-                        fill="#0F172A"
-                        stroke="#334155"
-                        strokeWidth="1.5"
-                        strokeDasharray="4 4"
-                      />
-                      <rect x="760" y="325" width="24" height="24" rx="6" fill="#10b981" fillOpacity="0.2" />
-                      <text x="772" y="342" fontSize="13" fill="#34d399" textAnchor="middle">🛋️</text>
-                      <text x="792" y="338" fontSize="11.5" fontWeight="bold" fill="#F8FAFC">
-                        Phòng Tự Học
-                      </text>
-                      <text x="792" y="352" fontSize="8.5" fill="#94A3B8">
-                        Không gian yên tĩnh
-                      </text>
-
-                      {/* Study Pods / Tables */}
-                      <circle cx="785" cy="405" r="14" fill="#1E293B" stroke="#475569" strokeWidth="1" />
-                      <circle cx="855" cy="405" r="14" fill="#1E293B" stroke="#475569" strokeWidth="1" />
-                      <circle cx="785" cy="445" r="14" fill="#1E293B" stroke="#475569" strokeWidth="1" />
-                      <circle cx="855" cy="445" r="14" fill="#1E293B" stroke="#475569" strokeWidth="1" />
-                    </g>
-
-                    {/* ======================================================== */}
-                    {/* ZONE 6: CẦU THANG BỘ & THANG MÁY (STAIRS / ELEVATOR) */}
-                    {/* ======================================================== */}
-                    <g>
-                      <rect
-                        x="435"
-                        y="40"
-                        width="70"
-                        height="85"
-                        rx="12"
-                        fill="#0F172A"
-                        stroke="#334155"
-                        strokeWidth="1.5"
-                      />
-                      <text x="470" y="68" fontSize="16" textAnchor="middle">🛗</text>
-                      <text x="470" y="88" fontSize="10" fontWeight="bold" fill="#94A3B8" textAnchor="middle">
-                        Thang Máy
-                      </text>
-                      <text x="470" y="103" fontSize="8.5" fill="#64748B" textAnchor="middle">
-                        Tầng 1 ⇄ 2
-                      </text>
-                    </g>
-
-                    {/* ======================================================== */}
-                    {/* ZONE 7: SMART BOOK DROP 24/7 & CỔNG AN NINH RFID */}
-                    {/* ======================================================== */}
-                    <g>
-                      {/* Smart Book Drop 24/7 Box */}
-                      <g className="cursor-pointer" onClick={() => toast.info("Hòm trả sách thông minh 24/7 đặt tại sảnh chính")}>
-                        <rect x="745" y="495" width="155" height="52" rx="12" fill="#1E1B4B" stroke="#6366F1" strokeWidth="1.5" />
-                        <text x="765" y="526" fontSize="15">📦</text>
-                        <text x="788" y="518" fontSize="11" fontWeight="bold" fill="#C7D2FE">Hòm Trả 24/7</text>
-                        <text x="788" y="533" fontSize="8.5" fill="#818CF8">Nhận trả sách tự động</text>
-                      </g>
-
-                      {/* Main Entrance & RFID Security Gates */}
-                      <rect x="550" y="495" width="170" height="52" rx="12" fill="#064E3B" stroke="#10B981" strokeWidth="2" />
-                      <circle cx="570" cy="521" r="5" fill="#34D399" className="animate-ping" />
-                      <text x="588" y="519" fontSize="12" fontWeight="black" fill="#ECFDF5">
-                        🚪 CỬA VÀO CHÍNH
-                      </text>
-                      <text x="588" y="534" fontSize="8.5" fill="#A7F3D0">
-                        Cổng an ninh RFID
-                      </text>
-                    </g>
-
-                    {/* ======================================================== */}
-                    {/* DYNAMIC WAYFINDING LASER PATH */}
-                    {/* ======================================================== */}
-                    {activeFloor === parsed.floorNum && (
-                      <g>
-                        {/* Neon Ambient Blur Glow */}
-                        <path
-                          d={pathD}
-                          fill="none"
-                          stroke="#06b6d4"
-                          strokeWidth="10"
-                          strokeOpacity="0.3"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                        {/* Solid Bright Core */}
-                        <path
-                          d={pathD}
-                          fill="none"
-                          stroke="url(#neonLaserGrad)"
-                          strokeWidth="4"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                        {/* Moving Flowing Dash Beam */}
-                        <path
-                          d={pathD}
-                          fill="none"
-                          stroke="#ffffff"
-                          strokeWidth="2.5"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          className="animate-laser-flow"
-                          markerEnd="url(#neonArrow)"
-                        />
-
-                        {/* Starting Pin at Entrance */}
-                        <circle cx={waypoints[0].x} cy={waypoints[0].y} r="8" fill="#10B981" stroke="#FFFFFF" strokeWidth="2.5" />
-                        <text x={waypoints[0].x} y={waypoints[0].y - 12} fontSize="10" fontWeight="black" fill="#34D399" textAnchor="middle">
-                          BẮT ĐẦU
-                        </text>
-
-                        {/* Dynamic Floating Walker Marker during simulation */}
-                        {isSimulating && (
-                          <g transform={`translate(${walkerPos.x}, ${walkerPos.y})`}>
-                            <circle r="14" fill="#06B6D4" fillOpacity="0.3" className="animate-ping" />
-                            <circle r="9" fill="#06B6D4" stroke="#FFFFFF" strokeWidth="2.5" />
-                            <text y="4" fontSize="11" textAnchor="middle">🚶</text>
-                          </g>
-                        )}
-
-                        {/* Destination Arrival Beacon directly in aisle facing target shelf */}
-                        {waypoints.length > 0 && (
-                          <g>
-                            <circle
-                              cx={waypoints[waypoints.length - 1].x}
-                              cy={waypoints[waypoints.length - 1].y}
-                              r="5"
-                              fill="#38BDF8"
-                              stroke="#FFFFFF"
-                              strokeWidth="2"
-                            />
-                            <circle
-                              cx={waypoints[waypoints.length - 1].x}
-                              cy={waypoints[waypoints.length - 1].y}
-                              r="12"
-                              fill="none"
-                              stroke="#38BDF8"
-                              strokeWidth="1.5"
-                              className="animate-ping"
-                            />
-                          </g>
-                        )}
-                      </g>
+                    {isViewingTargetRoom && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-primary font-semibold bg-primary/10 px-2.5 py-1 rounded-lg border border-primary/20">
+                        <Footprints className="h-3.5 w-3.5" />
+                        <span>Đi thẳng đến dãy {parsed.shelfLabel}</span>
+                      </div>
                     )}
-                  </svg>
+
+                    <div className="text-[11px] text-muted-foreground bg-background px-2.5 py-1 rounded-lg border hidden sm:block">
+                      🛎️ Quầy Thủ thư ở ngoài sảnh
+                    </div>
+                  </div>
+
+                  {/* Central Aisle Guidance Line */}
+                  <div className="flex items-center justify-center gap-2 py-1 text-[11px] font-medium text-muted-foreground">
+                    <span className="h-px flex-1 bg-border" />
+                    <span className="px-2 py-0.5 rounded-full bg-background border text-[10px] font-mono">
+                      ↓ LỐI ĐI CHÍNH GIỮA CÁC DÃY KỆ ↓
+                    </span>
+                    <span className="h-px flex-1 bg-border" />
+                  </div>
+
+                  {/* Dynamic Shelves Grid (Automatically grows when Kệ 07, Kệ 08... are added) */}
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                    {dynamicLayout.shelves.map((shelf) => {
+                      const isTargetShelf = isViewingTargetRoom && shelf.shelfNum === parsed.shelfNum;
+                      const isSelectedShelf = shelf.shelfNum === activeShelfNum;
+
+                      return (
+                        <button
+                          key={shelf.shelfNum}
+                          type="button"
+                          onClick={() => setActiveShelfNum(shelf.shelfNum)}
+                          className={`group relative text-left p-3 rounded-xl border-2 transition-all cursor-pointer flex flex-col justify-between min-h-[82px] ${
+                            isTargetShelf
+                              ? "border-emerald-600 bg-emerald-500/10 shadow-sm ring-2 ring-emerald-500/20"
+                              : isSelectedShelf
+                              ? "border-primary bg-primary/10 shadow-xs"
+                              : "border-border bg-background hover:border-primary/50 hover:bg-muted/40"
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-1 w-full">
+                            <span
+                              className={`font-mono font-bold text-xs px-2 py-0.5 rounded-md ${
+                                isTargetShelf
+                                  ? "bg-emerald-600 text-white"
+                                  : isSelectedShelf
+                                  ? "bg-primary text-primary-foreground"
+                                  : "bg-muted text-foreground"
+                              }`}
+                            >
+                              {shelf.shelfLabel}
+                            </span>
+
+                            {isTargetShelf && (
+                              <span className="text-[10px] font-bold bg-amber-400 text-slate-950 px-1.5 py-0.5 rounded shadow-2xs animate-pulse">
+                                🎯 Đích
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="mt-2 space-y-0.5">
+                            {isTargetShelf ? (
+                              <p className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400 truncate">
+                                ★ Có sách ở {parsed.rackLabel}
+                              </p>
+                            ) : (
+                              <p className="text-[11px] text-muted-foreground">
+                                {shelf.maxRack} ngăn • {shelf.bookCount} đầu sách
+                              </p>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
 
-              {/* Map Legend & Fast Coordinates Summary */}
-              <div className="flex flex-wrap items-center justify-between text-xs text-muted-foreground bg-card p-3 rounded-xl border border-border/70 gap-3">
-                <div className="flex items-center gap-4 flex-wrap">
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-3 w-3 rounded-full bg-emerald-500 shadow-xs" />
-                    <span className="font-medium text-foreground">Cửa chính &amp; Cổng từ RFID</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-2.5 w-6 rounded bg-gradient-to-r from-cyan-500 to-blue-600 shadow-xs" />
-                    <span className="font-bold text-cyan-600 dark:text-cyan-400">Kệ chứa sách đích</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-0.5 w-6 border-b-2 border-dashed border-cyan-400" />
-                    <span>Lộ trình dẫn đường</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-3 w-3 rounded bg-indigo-600 shadow-xs" />
-                    <span>Hòm trả 24/7 ngoài giờ</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="h-3 w-3 rounded bg-amber-500 shadow-xs" />
-                    <span>Quầy thủ thư</span>
-                  </div>
-                </div>
-
-                <div className="font-mono text-xs text-foreground font-bold bg-muted px-2.5 py-1 rounded-lg border whitespace-nowrap">
-                  Vị trí: {parsed.roomLabel} — {parsed.shelfLabel} — {parsed.rackLabel}
+              {/* Legend */}
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t text-[11px] text-muted-foreground">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-3 w-3 rounded bg-emerald-600 inline-block" />
+                    <strong className="text-foreground">Kệ có sách cần tìm ({parsed.shelfLabel})</strong>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-3 w-3 rounded bg-primary inline-block" />
+                    <span>Kệ đang xem chi tiết</span>
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <span className="h-3 w-3 rounded border border-border bg-background inline-block" />
+                    <span>Các kệ khác trong phòng</span>
+                  </span>
                 </div>
               </div>
             </div>
-          )}
 
-          {/* TAB 2: REALISTIC 5-TIER 3D BOOKSHELF ELEVATION */}
-          {activeTab === "shelf" && (
-            <div className="space-y-4 animate-in fade-in-50 duration-200">
-              <div className="rounded-2xl border bg-card p-4 sm:p-6 shadow-xs space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 pb-3 border-b">
+            {/* RIGHT COLUMN (5 cols): SƠ ĐỒ CÁC NGĂN TRÊN KỆ (TỰ ĐỘNG CẬP NHẬT SỐ NGĂN) */}
+            <div className="lg:col-span-5 rounded-2xl border bg-card p-4 flex flex-col justify-between space-y-3 shadow-2xs">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2 border-b pb-2.5 flex-wrap">
                   <div>
-                    <h3 className="font-display font-bold text-base sm:text-lg flex items-center gap-2 text-foreground">
-                      <Layers className="h-5 w-5 text-amber-500" />
-                      <span>Mặt Cắt Đứng Dãy Kệ Thực Tế ({parsed.shelfLabel} — {parsed.roomLabel})</span>
-                    </h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Kệ sách vật lý tiêu chuẩn cao 2.0m gồm 5 tầng (ngăn). Cuốn sách bạn cần tìm được xếp chính xác tại{" "}
-                      <strong className="text-cyan-600 dark:text-cyan-400 font-bold">{parsed.rackLabel}</strong>.
+                    <h4 className="font-display font-bold text-sm text-foreground flex items-center gap-1.5">
+                      <Layers className="h-4 w-4 text-primary" />
+                      <span>
+                        Cấu Trúc Ngăn — {dynamicLayout.currentShelfInfo.shelfLabel} ({dynamicLayout.currentRoomInfo.roomLabel})
+                      </span>
+                    </h4>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      Kệ này có <strong>{dynamicLayout.racks.length} ngăn</strong> (Ngăn 01 ở dưới cùng, đếm lên trên).
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant="outline" className="font-mono text-xs text-amber-600 dark:text-amber-400 border-amber-500/30">
-                      📐 Chiều cao: 2.0 mét • 5 Tầng
-                    </Badge>
-                  </div>
+
+                  {/* Nút Thêm / Bớt Ngăn trực tiếp cho Thủ thư */}
+                  {canManage && (
+                    <div className="flex items-center gap-1">
+                      {dynamicLayout.currentShelfInfo.maxRack > 5 && (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={handleRemoveTopRackOnShelf}
+                          className="h-7 px-2 text-[11px] text-muted-foreground hover:text-destructive cursor-pointer"
+                          title="Xóa ngăn trống trên cùng"
+                        >
+                          <Minus className="h-3 w-3 mr-0.5" /> Bớt ngăn
+                        </Button>
+                      )}
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={handleAddRackOnShelf}
+                        className="h-7 px-2.5 text-xs gap-1 border-primary/40 text-primary hover:bg-primary/10 font-semibold cursor-pointer"
+                        title="Thủ thư: Thêm tầng ngăn mới lên kệ này"
+                      >
+                        <Plus className="h-3.5 w-3.5" />
+                        Thêm Ngăn ({`Ngăn ${pad2(dynamicLayout.currentShelfInfo.maxRack + 1)}`})
+                      </Button>
+                    </div>
+                  )}
                 </div>
 
-                {/* 5-Tier Bookshelf Visualization */}
-                <div className="max-w-2xl mx-auto py-2 space-y-3">
-                  {[5, 4, 3, 2, 1].map((rNum) => {
-                    const isTargetRack = parsed.rackNum === rNum;
-                    const tierInfo =
-                      rNum === 5
-                        ? { label: "Tầng 5 (Ngăn đỉnh ~1.8m - 2.0m)", desc: "Sách tham khảo & kỷ yếu nghiên cứu ít lưu thông", eyeLevel: "Cần với cao" }
-                        : rNum === 4
-                        ? { label: "Tầng 4 (Ngăn trên ~1.5m - 1.8m)", desc: "Sách chuyên khảo & giáo trình học kỳ", eyeLevel: "Vừa tầm với" }
-                        : rNum === 3
-                        ? { label: "Tầng 3 (Tầm mắt ~1.2m - 1.5m)", desc: "Sách mượn nhiều nhất, dễ nhìn thấy nhất khi đứng", eyeLevel: "👁️ Ngang tầm mắt (Tối ưu)" }
-                        : rNum === 2
-                        ? { label: "Tầng 2 (Ngăn dưới ~0.6m - 1.2m)", desc: "Sách kỹ năng & ấn phẩm thường thức", eyeLevel: "Tầm cúi nhẹ" }
-                        : { label: "Tầng 1 (Ngăn đáy ~0.0m - 0.6m)", desc: "Từ điển dày, sách khổ lớn & bộ bách khoa toàn thư", eyeLevel: "Ngăn đáy" };
+                {/* Bookshelf Frame Visual */}
+                <div className="rounded-xl border-2 border-amber-900/20 dark:border-amber-500/20 bg-amber-950/[0.03] dark:bg-amber-950/10 p-2.5 space-y-2 max-h-[340px] overflow-y-auto">
+                  {dynamicLayout.racks.map((rack) => {
+                    const isTargetRack =
+                      isViewingTargetShelf && rack.rackNum === parsed.rackNum;
 
                     return (
                       <div
-                        key={`shelf-tier-${rNum}`}
-                        className={`relative rounded-2xl border-2 transition-all p-3 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                        key={rack.rackNum}
+                        className={`rounded-xl border-2 p-2.5 transition-all flex items-center justify-between gap-2.5 ${
                           isTargetRack
-                            ? "border-cyan-500 bg-cyan-50/20 dark:bg-cyan-950/25 shadow-lg ring-4 ring-cyan-500/10 scale-[1.01]"
-                            : "border-border/70 bg-card hover:bg-muted/20"
+                            ? "border-emerald-600 bg-emerald-500/15 shadow-xs"
+                            : "border-border/80 bg-background hover:bg-muted/40"
                         }`}
                       >
-                        {/* Rack Badge & Title */}
-                        <div className="flex items-start gap-3.5 min-w-0">
+                        <div className="flex items-center gap-2.5 min-w-0">
                           <div
-                            className={`h-10 w-10 rounded-xl grid place-items-center font-bold text-xs font-mono shrink-0 shadow-xs ${
+                            className={`h-8 w-14 rounded-lg font-mono font-bold text-xs flex items-center justify-center shrink-0 ${
                               isTargetRack
-                                ? "bg-cyan-600 text-white"
+                                ? "bg-emerald-600 text-white shadow-2xs"
                                 : "bg-muted text-muted-foreground"
                             }`}
                           >
-                            N-0{rNum}
+                            {rack.rackLabel}
                           </div>
+
                           <div className="min-w-0">
-                            <div className="flex items-center gap-2 flex-wrap">
-                              <p className={`text-xs sm:text-sm font-bold ${isTargetRack ? "text-cyan-600 dark:text-cyan-400 font-display" : "text-foreground"}`}>
-                                {tierInfo.label}
-                              </p>
-                              {isTargetRack && (
-                                <Badge className="bg-cyan-600 hover:bg-cyan-700 text-white text-[10px] font-bold gap-1 animate-pulse">
-                                  🎯 VỊ TRÍ CUỐN SÁCH CẦN TÌM
-                                </Badge>
-                              )}
-                              <Badge variant="outline" className="text-[10px] font-mono text-muted-foreground">
-                                {tierInfo.eyeLevel}
-                              </Badge>
-                            </div>
-                            <p className="text-[11px] text-muted-foreground mt-0.5">
-                              {tierInfo.desc}
-                            </p>
+                            {isTargetRack ? (
+                              <div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
+                                    🎯 Sách cần tìm ở ngăn này
+                                  </span>
+                                </div>
+                                <p className="text-[11px] font-medium text-foreground truncate mt-0.5">
+                                  📖 {bookTitle || "Cuốn sách bạn chọn"}
+                                </p>
+                              </div>
+                            ) : (
+                              <div>
+                                <p className="text-xs font-semibold text-foreground">
+                                  {rack.rackLabel}{" "}
+                                  <span className="text-[10px] font-normal text-muted-foreground">
+                                    ({rack.rackNum === 1 ? "Ngăn dưới cùng" : `Tầng ${rack.rackNum}`})
+                                  </span>
+                                </p>
+                                <p className="text-[10px] text-muted-foreground truncate">
+                                  {rack.booksInRack.length > 0
+                                    ? `Đang xếp ${rack.booksInRack.length} đầu sách`
+                                    : "Ngăn trống / Sẵn sàng xếp sách"}
+                                </p>
+                              </div>
+                            )}
                           </div>
                         </div>
 
-                        {/* Visual Books on Shelf Shelf Simulation */}
-                        <div className="flex items-end gap-1 shrink-0 h-10 px-2 py-1 rounded-lg bg-muted/40 border border-border/50 self-end sm:self-center">
+                        {/* Mini Book Spines Visual */}
+                        <div className="shrink-0 flex items-end gap-0.5 h-7 px-2 py-1 rounded bg-muted/60 border border-border/50">
                           {isTargetRack ? (
-                            <div className="flex items-center gap-2 px-3 py-1 rounded bg-cyan-600 text-white font-bold text-xs shadow-xs animate-bounce" style={{ animationDuration: "2s" }}>
-                              <BookOpen className="h-3.5 w-3.5 shrink-0" />
-                              <span className="truncate max-w-[140px] text-[11px]">
-                                {bookTitle || "Sách ở đây"}
-                              </span>
-                            </div>
+                            <Badge className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] px-2 py-0.5 gap-1">
+                              <BookOpen className="h-3 w-3" />
+                              Lấy tại đây
+                            </Badge>
                           ) : (
-                            <div className="flex items-end gap-1 opacity-70">
-                              <div className="w-2 h-7 bg-red-400 rounded-t-xs" />
-                              <div className="w-2.5 h-9 bg-blue-500 rounded-t-xs" />
-                              <div className="w-1.5 h-6 bg-emerald-400 rounded-t-xs" />
-                              <div className="w-2.5 h-8 bg-amber-400 rounded-t-xs" />
-                              <div className="w-2 h-7 bg-purple-400 rounded-t-xs" />
-                              <div className="w-2 h-9 bg-indigo-500 rounded-t-xs" />
+                            <div className="flex items-end gap-0.5 opacity-60">
+                              <span className="w-1.5 h-4 bg-primary/60 rounded-t-2xs" />
+                              <span className="w-2 h-5 bg-amber-500/60 rounded-t-2xs" />
+                              <span className="w-1.5 h-3.5 bg-emerald-500/60 rounded-t-2xs" />
+                              <span className="w-2 h-4 bg-indigo-500/60 rounded-t-2xs" />
                             </div>
                           )}
                         </div>
@@ -1233,184 +965,30 @@ export function LibraryMiniMapModal({
                     );
                   })}
                 </div>
+              </div>
 
-                <div className="text-xs text-muted-foreground bg-muted/40 p-3.5 rounded-xl border flex items-start gap-2.5">
-                  <Info className="h-4 w-4 text-cyan-600 shrink-0 mt-0.5" />
-                  <div className="space-y-1">
-                    <p className="font-semibold text-foreground">
-                      Quy tắc xếp sách trên giá:
-                    </p>
-                    <p className="leading-relaxed">
-                      Sách trên kệ được xếp theo thứ tự mã số phân loại Dewey (DDC) và tiêu đề từ trái qua phải, từ ngăn trên xuống ngăn dưới. Khi đến trước dãy <strong>{parsed.shelfLabel}</strong>, bạn đếm từ đáy lên ngăn số <strong>0{parsed.rackNum}</strong> để lấy sách ngay lập tức!
-                    </p>
-                  </div>
-                </div>
+              {/* Dynamic Auto-Update Note */}
+              <div className="p-2.5 rounded-xl bg-primary/5 border border-primary/15 text-[11px] text-muted-foreground flex items-start gap-2">
+                <Sparkles className="h-3.5 w-3.5 text-primary shrink-0 mt-0.5" />
+                <span>
+                  {canManage
+                    ? "Thủ thư có thể bấm trực tiếp nút «+ Thêm Phòng», «+ Thêm Kệ», «+ Thêm Ngăn» ngay trên sơ đồ này hoặc tại tab Sơ đồ Phòng & Kệ."
+                    : "Khi thủ thư thêm Phòng, Kệ hoặc Ngăn mới, sơ đồ dẫn đường này sẽ tự động mở rộng tương ứng."}
+                </span>
               </div>
             </div>
-          )}
-
-          {/* TAB 3: TURN-BY-TURN STEP GPS GUIDANCE & AI VOICE */}
-          {activeTab === "steps" && (
-            <div className="space-y-4 animate-in fade-in-50 duration-200">
-              <div className="rounded-2xl border bg-card p-4 sm:p-6 shadow-xs space-y-4">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b">
-                  <div>
-                    <h3 className="font-display font-bold text-base sm:text-lg flex items-center gap-2 text-foreground">
-                      <Footprints className="h-5 w-5 text-emerald-600" />
-                      <span>Lộ Trình Từng Bước Đến Cuốn Sách</span>
-                    </h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      Chỉ dẫn đường đi ngắn nhất, tránh vật cản và đến thẳng vị trí cuốn sách
-                    </p>
-                  </div>
-
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={handleToggleVoice}
-                    className="h-8 text-xs gap-1.5 text-cyan-700 dark:text-cyan-300 border-cyan-500/30 bg-cyan-50/20 dark:bg-cyan-950/20 hover:bg-cyan-50 cursor-pointer"
-                  >
-                    <Volume2 className="h-3.5 w-3.5" />
-                    <span>{isSpeaking ? "Đang đọc thuyết minh..." : "Phát âm thanh chỉ đường"}</span>
-                  </Button>
-                </div>
-
-                {/* Timeline Cards */}
-                <div className="space-y-3">
-                  {[
-                    {
-                      step: 1,
-                      icon: "🚪",
-                      title: "Cửa vào chính & Cổng từ RFID an ninh",
-                      desc: `Bước qua cửa kính chính ở Tầng ${parsed.floorNum}. Bạn sẽ thấy Cổng từ an ninh và khu vực đón tiếp độc giả.`,
-                      dist: "0 mét",
-                      action: "Xuất phát",
-                    },
-                    {
-                      step: 2,
-                      icon: "🚶",
-                      title: "Đi dọc Hành lang trung tâm",
-                      desc:
-                        parsed.floorNum === 2
-                          ? "Đi thẳng tới cuối hành lang, sử dụng Thang máy hoặc Cầu thang bộ để lên Tầng 2."
-                          : "Đi thẳng khoảng 10 mét dọc theo hành lang trung tâm giữa dãy Phòng 01 và Phòng 02.",
-                      dist: "Khoảng 10m",
-                      action: "Đi thẳng",
-                    },
-                    {
-                      step: 3,
-                      icon: "🚪",
-                      title: `Rẽ vào ${parsed.roomLabel}`,
-                      desc: `Bước qua cửa của ${parsed.roomLabel}. Quan sát biển tên phòng và bản đồ số mini treo tại cửa.`,
-                      dist: "Khoảng 14m",
-                      action: "Rẽ vào phòng",
-                    },
-                    {
-                      step: 4,
-                      icon: "📚",
-                      title: `Tiến đến dãy ${parsed.shelfLabel}`,
-                      desc: `Xác định dãy ${parsed.shelfLabel} (được treo biển số K-0${parsed.shelfNum} phản quang ở đầu dãy).`,
-                      dist: "Khoảng 18m",
-                      action: "Xác định kệ",
-                    },
-                    {
-                      step: 5,
-                      icon: "🎯",
-                      title: `Lấy sách tại ${parsed.rackLabel}`,
-                      desc: `Đếm từ đáy kệ lên ngăn số 0${parsed.rackNum}. Cuốn sách «${
-                        bookTitle || "sách cần tìm"
-                      }» nằm tại vị trí này. Quét mã QR tem gáy để đối soát và mang tới quầy mượn!`,
-                      dist: "Đích đến",
-                      action: "Lấy sách",
-                    },
-                  ].map((s) => (
-                    <div
-                      key={s.step}
-                      className="flex items-start gap-3.5 p-3.5 rounded-xl border border-border/70 bg-card hover:border-primary/40 transition-all shadow-2xs"
-                    >
-                      <div className="h-8 w-8 rounded-full bg-primary/10 text-primary border border-primary/20 font-bold text-xs grid place-items-center shrink-0 shadow-2xs mt-0.5">
-                        {s.step}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <p className="font-bold text-xs sm:text-sm text-foreground flex items-center gap-1.5">
-                            <span>{s.icon}</span>
-                            <span>{s.title}</span>
-                          </p>
-                          <div className="flex items-center gap-1.5">
-                            <Badge variant="outline" className="text-[10px] font-mono font-semibold">
-                              {s.dist}
-                            </Badge>
-                            <Badge className="bg-primary/10 text-primary hover:bg-primary/20 text-[10px]">
-                              {s.action}
-                            </Badge>
-                          </div>
-                        </div>
-                        <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                          {s.desc}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 4: MOBILE QR WAYFINDING PASS (MANG THEO MOBILE) */}
-          {activeTab === "mobile" && (
-            <div className="space-y-4 animate-in fade-in-50 duration-200">
-              <div className="rounded-2xl border bg-card p-4 sm:p-6 shadow-xs flex flex-col items-center text-center space-y-4 max-w-lg mx-auto">
-                <div className="h-12 w-12 rounded-2xl bg-pink-500/10 text-pink-500 grid place-items-center">
-                  <QrCode className="h-6 w-6" />
-                </div>
-                <div>
-                  <h3 className="font-display font-bold text-base text-foreground">
-                    Thẻ Dẫn Đường Trên Điện Thoại (Mobile Navigation Pass)
-                  </h3>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    Dùng camera điện thoại quét mã QR bên dưới để mở sơ đồ dẫn đường này trên di động khi đang đi tìm sách
-                  </p>
-                </div>
-
-                {/* QR Code Canvas */}
-                <div className="p-4 bg-white rounded-2xl border-2 border-primary/40 shadow-md">
-                  <QRCodeCanvas
-                    id="mobile-minimap-qr"
-                    value={`https://athenaeum.lib/nav?room=${parsed.roomNum}&shelf=${parsed.shelfNum}&rack=${parsed.rackNum}&floor=${parsed.floorNum}&book=${encodeURIComponent(bookTitle || "")}`}
-                    size={180}
-                    level="H"
-                    includeMargin={true}
-                    className="rounded-lg"
-                  />
-                  <code className="text-[11px] font-mono font-bold text-primary block mt-2 whitespace-nowrap">
-                    {parsed.roomLabel} — {parsed.shelfLabel} — {parsed.rackLabel}
-                  </code>
-                </div>
-
-                <div className="w-full space-y-2 text-xs">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="w-full gap-1.5 cursor-pointer"
-                    onClick={handleCopyGuide}
-                  >
-                    <Copy className="h-3.5 w-3.5" /> Sao chép văn bản chỉ đường
-                  </Button>
-                </div>
-              </div>
-            </div>
-          )}
+          </div>
         </div>
 
-        {/* ========================================================================= */}
-        {/* 3. MODAL FOOTER */}
-        {/* ========================================================================= */}
-        <div className="p-3.5 sm:p-4 border-t bg-card flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
-            <MapPin className="h-4 w-4 text-cyan-600 shrink-0" />
-            <span className="whitespace-nowrap truncate">
-              Tọa độ: <strong className="text-foreground">{parsed.roomLabel}</strong> — <strong className="text-foreground">{parsed.shelfLabel}</strong> — <strong className="text-foreground">{parsed.rackLabel}</strong> (Tầng {parsed.floorNum})
+        {/* 3. FOOTER */}
+        <div className="p-3.5 sm:p-4 border-t bg-muted/20 flex flex-col sm:flex-row sm:items-center justify-between gap-2 shrink-0">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
+            <span>
+              Vị trí chính xác:{" "}
+              <strong className="text-foreground font-mono">
+                {parsed.roomLabel} — {parsed.shelfLabel} — {parsed.rackLabel}
+              </strong>
             </span>
           </div>
 
@@ -1419,19 +997,19 @@ export function LibraryMiniMapModal({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => onOpenChange(false)}
-              className="text-xs h-8 cursor-pointer"
+              onClick={handleCopyLocation}
+              className="h-8 text-xs gap-1.5 cursor-pointer"
             >
-              Đóng
+              <Copy className="h-3.5 w-3.5" />
+              Sao chép vị trí
             </Button>
             <Button
               type="button"
               size="sm"
-              onClick={handleCopyGuide}
-              className="text-xs h-8 gap-1.5 bg-cyan-600 hover:bg-cyan-700 text-white font-semibold cursor-pointer shadow-xs"
+              onClick={() => onOpenChange(false)}
+              className="h-8 text-xs px-4 cursor-pointer"
             >
-              <Share2 className="h-3.5 w-3.5" />
-              <span>Chia sẻ lộ trình</span>
+              Đóng sơ đồ
             </Button>
           </div>
         </div>
@@ -1439,3 +1017,4 @@ export function LibraryMiniMapModal({
     </Dialog>
   );
 }
+export default LibraryMiniMapModal;
