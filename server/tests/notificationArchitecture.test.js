@@ -7,24 +7,23 @@ const jwt = require('jsonwebtoken');
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'ci-smoke-test-jwt-secret';
 
 const dbModulePath = require.resolve('../config/db');
-if (!require.cache[dbModulePath]) {
-    require.cache[dbModulePath] = {
-        id: dbModulePath,
-        filename: dbModulePath,
-        loaded: true,
-        exports: {
-            execute: async () => [[], []],
-            query: async () => [[], []],
-            getConnection: async () => ({
-                beginTransaction: async () => { },
-                execute: async () => [[], []],
-                commit: async () => { },
-                rollback: async () => { },
-                release: () => { },
-            }),
-        },
-    };
-}
+const fallbackDbMock = {
+    execute: async () => [[], []],
+    query: async () => [[], []],
+    getConnection: async () => ({
+        beginTransaction: async () => { },
+        execute: async () => [[], []],
+        commit: async () => { },
+        rollback: async () => { },
+        release: () => { },
+    }),
+};
+require.cache[dbModulePath] = {
+    id: dbModulePath,
+    filename: dbModulePath,
+    loaded: true,
+    exports: fallbackDbMock,
+};
 
 const db = require('../config/db');
 const { getJwtSecret } = require('../middlewares/authMiddleware');
@@ -39,6 +38,15 @@ const {
     dispatchSuspensionTransitionNotification,
 } = require('../services/notificationService');
 const { toLocalDateString, addDaysToDateString } = require('../utils/dateUtils');
+
+// Silence console.log during test execution to prevent raw multi-byte emoji logs from corrupting Node.js Test Runner's internal IPC buffer
+const originalConsoleLog = console.log;
+test.beforeEach(() => {
+    console.log = () => { };
+});
+test.afterEach(() => {
+    console.log = originalConsoleLog;
+});
 
 function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
     return new Promise((resolve, reject) => {
@@ -66,14 +74,20 @@ function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
         const rawChunks = [];
         const outSocket = new PassThrough();
         outSocket.writable = true;
-        outSocket.cork = () => { };
-        outSocket.uncork = () => { };
-        outSocket.destroy = () => { };
         outSocket._write = (chunk, _enc, cb) => {
             rawChunks.push(Buffer.from(chunk));
             cb();
         };
         res.assignSocket(outSocket);
+
+        const cleanup = () => {
+            try {
+                if (!socket.destroyed) socket.destroy();
+                if (!outSocket.destroyed) outSocket.destroy();
+            } catch {
+                // ignore
+            }
+        };
 
         res.on('finish', () => {
             const raw = Buffer.concat(rawChunks).toString('utf8');
@@ -85,6 +99,7 @@ function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
             } catch {
                 json = null;
             }
+            cleanup();
             resolve({
                 status: res.statusCode,
                 bodyText,
@@ -92,7 +107,17 @@ function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
             });
         });
 
-        app.handle(req, res, reject);
+        res.on('error', (err) => {
+            cleanup();
+            reject(err);
+        });
+
+        app.handle(req, res, (err) => {
+            if (err) {
+                cleanup();
+                reject(err);
+            }
+        });
     });
 }
 
@@ -212,7 +237,7 @@ test('runDueDateRemindersSweep groups T-2 books per reader, skips T-0 email, lim
         assert.equal(secondRun.emailCount, 0);
         assert.equal(dispatched.length, 2);
     } finally {
-        db.execute = originalExecute;
+        db.execute = originalExecute || fallbackDbMock.execute;
         for (const [k, v] of Object.entries(envBackup)) {
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
@@ -287,7 +312,7 @@ test('Suspension notification fires ONLY on non-suspended -> suspended transitio
         assert.equal(deduped.emailResult?.skippedDuplicate, true);
         assert.equal(dispatched.length, 1);
     } finally {
-        db.execute = originalExecute;
+        db.execute = originalExecute || fallbackDbMock.execute;
         for (const [k, v] of Object.entries(envBackup)) {
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
@@ -389,7 +414,7 @@ test('Reservation ready sends both In-app + Email once and optional email prefer
         assert.equal(resReadyDup.skippedEmailReason, 'dedup_key_already_sent');
         assert.equal(dispatched.filter((d) => d.templateType === 'reservation_ready').length, 1);
     } finally {
-        db.execute = originalExecute;
+        db.execute = originalExecute || fallbackDbMock.execute;
         for (const [k, v] of Object.entries(envBackup)) {
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;
@@ -485,12 +510,21 @@ test('Drop Box 24/7 normal audit sends In-app ONLY while damaged/missing sends E
             body: { recordId: 501, action: 'report_damaged', severity: 'moderate', auditNote: 'Rách bìa' },
         });
         assert.equal(damagedRes.status, 200);
+
+        // Allow any background fire-and-forget notification dispatch promises to settle before restoring DB mocks
+        for (let i = 0; i < 20 && dispatched.length < 1; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
         assert.equal(dispatched.length, 1);
         assert.equal(dispatched[0].templateType, 'drop_box_audit_result');
         assert.equal(dispatched[0].eventType, 'drop_box_incident');
+
+        // Allow microtasks to drain before tearing down mocks
+        await new Promise((resolve) => setImmediate(resolve));
     } finally {
-        db.execute = originalExecute;
-        db.getConnection = originalGetConnection;
+        db.execute = originalExecute || fallbackDbMock.execute;
+        db.getConnection = originalGetConnection || fallbackDbMock.getConnection;
         for (const [k, v] of Object.entries(envBackup)) {
             if (v === undefined) delete process.env[k];
             else process.env[k] = v;

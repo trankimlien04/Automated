@@ -10,6 +10,14 @@ require.cache[dbModulePath] = {
     loaded: true,
     exports: {
         execute: async () => [[], []],
+        query: async () => [[], []],
+        getConnection: async () => ({
+            beginTransaction: async () => { },
+            execute: async () => [[], []],
+            commit: async () => { },
+            rollback: async () => { },
+            release: () => { },
+        }),
     },
 };
 
