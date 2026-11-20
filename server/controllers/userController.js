@@ -1,8 +1,14 @@
 const db = require('../config/db');
 const bcrypt = require('bcrypt');
 const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
+const {
+    sendAccountApprovedEmail,
+    sendAccountUnlockedEmail,
+    sendAccountLockedEmail,
+} = require('../services/emailService');
 const { validateEmail, validatePhone } = require('../utils/validators');
 const { syncOverdueFines, getReaderCirculationStatus } = require('../services/fineSyncService');
+const { saveBase64ToDisk } = require('../utils/fileStorage');
 
 exports.getAllUsers = async (req, res) => {
     try {
@@ -30,11 +36,20 @@ exports.updateUserStatus = async (req, res) => {
     const { status } = req.body;
     const targetUserId = req.params.id;
     try {
-        const [users] = await db.execute('SELECT id, full_name, role, card_number FROM users WHERE id = ?', [targetUserId]);
+        if (!['active', 'locked', 'pending'].includes(status)) {
+            return res.status(400).json({ message: 'Trạng thái tài khoản không hợp lệ' });
+        }
+
+        const [users] = await db.execute(
+            'SELECT id, full_name, email, role, card_number, card_expiry, status FROM users WHERE id = ?',
+            [targetUserId]
+        );
         if (users.length === 0) {
             return res.status(404).json({ message: 'Không tìm thấy người dùng' });
         }
         const targetUser = users[0];
+        const wasPending = targetUser.status === 'pending';
+        const wasLocked = targetUser.status === 'locked';
 
         // RBAC enforcement:
         if (req.user && req.user.role === 'librarian' && targetUser.role !== 'reader') {
@@ -50,69 +65,173 @@ exports.updateUserStatus = async (req, res) => {
         if (status === 'active') {
             if (targetUser.role === 'reader') {
                 const cardNumber = targetUser.card_number || ('LIB-RD-' + String(targetUserId).padStart(6, '0'));
-                const expiryDate = new Date();
-                expiryDate.setFullYear(expiryDate.getFullYear() + 4);
+                let expiryDateStr = null;
+                if (targetUser.card_expiry) {
+                    const parsedExp = new Date(targetUser.card_expiry);
+                    if (!Number.isNaN(parsedExp.getTime())) {
+                        expiryDateStr = parsedExp.toISOString().slice(0, 10);
+                    }
+                }
+                if (!expiryDateStr) {
+                    const expiryDate = new Date();
+                    expiryDate.setFullYear(expiryDate.getFullYear() + 4);
+                    expiryDateStr = expiryDate.toISOString().slice(0, 10);
+                }
 
                 await db.execute(
                     'UPDATE users SET status = ?, card_number = ?, card_expiry = ? WHERE id = ?',
-                    [status, cardNumber, expiryDate.toISOString().slice(0, 10), targetUserId]
+                    [status, cardNumber, expiryDateStr, targetUserId]
                 );
 
-                // Notify reader
+                // Notify reader in-app
+                const readerNotifTitle = wasLocked ? '🔓 Thẻ thư viện đã được mở khóa' : 'Thẻ thư viện đã được kích hoạt';
+                const readerNotifMsg = wasLocked
+                    ? `Thẻ thư viện ${cardNumber} của bạn đã được mở khóa trở lại. Bạn có thể đăng nhập ngay để tiếp tục tra cứu, đặt trước và mượn sách.`
+                    : `Tài khoản độc giả của bạn đã được phê duyệt và kích hoạt thành công. Mã thẻ thư viện chính thức: ${cardNumber}, có giá trị sử dụng đến ngày ${new Date(expiryDateStr).toLocaleDateString('vi-VN')}.`;
+
                 await db.execute(
                     'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
-                    [
-                        targetUserId,
-                        'Thẻ thư viện đã được kích hoạt',
-                        `Tài khoản độc giả của bạn đã được phê duyệt và kích hoạt thành công. Mã thẻ thư viện chính thức: ${cardNumber}, có giá trị sử dụng đến ngày ${expiryDate.toLocaleDateString('vi-VN')}.`
-                    ]
+                    [targetUserId, readerNotifTitle, readerNotifMsg]
                 );
+
+                // Send email on BOTH initial approval AND card unlock
+                let emailResult = null;
+                if (targetUser.email) {
+                    const emailCall = wasLocked
+                        ? sendAccountUnlockedEmail({
+                            to: targetUser.email,
+                            userId: targetUserId,
+                            fullName: targetUser.full_name,
+                            role: targetUser.role,
+                            cardNumber,
+                        })
+                        : sendAccountApprovedEmail({
+                            to: targetUser.email,
+                            userId: targetUserId,
+                            fullName: targetUser.full_name,
+                            role: targetUser.role,
+                            cardNumber,
+                            cardExpiry: expiryDateStr,
+                        });
+                    emailResult = await emailCall.catch((mailErr) => {
+                        console.error('Không thể gửi email kích hoạt/mở khóa độc giả:', mailErr.message);
+                        return null;
+                    });
+                }
 
                 // Notify all staff
                 await notifyAllStaff(
-                    'Kích hoạt thẻ thư viện độc giả',
-                    `Độc giả ${targetUser.full_name} đã được phê duyệt tài khoản và cấp mã thẻ ${cardNumber}.`,
+                    wasLocked ? 'Mở khóa thẻ thư viện độc giả' : 'Kích hoạt thẻ thư viện độc giả',
+                    wasLocked
+                        ? `Độc giả ${targetUser.full_name} (mã thẻ ${cardNumber}) đã được mở khóa thẻ và thông báo qua email.`
+                        : `Độc giả ${targetUser.full_name} đã được phê duyệt tài khoản và cấp mã thẻ ${cardNumber}.`,
                     'info'
                 );
 
-                return res.status(200).json({ message: 'Phê duyệt tài khoản và cấp thẻ thư viện thành công', cardNumber });
+                const mailDelivered = emailResult?.mode === 'smtp_real' && emailResult?.success;
+                return res.status(200).json({
+                    message: wasLocked
+                        ? (mailDelivered
+                            ? `Mở khóa thẻ ${cardNumber} thành công! Đã gửi email thông báo tới ${targetUser.email}.`
+                            : `Mở khóa thẻ thư viện ${cardNumber} thành công!`)
+                        : (mailDelivered
+                            ? `Phê duyệt tài khoản & cấp thẻ ${cardNumber} thành công! Đã gửi email thông báo tới ${targetUser.email}.`
+                            : 'Phê duyệt tài khoản và cấp thẻ thư viện thành công'),
+                    cardNumber,
+                    emailSent: Boolean(emailResult?.success),
+                });
             } else {
                 await db.execute('UPDATE users SET status = ? WHERE id = ?', [status, targetUserId]);
                 await db.execute(
                     'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
                     [
                         targetUserId,
-                        'Tài khoản đã được kích hoạt',
-                        'Tài khoản của bạn đã được kích hoạt và có thể đăng nhập vào hệ thống.'
+                        wasLocked ? '🔓 Tài khoản đã được mở khóa' : 'Tài khoản đã được kích hoạt',
+                        wasLocked
+                            ? 'Tài khoản của bạn đã được mở khóa trở lại và có thể đăng nhập vào hệ thống.'
+                            : 'Tài khoản của bạn đã được kích hoạt và có thể đăng nhập vào hệ thống.'
                     ]
                 );
-                return res.status(200).json({ message: 'Kích hoạt tài khoản thành công' });
+
+                let emailResult = null;
+                if (targetUser.email) {
+                    const emailCall = wasLocked
+                        ? sendAccountUnlockedEmail({
+                            to: targetUser.email,
+                            userId: targetUserId,
+                            fullName: targetUser.full_name,
+                            role: targetUser.role,
+                        })
+                        : sendAccountApprovedEmail({
+                            to: targetUser.email,
+                            userId: targetUserId,
+                            fullName: targetUser.full_name,
+                            role: targetUser.role,
+                        });
+                    emailResult = await emailCall.catch((mailErr) => {
+                        console.error('Không thể gửi email kích hoạt/mở khóa tài khoản:', mailErr.message);
+                        return null;
+                    });
+                }
+
+                const mailDelivered = emailResult?.mode === 'smtp_real' && emailResult?.success;
+                return res.status(200).json({
+                    message: wasLocked
+                        ? (mailDelivered ? `Mở khóa tài khoản thành công! Đã gửi email tới ${targetUser.email}.` : 'Mở khóa tài khoản thành công!')
+                        : (mailDelivered ? `Kích hoạt tài khoản thành công! Đã gửi email tới ${targetUser.email}.` : 'Kích hoạt tài khoản thành công'),
+                    emailSent: Boolean(emailResult?.success),
+                });
             }
         }
 
         await db.execute('UPDATE users SET status = ? WHERE id = ?', [status, targetUserId]);
 
+        let lockEmailResult = null;
         if (status === 'locked') {
-            const [users] = await db.execute('SELECT full_name FROM users WHERE id = ?', [targetUserId]);
-            const readerName = users.length > 0 ? users[0].full_name : `#${targetUserId}`;
+            const readerName = targetUser.full_name || `#${targetUserId}`;
+            const lockTitle = wasPending
+                ? 'Yêu cầu đăng ký tài khoản chưa được phê duyệt'
+                : (targetUser.card_number ? '🔒 Thẻ thư viện đã bị tạm khóa' : '🔒 Tài khoản đã bị tạm khóa');
+            const lockMsg = wasPending
+                ? 'Hồ sơ đăng ký tài khoản thư viện của bạn hiện chưa được phê duyệt. Vui lòng liên hệ Quầy Thủ thư để được hỗ trợ.'
+                : `${targetUser.card_number ? `Thẻ thư viện ${targetUser.card_number}` : 'Tài khoản thư viện'} của bạn đã bị tạm khóa. Vui lòng liên hệ cán bộ thư viện để được giải quyết.`;
 
             await db.execute(
                 'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
-                [
-                    targetUserId,
-                    'Tài khoản đã bị tạm khóa',
-                    'Tài khoản thư viện của bạn đã bị khóa. Vui lòng liên hệ cán bộ thư viện để được giải quyết.'
-                ]
+                [targetUserId, lockTitle, lockMsg]
             );
 
+            if (targetUser.email) {
+                lockEmailResult = await sendAccountLockedEmail({
+                    to: targetUser.email,
+                    userId: targetUserId,
+                    fullName: readerName,
+                    cardNumber: targetUser.card_number || null,
+                    wasPending,
+                }).catch((mailErr) => {
+                    console.error('Không thể gửi email thông báo khóa/từ chối:', mailErr.message);
+                    return null;
+                });
+            }
+
             await notifyAllStaff(
-                'Tài khoản người dùng bị tạm khóa',
-                `Tài khoản của độc giả ${readerName} (ID: #${targetUserId}) đã bị khóa.`,
+                wasPending ? 'Từ chối hồ sơ đăng ký độc giả' : 'Tài khoản / thẻ người dùng bị tạm khóa',
+                wasPending
+                    ? `Yêu cầu đăng ký của ${readerName} (ID: #${targetUserId}) đã bị từ chối/khóa.`
+                    : `Tài khoản/thẻ của ${readerName}${targetUser.card_number ? ` (${targetUser.card_number})` : ` (ID: #${targetUserId})`} đã bị tạm khóa và gửi email thông báo.`,
                 'warning'
             );
         }
 
-        res.status(200).json({ message: 'Cập nhật trạng thái người dùng thành công' });
+        const lockMailDelivered = lockEmailResult?.mode === 'smtp_real' && lockEmailResult?.success;
+        res.status(200).json({
+            message: status === 'locked'
+                ? (wasPending
+                    ? (lockMailDelivered ? `Đã từ chối hồ sơ & gửi email thông báo tới ${targetUser.email}` : 'Đã từ chối hồ sơ đăng ký và ghi nhận thông báo')
+                    : (lockMailDelivered ? `Đã khóa thẻ/tài khoản & gửi email thông báo tới ${targetUser.email}` : 'Đã khóa thẻ/tài khoản và ghi nhận thông báo'))
+                : 'Cập nhật trạng thái người dùng thành công',
+            emailSent: Boolean(lockEmailResult?.success),
+        });
     } catch (error) {
         console.error('Lỗi khi cập nhật trạng thái:', error);
         res.status(500).json({ message: 'Lỗi server' });
@@ -121,7 +240,17 @@ exports.updateUserStatus = async (req, res) => {
 
 exports.getUserProfile = async (req, res) => {
     try {
-        const [users] = await db.execute('SELECT id, full_name, email, role, phone, avatar_url, card_number, card_expiry, status, created_at FROM users WHERE id = ?', [req.params.id]);
+        const targetId = parseInt(req.params.id, 10);
+        if (!targetId) {
+            return res.status(400).json({ message: 'ID người dùng không hợp lệ' });
+        }
+
+        const isStaff = ['admin', 'librarian', 'owner'].includes(req.user.role);
+        if (!isStaff && targetId !== Number(req.user.id)) {
+            return res.status(403).json({ message: 'Bạn không có quyền xem hồ sơ của người dùng khác' });
+        }
+
+        const [users] = await db.execute('SELECT id, full_name, email, role, phone, avatar_url, card_number, card_expiry, status, created_at FROM users WHERE id = ?', [targetId]);
         if (users.length === 0) {
             return res.status(404).json({ message: 'Không tìm thấy người dùng' });
         }
@@ -256,9 +385,14 @@ exports.updateMyProfile = async (req, res) => {
     const cleanPhone = phone ? phone.trim() : null;
 
     try {
+        let storedAvatar = avatar_url || null;
+        if (storedAvatar && typeof storedAvatar === 'string' && storedAvatar.startsWith('data:image/')) {
+            storedAvatar = await saveBase64ToDisk(storedAvatar, 'avatars', `user_${userId}`);
+        }
+
         await db.execute(
             'UPDATE users SET full_name = ?, phone = ?, avatar_url = ? WHERE id = ?',
-            [full_name.trim(), cleanPhone, avatar_url || null, userId]
+            [full_name.trim(), cleanPhone, storedAvatar, userId]
         );
 
         // Ghi activity log

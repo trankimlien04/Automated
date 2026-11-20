@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -24,6 +23,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import {
   CheckCircle2,
   AlertTriangle,
@@ -49,7 +49,7 @@ import api from "@/services/api";
 import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { useConfirm } from "@/hooks/use-confirm";
-import { NotificationDispatchModal } from "@/components/notification-dispatch-modal";
+import { NotificationDispatchModal, type SmtpStatus } from "@/components/notification-dispatch-modal";
 
 interface SmartReminderMeta {
   level: "upcoming_2d" | "due_today" | "overdue";
@@ -93,7 +93,11 @@ export default function NotificationsPage() {
   const [sendingBroadcast, setSendingBroadcast] = useState(false);
   const [scanningReminders, setScanningReminders] = useState(false);
   const [isDispatchModalOpen, setIsDispatchModalOpen] = useState(false);
+  const [dispatchInitialTab, setDispatchInitialTab] = useState<"logs" | "test" | "smtp">("logs");
+  const [smtpStatus, setSmtpStatus] = useState<SmtpStatus | null>(null);
   const [renewingBorrowId, setRenewingBorrowId] = useState<number | null>(null);
+  const [emailReceipts, setEmailReceipts] = useState<boolean>(false);
+  const [savingEmailReceipts, setSavingEmailReceipts] = useState<boolean>(false);
 
   const handleQuickRenew = async (e: React.MouseEvent, borrowRecordId: number, notiId: number) => {
     e.stopPropagation();
@@ -123,9 +127,55 @@ export default function NotificationsPage() {
     }
   };
 
+  const fetchSmtpStatus = async () => {
+    if (!user || !["admin", "librarian", "owner"].includes(user.role)) return;
+    try {
+      const response = await api.get("/notifications/smtp-status");
+      setSmtpStatus(response.data);
+    } catch {
+      // Bỏ qua lỗi kiểm tra SMTP phụ trợ
+    }
+  };
+
+  const fetchNotificationPreferences = async () => {
+    try {
+      const response = await api.get("/notifications/preferences");
+      setEmailReceipts(Boolean(response.data?.emailReceipts));
+    } catch {
+      // Fallback gracefully if preferences haven't been initialized yet
+    }
+  };
+
+  const handleToggleEmailReceipts = async (checked: boolean) => {
+    const previous = emailReceipts;
+    setEmailReceipts(checked);
+    setSavingEmailReceipts(true);
+    try {
+      const response = await api.put("/notifications/preferences", { emailReceipts: checked });
+      setEmailReceipts(Boolean(response.data?.emailReceipts));
+      toast.success(
+        response.data?.message ||
+          (checked
+            ? "Đã bật nhận Email biên lai Mượn / Trả tại quầy."
+            : "Đã tắt Email biên lai tại quầy (vẫn lưu trên In-app).")
+      );
+    } catch (error: any) {
+      setEmailReceipts(previous);
+      toast.error(error.response?.data?.message || "Không thể cập nhật tùy chọn nhận Email");
+    } finally {
+      setSavingEmailReceipts(false);
+    }
+  };
+
   useEffect(() => {
     fetchNotifications();
+    fetchNotificationPreferences();
   }, []);
+
+  useEffect(() => {
+    fetchSmtpStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.role]);
 
   const handleMarkAsRead = async (id: number) => {
     try {
@@ -255,7 +305,12 @@ export default function NotificationsPage() {
     setScanningReminders(true);
     try {
       const res = await api.post("/notifications/trigger-reminders");
-      toast.success(res.data.message || "Đã quét và kích hoạt thông báo nghiệp vụ thành công!");
+      const msg = res.data.message || "Đã quét và kích hoạt thông báo nghiệp vụ thành công!";
+      if ((res.data.failedEmailCount || 0) > 0 || (res.data.simulatedEmailCount || 0) > 0) {
+        toast.warning(msg);
+      } else {
+        toast.success(msg);
+      }
       fetchNotifications();
     } catch (error) {
       console.error("Lỗi khi quét nghiệp vụ:", error);
@@ -570,7 +625,10 @@ export default function NotificationsPage() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setIsDispatchModalOpen(true)}
+                onClick={() => {
+                  setDispatchInitialTab("logs");
+                  setIsDispatchModalOpen(true);
+                }}
                 className="text-xs gap-1.5 border-indigo-400 text-indigo-700 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 shadow-xs cursor-pointer"
               >
                 <Mail className="h-3.5 w-3.5 text-indigo-600" />
@@ -1081,40 +1139,130 @@ export default function NotificationsPage() {
 
           <Card className="border-border/80 shadow-xs">
             <CardHeader className="pb-3">
-              <CardTitle className="font-display text-base">Cài đặt kênh thông báo</CardTitle>
-              <CardDescription className="text-xs">Tùy chọn phương thức nhận thông báo cá nhân</CardDescription>
+              <CardTitle className="font-display text-base">Kênh thông báo & Quy tắc gửi</CardTitle>
+              <CardDescription className="text-xs">Phân tách Email quan trọng, Email tùy chọn và In-app</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               {[
-                { id: "remind", label: "Nhắc trả sách trước hạn", desc: "Thông báo trước 2 ngày", icon: BellRing },
-                { id: "overdue", label: "Cảnh báo quá hạn & Phạt", desc: "Gửi ngay khi phát sinh trễ hạn", icon: AlertTriangle },
-                { id: "reserve", label: "Sách đặt trước đã có mặt", desc: "Nhận tin ngay khi sách về kho", icon: BookmarkCheck },
-                { id: "card", label: "Thẻ thư viện sắp hết hạn", desc: "Cảnh báo trước 15 ngày", icon: CreditCard },
+                {
+                  id: "remind",
+                  label: "Nhắc hạn trả (mốc duy nhất T-2)",
+                  desc: "Gộp theo độc giả (Email + In-app)",
+                  badge: "Email + In-app",
+                  badgeCls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+                  icon: BellRing,
+                },
+                {
+                  id: "overdue",
+                  label: "Quá hạn ngày đầu & Đình chỉ",
+                  desc: "Cảnh báo T+1 & chuyển SUSPENDED",
+                  badge: "Email + In-app",
+                  badgeCls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+                  icon: AlertTriangle,
+                },
+                {
+                  id: "reserve",
+                  label: "Đặt trước & Hòm 24/7",
+                  desc: "Sẵn sàng nhận, biên nhận thả & sự cố",
+                  badge: "Email + In-app",
+                  badgeCls: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30",
+                  icon: BookmarkCheck,
+                },
+                {
+                  id: "card",
+                  label: "Kiểm kê bình thường, Gia hạn & Thẻ",
+                  desc: "Tránh làm phiền hộp thư độc giả",
+                  badge: "Chỉ In-app",
+                  badgeCls: "bg-sky-500/10 text-sky-700 dark:text-sky-300 border-sky-500/30",
+                  icon: CreditCard,
+                },
               ].map((s) => (
                 <div key={s.id} className="flex items-start gap-3">
                   <s.icon className="mt-0.5 h-4 w-4 text-muted-foreground shrink-0" />
-                  <div className="flex-1">
-                    <Label htmlFor={s.id} className="font-medium text-xs cursor-pointer">{s.label}</Label>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-xs text-foreground">{s.label}</p>
                     <p className="text-[10px] text-muted-foreground">{s.desc}</p>
                   </div>
-                  <Switch id={s.id} defaultChecked />
+                  <Badge variant="outline" className={`text-[10px] shrink-0 ${s.badgeCls}`}>
+                    {s.badge}
+                  </Badge>
                 </div>
               ))}
 
+              <div className="border-t border-border/60 pt-3">
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/30 p-3">
+                  <div className="space-y-0.5 min-w-0">
+                    <label
+                      htmlFor="toggle-email-receipts"
+                      className="text-xs font-semibold text-foreground cursor-pointer block"
+                    >
+                      Nhận Email biên lai tại quầy
+                    </label>
+                    <p className="text-[10px] text-muted-foreground leading-relaxed">
+                      Tùy chọn gửi bản sao Email cho Phiếu mượn &amp; Phiếu trả tại quầy (In-app luôn bật).
+                    </p>
+                  </div>
+                  <Switch
+                    id="toggle-email-receipts"
+                    checked={emailReceipts}
+                    disabled={savingEmailReceipts}
+                    onCheckedChange={handleToggleEmailReceipts}
+                  />
+                </div>
+              </div>
+
               <div className="border-t border-border/60 pt-4 space-y-3">
-                <div className="flex items-center justify-between">
-                  <Label htmlFor="email-channel" className="flex items-center gap-2 text-xs cursor-pointer">
-                    <Mail className="h-4 w-4 text-muted-foreground" />
-                    <span>Email thông báo tự động</span>
-                  </Label>
-                  <Switch id="email-channel" defaultChecked />
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2 text-xs text-foreground">
+                    <Mail className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                    <div>
+                      <p>Email thông báo tự động (Cron 08:00)</p>
+                      {canBroadcast && smtpStatus && (
+                        <p className="text-[10px] text-muted-foreground mt-0.5">
+                          {smtpStatus.configured
+                            ? `${smtpStatus.host}:${smtpStatus.port} (${smtpStatus.userMasked})`
+                            : "Chưa cấu hình tài khoản SMTP gửi thật"}
+                        </p>
+                      )}
+                      {user && ["admin", "owner"].includes(user.role) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setDispatchInitialTab("smtp");
+                            setIsDispatchModalOpen(true);
+                          }}
+                          className="text-[11px] font-medium text-indigo-600 hover:text-indigo-700 hover:underline mt-1 cursor-pointer"
+                        >
+                          {smtpStatus?.configured ? "Quản lý cấu hình SMTP →" : "Thiết lập SMTP thực tế →"}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {canBroadcast && smtpStatus ? (
+                    <Badge
+                      variant="outline"
+                      className={`text-[10px] shrink-0 ${
+                        smtpStatus.configured
+                          ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30"
+                          : "bg-amber-500/10 text-amber-700 dark:text-amber-300 border-amber-500/30"
+                      }`}
+                    >
+                      {smtpStatus.configured ? "SMTP Thực tế" : "Mô phỏng"}
+                    </Badge>
+                  ) : (
+                    <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/25 shrink-0">
+                      Hoạt động
+                    </Badge>
+                  )}
                 </div>
                 <div className="flex items-center justify-between">
-                  <Label htmlFor="inapp-channel" className="flex items-center gap-2 text-xs cursor-pointer">
+                  <span className="flex items-center gap-2 text-xs text-foreground">
                     <BellRing className="h-4 w-4 text-primary" />
                     <span>Thông báo chuông In-App (Realtime)</span>
-                  </Label>
-                  <Switch id="inapp-channel" defaultChecked />
+                  </span>
+                  <Badge variant="outline" className="text-[10px] bg-primary/10 text-primary border-primary/25">
+                    Hoạt động
+                  </Badge>
                 </div>
               </div>
             </CardContent>
@@ -1123,10 +1271,12 @@ export default function NotificationsPage() {
       </div>
       {ConfirmDialogComponent}
 
-      {/* Smart Library 4.0: Notification Dispatches & Test Email Modal */}
+      {/* Smart Library 4.0: Notification Dispatches & SMTP Config Modal */}
       <NotificationDispatchModal
         open={isDispatchModalOpen}
         onOpenChange={setIsDispatchModalOpen}
+        initialTab={dispatchInitialTab}
+        onSmtpUpdated={setSmtpStatus}
       />
     </div>
   );

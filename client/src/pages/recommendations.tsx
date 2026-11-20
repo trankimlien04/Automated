@@ -639,12 +639,11 @@ export default function RecommendationsPage() {
             {trendingCats.length > 0 ? trendingCats.map((c) => (
               <div 
                 key={c.id} 
-                className="rounded-xl border bg-card p-4 transition-all hover:border-primary/40 hover:shadow-xs cursor-pointer flex flex-col justify-between"
-                onClick={() => {
-                  setSelectedCategoryIds([c.id]);
-                  handleModeChange("cbf");
-                }}
-                title={`Nhấn để xem các sách thuộc thể loại ${c.label}`}
+                className={`rounded-xl border bg-card p-4 transition-all hover:border-primary/40 hover:shadow-xs cursor-pointer flex flex-col justify-between ${
+                  selectedCategoryFilter === String(c.id) ? "border-primary bg-primary/5 ring-1 ring-primary/30" : ""
+                }`}
+                onClick={() => handleCategoryFilter(String(c.id))}
+                title={`Nhấn để lọc các sách gợi ý thuộc thể loại ${c.label}`}
               >
                 <div>
                   <div className="flex items-center justify-between">

@@ -413,16 +413,19 @@ export default function ReservationsPage() {
         }
       });
     } else {
+      const isStaffSkip = user?.role === "admin" || user?.role === "librarian";
       confirm({
-        title: "Xác nhận nhường lượt / Không mượn?",
-        description: `Bạn có chắc muốn từ chối mượn cuốn sách "${bookTitle}" không?\n\n👉 Quyền ưu tiên giữ sách 48h sẽ được tự động chuyển ngay cho bạn đọc tiếp theo trong hàng đợi!`,
-        confirmText: "Nhường lượt cho bạn khác",
+        title: isStaffSkip ? "Xác nhận chuyển lượt ưu tiên?" : "Xác nhận nhường lượt / Không mượn?",
+        description: isStaffSkip
+          ? `Xác nhận chuyển lượt đặt trước cuốn sách "${bookTitle}" sang độc giả tiếp theo trong hàng đợi?\n\n👉 Quyền ưu tiên giữ sách 48h sẽ được trao ngay cho người kế tiếp.`
+          : `Bạn có chắc muốn từ chối mượn cuốn sách "${bookTitle}" không?\n\n👉 Quyền ưu tiên giữ sách 48h sẽ được tự động chuyển ngay cho bạn đọc tiếp theo trong hàng đợi!`,
+        confirmText: isStaffSkip ? "Xác nhận chuyển lượt" : "Nhường lượt cho bạn khác",
         cancelText: "Trở lại",
         variant: "destructive",
         onConfirm: async () => {
           try {
             const res = await api.post(`/reservations/${id}/respond`, { action: "decline" });
-            toast.success(res.data.message || "Đã nhường lượt mượn thành công.");
+            toast.success(res.data.message || "Đã chuyển lượt ưu tiên thành công.");
             fetchReservations();
           } catch (error: any) {
             console.error("Lỗi khi từ chối:", error);
@@ -982,7 +985,7 @@ export default function ReservationsPage() {
                   { id: "hold", label: "Giữ tại quầy chờ giao", count: totalHold },
                   { id: "notified", label: "Đang chờ phản hồi (48h)", count: totalNotified },
                   { id: "waiting", label: "Hàng đợi chờ sách về", count: totalWaiting },
-                  { id: "history", label: "Lịch sử", count: totalCompleted },
+                  { id: "history", label: "Lịch sử", count: resList.filter((r) => ["completed", "cancelled", "expired"].includes(r.status)).length },
                 ].map((tab) => (
                   <Button
                     key={tab.id}
@@ -1281,6 +1284,17 @@ export default function ReservationsPage() {
                 />
                 <div id="handover-qr-reader-file-temp" className="hidden" />
 
+                {/* Helpful camera guidance on LAN / Mobile HTTP */}
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-2.5 text-xs space-y-1">
+                  <p className="font-semibold text-amber-900 dark:text-amber-200 flex items-center gap-1.5 text-[11px]">
+                    <Sparkles className="h-3 w-3 text-amber-600 shrink-0" />
+                    Mẹo đối soát nhanh:
+                  </p>
+                  <p className="text-[11px] text-muted-foreground leading-snug">
+                    Bạn có thể bấm <strong>&quot;Tải ảnh QR&quot;</strong> để chọn ảnh chụp thẻ bạn đọc từ máy, hoặc dùng đầu đọc mã vạch quét trực tiếp vào ô nhập bên dưới.
+                  </p>
+                </div>
+
                 {/* Manual Input or Barcode Gun Input */}
                 <div className="relative">
                   <QrCode className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
@@ -1340,7 +1354,7 @@ export default function ReservationsPage() {
                 <Input
                   value={bookCopyQrInput}
                   onChange={(e) => setBookCopyQrInput(e.target.value)}
-                  placeholder="Quét mã QR sách hoặc nhập (VD: LIB-BK-1-1)..."
+                  placeholder="Quét mã QR sách hoặc nhập (VD: QR-BK-1-1)..."
                   className="text-xs font-mono h-8 bg-card border-border/80"
                 />
               </div>

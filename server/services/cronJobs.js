@@ -1,14 +1,153 @@
 const cron = require('node-cron');
 const db = require('../config/db');
 const { syncOverdueFines, calculateOverdue } = require('./fineSyncService');
+const { LIBRARY_TIMEZONE, toLocalDateString } = require('../utils/dateUtils');
+const { runDueDateRemindersSweep } = require('./dueReminderService');
+const { getSmtpStatus } = require('./emailService');
+
+let morningCronTask = null;
+let isMorningSweepRunning = false;
+
+function getLocalHour(date = new Date()) {
+    const raw = new Intl.DateTimeFormat('en-US', {
+        timeZone: LIBRARY_TIMEZONE,
+        hour12: false,
+        hour: 'numeric',
+    }).format(date);
+    return parseInt(raw, 10) % 24;
+}
+
+async function saveMorningCronState({ runDate, status, summary }) {
+    try {
+        await db.execute(
+            `INSERT INTO cron_job_states (job_name, last_run_date, last_run_at, last_status, last_summary)
+             VALUES ('morning_reminders', ?, NOW(), ?, ?)
+             ON DUPLICATE KEY UPDATE
+               last_run_date = VALUES(last_run_date),
+               last_run_at = VALUES(last_run_at),
+               last_status = VALUES(last_status),
+               last_summary = VALUES(last_summary)`,
+            [runDate, status, summary]
+        );
+    } catch {
+        // Bỏ qua nếu đang chạy môi trường mock test
+    }
+}
+
+async function executeMorningRemindersJob(triggerReason = 'cron_0800') {
+    if (isMorningSweepRunning) return null;
+    isMorningSweepRunning = true;
+    const todayStr = toLocalDateString(new Date());
+
+    try {
+        const stats = await runDueDateRemindersSweep({
+            source: 'cron',
+            deduplicateToday: true,
+            includeAllOverdue: false,
+            cardExpiryWindowDays: 7,
+        });
+
+        const summary = `${stats.inAppCount} In-app, ${stats.realEmailCount} email thực tế (${stats.simulatedEmailCount} mô phỏng, ${stats.failedEmailCount} lỗi) • T-2: ${stats.dueSoonCount}, T-0: ${stats.dueTodayCount}, Quá hạn: ${stats.overdueMatchedCount} [${triggerReason}]`;
+        await saveMorningCronState({ runDate: todayStr, status: 'success', summary });
+
+        if (stats.inAppCount > 0 || stats.realEmailCount > 0) {
+            const { notifyAllStaff } = require('./notificationService');
+            await notifyAllStaff(
+                'Báo cáo Cron 08:00: Nhắc hạn mượn sách tự động',
+                `Hệ thống tự động quét lúc ${triggerReason === 'cron_0800' ? '08:00' : 'sau 08:00 (chạy bù)'}: Đã phát hành ${stats.inAppCount} thông báo In-app và ${stats.realEmailCount} email thực tế.`,
+                'info'
+            );
+        }
+
+        console.log(`✅ [CRON JOB 08:00 - ${triggerReason}] ${summary}`);
+        return stats;
+    } catch (error) {
+        console.error(`❌ [CRON ERROR - ${triggerReason}] Error in morning reminders:`, error);
+        await saveMorningCronState({
+            runDate: todayStr,
+            status: 'failed',
+            summary: String(error?.message || 'Lỗi chạy Cron nhắc hạn').slice(0, 500),
+        });
+        return null;
+    } finally {
+        isMorningSweepRunning = false;
+    }
+}
+
+async function runCatchUpIfMissedMorningCron() {
+    if (getLocalHour() < 8) return;
+    const todayStr = toLocalDateString(new Date());
+    try {
+        const [rows] = await db.execute(
+            `SELECT DATE_FORMAT(last_run_date, '%Y-%m-%d') as last_run_date_str
+             FROM cron_job_states
+             WHERE job_name = 'morning_reminders'
+             LIMIT 1`
+        );
+        const lastDate = rows?.[0]?.last_run_date_str || '';
+        if (lastDate !== todayStr) {
+            console.log(`🔄 [CRON CATCH-UP] Chưa ghi nhận lượt quét tự động ngày ${todayStr} (>= 08:00), tiến hành chạy bù tự động...`);
+            await executeMorningRemindersJob('catchup_after_0800');
+        }
+    } catch {
+        // Bỏ qua nếu bảng chưa sẵn sàng
+    }
+}
+
+async function getCronRuntimeInfo() {
+    let state = null;
+    try {
+        const [rows] = await db.execute(
+            `SELECT DATE_FORMAT(last_run_date, '%Y-%m-%d') as last_run_date_str, last_run_at, last_status, last_summary
+             FROM cron_job_states
+             WHERE job_name = 'morning_reminders'
+             LIMIT 1`
+        );
+        state = rows?.[0] || null;
+    } catch {
+        state = null;
+    }
+
+    return {
+        active: Boolean(morningCronTask),
+        schedule: '08:00 hằng ngày',
+        cronExpression: '0 8 * * *',
+        timezone: LIBRARY_TIMEZONE,
+        catchUpEnabled: true,
+        nextRunAt: morningCronTask && typeof morningCronTask.getNextRun === 'function'
+            ? morningCronTask.getNextRun()
+            : null,
+        lastRunDate: state?.last_run_date_str || null,
+        lastRunAt: state?.last_run_at || null,
+        lastStatus: state?.last_status || null,
+        lastSummary: state?.last_summary || null,
+    };
+}
 
 function initCronJobs() {
-    console.log('⏰ Initializing automated cron jobs...');
+    console.log(`⏰ Initializing automated cron jobs (timezone: ${LIBRARY_TIMEZONE})...`);
+    getSmtpStatus()
+        .then((smtp) => {
+            if (smtp.configured) {
+                console.log(`📧 Email transport READY [SMTP REAL via ${smtp.source}]: ${smtp.host}:${smtp.port} (${smtp.userMasked})`);
+            } else {
+                console.warn('⚠️ Email transport not configured yet (running in Simulated mode until configured in .env or UI)');
+            }
+        })
+        .catch(() => {});
 
     // Immediately run overdue fine sync on startup
     syncOverdueFines().catch(err => console.error('Initial fine sync error:', err));
 
-    // Run every day at 00:00 AM to sync overdue discipline records and send reminders
+    // Chạy bù 1 lần nếu server bật hoặc tỉnh lại sau 08:00 sáng mà hôm nay chưa quét
+    const startupCatchUpTimer = setTimeout(() => {
+        runCatchUpIfMissedMorningCron().catch(() => {});
+    }, 5000);
+    if (typeof startupCatchUpTimer.unref === 'function') {
+        startupCatchUpTimer.unref();
+    }
+
+    // Run every day at 00:00 AM (local timezone) to sync overdue discipline records and notify staff
     cron.schedule('0 0 * * *', async () => {
         console.log('🔄 [CRON JOB] Running daily midnight discipline sync...');
         try {
@@ -51,107 +190,17 @@ function initCronJobs() {
         } catch (error) {
             console.error('❌ [CRON ERROR] Error in midnight maintenance:', error);
         }
-    });
+    }, { timezone: LIBRARY_TIMEZONE });
 
-    // Run every day at 8:00 AM to send reminders (UC21)
-    cron.schedule('0 8 * * *', async () => {
-        console.log('📢 [CRON JOB] Running morning multi-channel reminders (In-app + Email)...');
-        try {
-            const emailService = require('./emailService');
-            const today = new Date();
-            const todayStr = today.toISOString().slice(0, 10);
-            const inTwoDays = new Date();
-            inTwoDays.setDate(today.getDate() + 2);
-            const inTwoDaysStr = inTwoDays.toISOString().slice(0, 10);
+    // Run every day at 08:00 AM (local timezone) to send reminders (T-2, T-0, milestone overdue + expiring cards)
+    morningCronTask = cron.schedule('0 8 * * *', async () => {
+        console.log(`📢 [CRON JOB 08:00 ${LIBRARY_TIMEZONE}] Running morning multi-channel reminders (In-app + Email)...`);
+        await executeMorningRemindersJob('cron_0800');
+    }, { timezone: LIBRARY_TIMEZONE });
 
-            // 1. Remind readers whose books are due in 2 days (T - 2)
-            const [dueSoon] = await db.execute(`
-                SELECT br.user_id, b.title, br.due_date, bc.qr_code as copy_qr,
-                       u.full_name, u.email, u.card_number
-                FROM borrow_records br
-                JOIN book_copies bc ON br.book_copy_id = bc.id
-                JOIN books b ON bc.book_id = b.id
-                JOIN users u ON br.user_id = u.id
-                WHERE br.status = 'borrowing' AND br.due_date = ?
-            `, [inTwoDaysStr]);
-
-            for (const item of dueSoon) {
-                await db.execute('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")', [
-                    item.user_id,
-                    'Nhắc nhở trả sách sắp đến hạn (còn 2 ngày)',
-                    `Cuốn sách "${item.title}" của bạn sẽ đến hạn trả vào ngày ${new Date(item.due_date).toLocaleDateString('vi-VN')}. Vui lòng sắp xếp hoàn trả hoặc gia hạn.`
-                ]);
-                if (item.email) {
-                    await emailService.sendDueReminderEmail({
-                        to: item.email,
-                        userId: item.user_id,
-                        fullName: item.full_name,
-                        cardNumber: item.card_number,
-                        bookTitle: item.title,
-                        copyQr: item.copy_qr,
-                        dueDate: item.due_date,
-                        daysLeft: 2
-                    });
-                }
-            }
-
-            // 2. Remind readers whose books are due TODAY (T - 0)
-            const [dueToday] = await db.execute(`
-                SELECT br.user_id, b.title, br.due_date, bc.qr_code as copy_qr,
-                       u.full_name, u.email, u.card_number
-                FROM borrow_records br
-                JOIN book_copies bc ON br.book_copy_id = bc.id
-                JOIN books b ON bc.book_id = b.id
-                JOIN users u ON br.user_id = u.id
-                WHERE br.status = 'borrowing' AND br.due_date = ?
-            `, [todayStr]);
-
-            for (const item of dueToday) {
-                await db.execute('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")', [
-                    item.user_id,
-                    '⚠️ HẠN CHÓT: Sách đến hạn trả hôm nay',
-                    `Hôm nay là hạn chót trả sách "${item.title}". Bạn có thể trả tại quầy hoặc thả vào Hòm trả sách 24/7.`
-                ]);
-                if (item.email) {
-                    await emailService.sendDueTodayEmail({
-                        to: item.email,
-                        userId: item.user_id,
-                        fullName: item.full_name,
-                        cardNumber: item.card_number,
-                        bookTitle: item.title,
-                        copyQr: item.copy_qr,
-                        dueDate: item.due_date
-                    });
-                }
-            }
-
-            // 3. Remind readers whose library card is expiring in 7 days
-            const inSevenDays = new Date();
-            inSevenDays.setDate(today.getDate() + 7);
-            const inSevenDaysStr = inSevenDays.toISOString().slice(0, 10);
-
-            const [expiringCards] = await db.execute(`
-                SELECT id, full_name, card_number, card_expiry
-                FROM users
-                WHERE role = 'reader' AND status = 'active' AND card_expiry = ?
-            `, [inSevenDaysStr]);
-
-            for (const u of expiringCards) {
-                await db.execute('INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")', [
-                    u.id,
-                    'Thẻ thư viện sắp hết hạn',
-                    `Thẻ thư viện mã ${u.card_number} của bạn sẽ hết hạn vào ngày ${new Date(u.card_expiry).toLocaleDateString('vi-VN')}. Vui lòng liên hệ quầy thủ thư để gia hạn thẻ.`
-                ]);
-            }
-
-            console.log(`✅ [CRON JOB] Sent ${dueSoon.length} T-2 reminders, ${dueToday.length} T-0 deadline notices and ${expiringCards.length} card expiry reminders.`);
-        } catch (error) {
-            console.error('❌ [CRON ERROR] Error in morning reminders:', error);
-        }
-    });
-
-    // Run every 15 minutes to release expired online borrow requests (24h hold) and reservations (48h hold)
+    // Run every 15 minutes to release expired online borrow requests (24h hold), reservations (48h hold), and catch up missed 08:00 sleep/wake cycles
     cron.schedule('*/15 * * * *', async () => {
+        runCatchUpIfMissedMorningCron().catch(() => {});
         try {
             // 1. Release expired borrow requests (24h hold)
             const [expiredBorrows] = await db.execute(`
@@ -162,7 +211,7 @@ function initCronJobs() {
             `);
             for (const item of expiredBorrows) {
                 await db.execute('UPDATE borrow_requests SET status = "expired" WHERE id = ?', [item.id]);
-                await db.execute('UPDATE books SET available_copies = available_copies + 1 WHERE id = ?', [item.book_id]);
+                await db.execute('UPDATE books SET available_copies = LEAST(total_copies, available_copies + 1) WHERE id = ?', [item.book_id]);
                 await db.execute(
                     'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
                     [
@@ -193,16 +242,15 @@ function initCronJobs() {
                         'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
                         [nextUser.id]
                     );
-                    await db.execute(
-                        'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
-                        [
-                            nextUser.user_id,
-                            '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
-                            `Cuốn sách "${resv.book_title}" bạn đặt trước đã có sẵn tại thư viện. Thư viện đang giữ sách ưu tiên cho bạn trong vòng 48 giờ. Hãy vào mục "Đặt trước sách" để xác nhận mượn nhé!`
-                        ]
-                    );
+                    const { dispatchReservationReadyNotification } = require('./notificationService');
+                    await dispatchReservationReadyNotification({
+                        userId: nextUser.user_id,
+                        reservationId: nextUser.id,
+                        bookTitle: resv.book_title,
+                        expiresAt: new Date(Date.now() + 48 * 3600 * 1000),
+                    });
                 } else {
-                    await db.execute('UPDATE books SET available_copies = available_copies + 1 WHERE id = ?', [resv.book_id]);
+                    await db.execute('UPDATE books SET available_copies = LEAST(total_copies, available_copies + 1) WHERE id = ?', [resv.book_id]);
                 }
             }
 
@@ -217,7 +265,7 @@ function initCronJobs() {
                 const [items] = await db.execute('SELECT book_id FROM borrow_draft_items WHERE draft_id = ? AND status = "pending"', [draft.id]);
                 await db.execute('UPDATE borrow_draft_items SET status = "unavailable" WHERE draft_id = ? AND status = "pending"', [draft.id]);
                 for (const it of items) {
-                    await db.execute('UPDATE books SET available_copies = available_copies + 1 WHERE id = ?', [it.book_id]);
+                    await db.execute('UPDATE books SET available_copies = LEAST(total_copies, available_copies + 1) WHERE id = ?', [it.book_id]);
                 }
                 await db.execute(
                     'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
@@ -231,7 +279,9 @@ function initCronJobs() {
         } catch (e) {
             console.error('Lỗi khi quét dọn yêu cầu và đặt trước hết hạn:', e);
         }
-    });
+    }, { timezone: LIBRARY_TIMEZONE });
 }
+
+initCronJobs.getCronRuntimeInfo = getCronRuntimeInfo;
 
 module.exports = initCronJobs;

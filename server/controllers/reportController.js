@@ -29,6 +29,7 @@ async function buildSmartDemandForecastData() {
         FROM books b
         LEFT JOIN authors a ON b.author_id = a.id
         LEFT JOIN categories c ON b.category_id = c.id
+        WHERE COALESCE(b.status, 'active') = 'active'
     `);
 
     // Số lượt mượn đang diễn ra + danh sách due_date theo từng book_id
@@ -302,11 +303,11 @@ exports.getDemandForecast = async (req, res) => {
 exports.getDashboardStats = async (req, res) => {
     try {
         await syncOverdueFines();
-        // 1. Total books
-        const [books] = await db.execute('SELECT COUNT(*) as count FROM books');
+        // 1. Total active books
+        const [books] = await db.execute("SELECT COUNT(*) as count FROM books WHERE COALESCE(status, 'active') = 'active'");
         
-        // 2. Total copies
-        const [copies] = await db.execute('SELECT COUNT(*) as count FROM book_copies');
+        // 2. Total copies of active books
+        const [copies] = await db.execute("SELECT COUNT(*) as count FROM book_copies bc JOIN books b ON bc.book_id = b.id WHERE COALESCE(b.status, 'active') = 'active'");
 
         // 3. Active readers (status = active and role = reader)
         const [readers] = await db.execute('SELECT COUNT(*) as count FROM users WHERE role = "reader" AND status = "active"');

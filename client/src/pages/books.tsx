@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -13,7 +14,7 @@ import {
   Info, Eye, Calendar, Building, FileText, Clock, Compass, Layers, 
   ArrowRightLeft, FolderTree, ChevronDown, ChevronRight, ChevronLeft, ChevronsLeft, ChevronsRight, Sparkles, MapPin, 
   Grid3X3, ArrowUpRight, ArrowRight, X, SlidersHorizontal, Check, ExternalLink, Copy,
-  Camera, ShieldCheck, Zap, User, RotateCcw, Minus, Scan
+  Camera, ShieldCheck, Zap, User, RotateCcw, Minus, Scan, ClipboardCheck, FileWarning
 } from "lucide-react";
 import * as XLSX from "xlsx";
 import api from "@/services/api";
@@ -114,18 +115,46 @@ export default function BooksPage() {
   const [useCustomLocation, setUseCustomLocation] = useState(false);
   const [isSubmittingRelocate, setIsSubmittingRelocate] = useState(false);
 
-  // Form states for adding book
+  // Form states for adding book (Default 0 physical copies = direct cataloguing of book metadata)
   const [newTitle, setNewTitle] = useState("");
   const [selectedAuthor, setSelectedAuthor] = useState("");
   const [selectedPublisher, setSelectedPublisher] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("");
   const [newIsbn, setNewIsbn] = useState("");
-  const [newCopies, setNewCopies] = useState(1);
+  const [newCopies, setNewCopies] = useState(0);
+  const [newPublishedYear, setNewPublishedYear] = useState<number>(new Date().getFullYear());
+  const [newDescription, setNewDescription] = useState("");
+  const [newAddReason, setNewAddReason] = useState("");
   const [newBookRoom, setNewBookRoom] = useState("Phòng 01");
   const [newBookShelf, setNewBookShelf] = useState("Kệ 01");
   const [newBookRack, setNewBookRack] = useState("Ngăn 01");
   const [newLocation, setNewLocation] = useState("");
   const [isDialogOpen, setIsDialogOpen] = useState(false);
+
+  // Edit Book Metadata modal state (Librarian only; ISBN edit with existing copies/ISBN routes to Owner)
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editingBook, setEditingBook] = useState<Book | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editAuthorId, setEditAuthorId] = useState("");
+  const [editPublisherId, setEditPublisherId] = useState("");
+  const [editCategoryId, setEditCategoryId] = useState("");
+  const [editIsbn, setEditIsbn] = useState("");
+  const [editPublishedYear, setEditPublishedYear] = useState<string>("");
+  const [editDescription, setEditDescription] = useState("");
+  const [editReason, setEditReason] = useState("");
+  const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+
+  // Soft-delete / Disposal Proposal modal state
+  const [disposalModalOpen, setDisposalModalOpen] = useState(false);
+  const [disposingBook, setDisposingBook] = useState<Book | null>(null);
+  const [disposalStatus, setDisposalStatus] = useState<"disposed" | "inactive">("disposed");
+  const [disposalReason, setDisposalReason] = useState("");
+  const [isSubmittingDisposal, setIsSubmittingDisposal] = useState(false);
+
+  // Restock proposal state inside QR dialog
+  const [restockQty, setRestockQty] = useState(2);
+  const [restockReason, setRestockReason] = useState("");
+  const [isSubmittingRestock, setIsSubmittingRestock] = useState(false);
 
   // Library Spatial Layout Config (Rooms, Shelves per Room, Racks per Shelf)
   const [layoutConfig, setLayoutConfig] = useState<LibraryLayoutConfig>(() =>
@@ -138,9 +167,12 @@ export default function BooksPage() {
     return () => window.removeEventListener("athenaeum-layout-updated", handler);
   }, []);
 
-  // Excel Batch Import States
+  // Excel Batch Import States (Preview + Validation + Error Report CSV)
   const [isExcelDialogOpen, setIsExcelDialogOpen] = useState(false);
   const [excelParsedData, setExcelParsedData] = useState<any[]>([]);
+  const [excelInvalidRows, setExcelInvalidRows] = useState<Array<{ rowNumber: number; title: string; isbn: string; total_copies: any; errors: string[] }>>([]);
+  const [excelTotalRawRows, setExcelTotalRawRows] = useState(0);
+  const [excelImportReason, setExcelImportReason] = useState("");
   const [excelFileName, setExcelFileName] = useState("");
   const [isSubmittingImport, setIsSubmittingImport] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -184,7 +216,11 @@ export default function BooksPage() {
   const [myActiveDraft, setMyActiveDraft] = useState<any | null>(null);
   const [isDraftQrModalOpen, setIsDraftQrModalOpen] = useState(false);
 
-  const canManage = user?.role === "admin" || user?.role === "librarian";
+  const isLibrarian = user?.role === "librarian";
+  const isAdmin = user?.role === "admin";
+  const isOwner = user?.role === "owner";
+  const canOperateWarehouse = isLibrarian;
+  const canInspectWarehouse = isLibrarian || isAdmin || isOwner;
 
   // Helper to parse location string "Phòng XX - Kệ YY - Ngăn ZZ"
   const parseLocation = (loc?: string) => {
@@ -887,31 +923,86 @@ export default function BooksPage() {
           return;
         }
 
-        const normalized = rawJson.map((row) => {
-          const title = (row["Tên sách"] || row["Tên đầu sách"] || row["title"] || row["Title"] || row["name"] || "").toString().trim();
-          const author = (row["Tác giả"] || row["author"] || row["Author"] || "").toString().trim();
-          const category = (row["Thể loại"] || row["category"] || row["Category"] || "").toString().trim();
-          const publisher = (row["Nhà xuất bản"] || row["NXB"] || row["publisher"] || row["Publisher"] || "").toString().trim();
-          const isbn = (row["Mã ISBN"] || row["ISBN"] || row["isbn"] || "").toString().trim();
-          const published_year = parseInt(row["Năm xuất bản"] || row["Năm XB"] || row["published_year"] || new Date().getFullYear(), 10) || new Date().getFullYear();
-          const total_copies = parseInt(row["Số lượng"] || row["Số bản sao"] || row["total_copies"] || row["copies"] || 1, 10) || 1;
-          const location = (row["Vị trí"] || row["Vị trí kho"] || row["location"] || "").toString().trim();
-          const description = (row["Mô tả"] || row["description"] || "Sách nhập từ file Excel").toString().trim();
-          const cover_image = (row["Hình ảnh"] || row["Ảnh bìa"] || row["cover_image"] || row["cover"] || "").toString().trim();
+        const currentYear = new Date().getFullYear();
+        const seenIsbns = new Set<string>();
+        const validRows: any[] = [];
+        const invalidRows: Array<{ rowNumber: number; title: string; isbn: string; total_copies: any; errors: string[] }> = [];
 
-          return {
-            title, author, category, publisher, isbn, published_year, total_copies, location, description, cover_image
-          };
-        }).filter(item => item.title.length > 0);
+        rawJson.forEach((row, idx) => {
+          const rowNumber = idx + 2;
+          const title = String(row["Tên sách"] ?? row["Tên đầu sách"] ?? row["title"] ?? row["Title"] ?? row["name"] ?? "").trim();
+          const author = String(row["Tác giả"] ?? row["author"] ?? row["Author"] ?? "").trim();
+          const category = String(row["Thể loại"] ?? row["category"] ?? row["Category"] ?? "").trim();
+          const publisher = String(row["Nhà xuất bản"] ?? row["NXB"] ?? row["publisher"] ?? row["Publisher"] ?? "").trim();
+          const isbn = String(row["Mã ISBN"] ?? row["ISBN"] ?? row["isbn"] ?? "").trim();
+          const rawYear = row["Năm xuất bản"] ?? row["Năm XB"] ?? row["published_year"] ?? "";
+          const parsedYear = rawYear === "" || rawYear === null || rawYear === undefined ? currentYear : Number(rawYear);
+          const rawCopies = row["Số lượng"] ?? row["Số bản sao"] ?? row["total_copies"] ?? row["copies"] ?? 1;
+          const parsedCopies = Number(rawCopies);
+          const location = String(row["Vị trí"] ?? row["Vị trí kho"] ?? row["location"] ?? "").trim();
+          const description = String(row["Mô tả"] ?? row["description"] ?? "Sách nhập từ file Excel").trim();
+          const cover_image = String(row["Hình ảnh"] ?? row["Ảnh bìa"] ?? row["cover_image"] ?? row["cover"] ?? "").trim();
 
-        if (normalized.length === 0) {
-          toast.error("Không tìm thấy dòng sách hợp lệ");
-          return;
-        }
+          const errors: string[] = [];
+          if (!title) {
+            errors.push("Thiếu tên đầu sách");
+          } else if (title.length > 255) {
+            errors.push("Tên đầu sách vượt quá 255 ký tự");
+          }
+          if (!Number.isInteger(parsedCopies) || parsedCopies < 1 || parsedCopies > 200) {
+            errors.push("Số lượng bản sao phải là số nguyên từ 1 đến 200");
+          }
+          if (!Number.isInteger(parsedYear) || parsedYear < 1800 || parsedYear > currentYear + 1) {
+            errors.push(`Năm xuất bản không hợp lệ (1800 - ${currentYear + 1})`);
+          }
+          if (isbn) {
+            if (isbn.length > 20) {
+              errors.push("Mã ISBN vượt quá 20 ký tự");
+            } else {
+              const key = isbn.toLowerCase();
+              if (seenIsbns.has(key)) {
+                errors.push(`Trùng mã ISBN "${isbn}" trong cùng file Excel`);
+              } else {
+                seenIsbns.add(key);
+              }
+            }
+          }
 
-        setExcelParsedData(normalized);
+          if (errors.length > 0) {
+            invalidRows.push({
+              rowNumber,
+              title: title || "(Trống)",
+              isbn,
+              total_copies: rawCopies,
+              errors,
+            });
+          } else {
+            validRows.push({
+              title,
+              author,
+              category,
+              publisher,
+              isbn,
+              published_year: parsedYear,
+              total_copies: parsedCopies,
+              location,
+              description,
+              cover_image,
+            });
+          }
+        });
+
+        setExcelTotalRawRows(rawJson.length);
+        setExcelParsedData(validRows);
+        setExcelInvalidRows(invalidRows);
+        setExcelImportReason("");
         setIsExcelDialogOpen(true);
-        toast.success(`Đã đọc ${normalized.length} đầu sách từ file "${file.name}"`);
+
+        if (invalidRows.length > 0) {
+          toast.warning(`Phân tích Excel: ${validRows.length} dòng hợp lệ, ${invalidRows.length} dòng lỗi cần kiểm tra.`);
+        } else {
+          toast.success(`Đã kiểm tra ${validRows.length} dòng hợp lệ từ file "${file.name}".`);
+        }
       } catch (err) {
         console.error("Lỗi đọc file Excel:", err);
         toast.error("Không thể đọc file Excel");
@@ -923,20 +1014,57 @@ export default function BooksPage() {
     reader.readAsBinaryString(file);
   };
 
+  const handleDownloadExcelErrorReport = () => {
+    if (excelInvalidRows.length === 0) return;
+    const csvHeader = ["Dong_Excel", "Ten_Sach", "ISBN", "So_Luong", "Chi_Tiet_Loi"].join(",");
+    const csvRows = excelInvalidRows.map((row) =>
+      [
+        row.rowNumber,
+        `"${String(row.title || "").replace(/"/g, '""')}"`,
+        `"${String(row.isbn || "").replace(/"/g, '""')}"`,
+        `"${String(row.total_copies ?? "").replace(/"/g, '""')}"`,
+        `"${row.errors.join("; ").replace(/"/g, '""')}"`,
+      ].join(",")
+    );
+    const csvContent = "\uFEFF" + [csvHeader, ...csvRows].join("\n");
+    const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `Bao_cao_loi_nhap_Excel_${new Date().toISOString().slice(0, 10)}.csv`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast.success("Đã tải báo cáo dòng lỗi (.csv)");
+  };
+
   const handleConfirmBatchImport = async () => {
-    if (excelParsedData.length === 0) return;
+    if (excelParsedData.length === 0) {
+      toast.error("Không có dòng dữ liệu hợp lệ để lập phiếu nhập kho");
+      return;
+    }
     setIsSubmittingImport(true);
     try {
-      const response = await api.post("/books/import-batch", { books: excelParsedData });
-      toast.success(response.data.message || `Đã nhập thành công ${excelParsedData.length} đầu sách!`);
+      const response = await api.post("/books/import-batch", {
+        books: excelParsedData,
+        fileName: excelFileName,
+        reason: excelImportReason.trim() || `Nhập kho từ file "${excelFileName}" (${excelParsedData.length} đầu sách hợp lệ)`,
+      });
+      if (response.data?.requiresApproval) {
+        toast.info(response.data.message || "Đã tạo phiếu nhập Excel chờ Chủ thư viện phê duyệt!");
+      } else {
+        toast.success(response.data.message || `Đã xử lý ${excelParsedData.length} đầu sách!`);
+      }
       setIsExcelDialogOpen(false);
       setExcelParsedData([]);
+      setExcelInvalidRows([]);
+      setExcelTotalRawRows(0);
+      setExcelImportReason("");
       setExcelFileName("");
       fetchBooks();
       fetchMetadata();
     } catch (error: any) {
-      console.error("Lỗi nhập sách:", error);
-      toast.error(error.response?.data?.message || "Lỗi khi nhập sách vào hệ thống");
+      console.error("Lỗi khi tạo phiếu nhập Excel:", error);
+      toast.error(error.response?.data?.message || "Lỗi khi lập phiếu nhập sách từ Excel");
     } finally {
       setIsSubmittingImport(false);
     }
@@ -972,9 +1100,9 @@ export default function BooksPage() {
         api.get("/authors"),
         api.get("/publishers")
       ]);
-      setCategories(catRes.data || []);
-      setAuthors(authRes.data || []);
-      setPublishers(pubRes.data || []);
+      setCategories(Array.isArray(catRes.data) ? catRes.data : (catRes.data?.data || []));
+      setAuthors(Array.isArray(authRes.data) ? authRes.data : (authRes.data?.data || []));
+      setPublishers(Array.isArray(pubRes.data) ? pubRes.data : (pubRes.data?.data || []));
     } catch (error) {
       console.error("Lỗi khi tải dữ liệu phụ trợ:", error);
     }
@@ -1061,7 +1189,7 @@ export default function BooksPage() {
     const canvas = document.getElementById("canvas-my-draft-qr") as HTMLCanvasElement;
     if (!canvas) return;
     const pngUrl = canvas.toDataURL("image/png");
-    let downloadLink = document.createElement("a");
+    const downloadLink = document.createElement("a");
     downloadLink.href = pngUrl;
     downloadLink.download = `${code}.png`;
     document.body.appendChild(downloadLink);
@@ -1099,7 +1227,7 @@ export default function BooksPage() {
     const canvas = document.getElementById(`qr-canvas-${qrCodeStr}`) as HTMLCanvasElement;
     if (!canvas) return;
     const pngUrl = canvas.toDataURL("image/png");
-    let downloadLink = document.createElement("a");
+    const downloadLink = document.createElement("a");
     downloadLink.href = pngUrl;
     downloadLink.download = `${qrCodeStr}.png`;
     document.body.appendChild(downloadLink);
@@ -1244,28 +1372,37 @@ export default function BooksPage() {
       return;
     }
 
+    const copiesCount = Math.max(0, Number(newCopies) || 0);
     const finalNewLocation = newLocation.trim() || `${newBookRoom} - ${newBookShelf} - ${newBookRack}`;
 
     confirm({
-      title: "Xác nhận thêm mới đầu sách",
-      description: `Bạn có đồng ý thêm đầu sách "${newTitle}" (${newCopies} bản sao) tại vị trí "${finalNewLocation}" không?`,
-      confirmText: "Đồng ý",
+      title: copiesCount === 0 ? "Xác nhận biên mục đầu sách mới" : "Gửi phiếu đề xuất tạo sách + nhập kho",
+      description:
+        copiesCount === 0
+          ? `Lưu trực tiếp thông tin đầu sách "${newTitle}" (0 bản sao vật lý) tại "${finalNewLocation}" và ghi nhật ký?`
+          : `Đầu sách "${newTitle}" có kèm ${copiesCount} bản sao vật lý sẽ tạo Phiếu đề xuất chờ Chủ thư viện phê duyệt trước khi sinh QR & cộng tồn kho. Tiếp tục?`,
+      confirmText: copiesCount === 0 ? "Lưu đầu sách ngay" : "Gửi phiếu duyệt kho",
       cancelText: "Hủy",
       onConfirm: async () => {
         try {
-          await api.post("/books", {
-            title: newTitle,
-            author_id: selectedAuthor ? parseInt(selectedAuthor) : null,
-            publisher_id: selectedPublisher ? parseInt(selectedPublisher) : null,
-            category_id: selectedCategory ? parseInt(selectedCategory) : null,
-            isbn: newIsbn,
+          const res = await api.post("/books", {
+            title: newTitle.trim(),
+            author_id: selectedAuthor ? parseInt(selectedAuthor, 10) : null,
+            publisher_id: selectedPublisher ? parseInt(selectedPublisher, 10) : null,
+            category_id: selectedCategory ? parseInt(selectedCategory, 10) : null,
+            isbn: newIsbn.trim() || null,
             location: finalNewLocation,
-            total_copies: newCopies,
-            published_year: new Date().getFullYear(),
-            description: "Mô tả sách thư viện",
+            total_copies: copiesCount,
+            published_year: newPublishedYear || new Date().getFullYear(),
+            description: newDescription.trim() || "Mô tả sách thư viện",
+            reason: newAddReason.trim() || undefined,
           });
 
-          toast.success("Thêm đầu sách mới và tạo mã QR thành công!");
+          if (res.data?.requiresApproval) {
+            toast.info(res.data.message || "Đã tạo phiếu đề xuất kho chờ Chủ thư viện phê duyệt!");
+          } else {
+            toast.success(res.data?.message || "Thêm thông tin đầu sách thành công!");
+          }
           setIsDialogOpen(false);
           setNewTitle("");
           setSelectedAuthor("");
@@ -1273,34 +1410,121 @@ export default function BooksPage() {
           setSelectedCategory("");
           setNewIsbn("");
           setNewLocation("");
-          setNewCopies(1);
+          setNewCopies(0);
+          setNewPublishedYear(new Date().getFullYear());
+          setNewDescription("");
+          setNewAddReason("");
           fetchBooks();
-        } catch (error) {
+        } catch (error: any) {
           console.error("Lỗi khi thêm sách:", error);
-          toast.error("Lỗi khi thêm đầu sách mới");
+          toast.error(error.response?.data?.message || "Không thể tạo đầu sách mới");
         }
-      }
+      },
     });
   };
 
-  const handleDeleteBook = (id: number, bookTitle: string) => {
-    confirm({
-      title: "Xác nhận xóa đầu sách",
-      description: `Bạn có đồng ý xóa đầu sách "${bookTitle}" không? Các bản sao sách và mã QR tương ứng cũng sẽ bị xóa.`,
-      confirmText: "Đồng ý xóa",
-      cancelText: "Hủy",
-      variant: "destructive",
-      onConfirm: async () => {
-        try {
-          await api.delete(`/books/${id}`);
-          toast.success("Xóa sách thành công");
-          fetchBooks();
-        } catch (error) {
-          console.error("Lỗi khi xóa sách:", error);
-          toast.error("Không thể xóa sách");
-        }
+  const handleOpenEditBook = (book: Book) => {
+    setEditingBook(book);
+    setEditTitle(book.title || "");
+    setEditAuthorId(book.author_id ? String(book.author_id) : "");
+    setEditPublisherId(book.publisher_id ? String(book.publisher_id) : "");
+    setEditCategoryId(book.category_id ? String(book.category_id) : "");
+    setEditIsbn(book.isbn || "");
+    setEditPublishedYear(book.published_year ? String(book.published_year) : "");
+    setEditDescription(book.description || "");
+    setEditReason("");
+    setEditDialogOpen(true);
+  };
+
+  const handleConfirmEditBook = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingBook) return;
+    if (!editTitle.trim()) {
+      toast.error("Tên đầu sách không được để trống");
+      return;
+    }
+
+    setIsSubmittingEdit(true);
+    try {
+      const res = await api.put(`/books/${editingBook.id}`, {
+        title: editTitle.trim(),
+        author_id: editAuthorId ? parseInt(editAuthorId, 10) : null,
+        publisher_id: editPublisherId ? parseInt(editPublisherId, 10) : null,
+        category_id: editCategoryId ? parseInt(editCategoryId, 10) : null,
+        isbn: editIsbn.trim() || null,
+        published_year: editPublishedYear ? parseInt(editPublishedYear, 10) : null,
+        description: editDescription.trim(),
+        reason: editReason.trim() || undefined,
+      });
+
+      if (res.data?.requiresApproval) {
+        toast.info(res.data.message || "Thay đổi ISBN đã chuyển thành Phiếu đề xuất chờ Chủ thư viện duyệt!");
+      } else {
+        toast.success(res.data?.message || "Đã cập nhật thông tin đầu sách và ghi nhật ký!");
       }
-    });
+      setEditDialogOpen(false);
+      await fetchBooks();
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || "Không thể cập nhật đầu sách");
+    } finally {
+      setIsSubmittingEdit(false);
+    }
+  };
+
+  const handleDeleteBook = (book: Book) => {
+    setDisposingBook(book);
+    setDisposalStatus("disposed");
+    setDisposalReason("");
+    setDisposalModalOpen(true);
+  };
+
+  const handleConfirmDisposal = async () => {
+    if (!disposingBook) return;
+    if (!disposalReason.trim()) {
+      toast.error("Vui lòng nhập lý do đề xuất thanh lý / ngừng lưu thông");
+      return;
+    }
+
+    setIsSubmittingDisposal(true);
+    try {
+      const res = await api.delete(`/books/${disposingBook.id}`, {
+        data: {
+          reason: disposalReason.trim(),
+          disposal_status: disposalStatus,
+        },
+      });
+      toast.info(res.data?.message || `Đã gửi phiếu đề xuất thanh lý «${disposingBook.title}» chờ Chủ thư viện duyệt!`);
+      setDisposalModalOpen(false);
+      await fetchBooks();
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || "Không thể gửi phiếu đề xuất thanh lý sách");
+    } finally {
+      setIsSubmittingDisposal(false);
+    }
+  };
+
+  const handleRequestRestockCopies = async () => {
+    if (!selectedBookForQr) return;
+    const qty = parseInt(String(restockQty), 10);
+    if (!Number.isInteger(qty) || qty < 1 || qty > 500) {
+      toast.error("Số lượng nhập bổ sung phải từ 1 đến 500 bản sao");
+      return;
+    }
+
+    setIsSubmittingRestock(true);
+    try {
+      const res = await api.post(`/books/${selectedBookForQr.id}/restock`, {
+        additionalCopies: qty,
+        reason: restockReason.trim() || `Thủ thư đề xuất nhập bổ sung +${qty} bản sao cho «${selectedBookForQr.title}»`,
+      });
+      toast.info(res.data?.message || `Đã gửi phiếu đề xuất nhập +${qty} bản sao chờ Chủ thư viện phê duyệt!`);
+      setRestockReason("");
+      setRestockQty(2);
+    } catch (error: any) {
+      toast.error(error.response?.data?.message || "Không thể tạo phiếu đề xuất nhập bổ sung");
+    } finally {
+      setIsSubmittingRestock(false);
+    }
   };
 
   // Summary counts
@@ -1311,60 +1535,95 @@ export default function BooksPage() {
 
   return (
     <div className="space-y-6">
-      {/* Top Overview Metric Cards: Sách & Bản sao QR */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card className="border bg-primary/5">
-          <CardContent className="p-4 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-muted-foreground font-medium">Tổng số đầu sách</p>
-              <p className="text-2xl font-bold font-display text-primary mt-1">{loading ? "..." : totalBooksCount}</p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">Tác phẩm trong thư viện</p>
-            </div>
-            <div className="p-2.5 rounded-xl bg-primary/10 text-primary">
-              <BookOpen className="h-5 w-5" />
-            </div>
-          </CardContent>
-        </Card>
+      {canInspectWarehouse && (
+        <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
+          <div className="flex items-start sm:items-center gap-2 text-foreground">
+            <ShieldCheck className="h-4 w-4 text-primary shrink-0 mt-0.5 sm:mt-0" />
+            <span>
+              {isLibrarian ? (
+                <>
+                  <strong>Chế độ Thủ thư (Maker):</strong> Biên mục đầu sách (0 bản), sửa mô tả & đổi vị trí kệ áp dụng trực tiếp (có nhật ký). Nhập bản sao, nhập Excel, sửa ISBN và thanh lý sách sẽ tạo phiếu chờ Chủ thư viện phê duyệt.
+                </>
+              ) : isAdmin ? (
+                <>
+                  <strong>Chế độ Giám sát IT (Admin — Chỉ đọc kho):</strong> Quản trị viên theo dõi danh mục, nhật ký hoạt động và phiếu kho; không trực tiếp thêm/sửa/xóa tài sản kho.
+                </>
+              ) : (
+                <>
+                  <strong>Chế độ Chủ thư viện (Checker):</strong> Giám sát danh mục kho sách và phê duyệt các phiếu đề xuất nhập kho, sửa ISBN, thanh lý tại trung tâm Phiếu kho.
+                </>
+              )}
+            </span>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => navigate("/book-requests")}
+            className="h-7 text-xs gap-1.5 border-primary/40 text-primary bg-background hover:bg-primary/10 shrink-0 font-semibold"
+          >
+            <ClipboardCheck className="h-3.5 w-3.5" />
+            {isOwner ? "Duyệt Phiếu Kho" : isAdmin ? "Giám sát Phiếu Kho" : "Phiếu Đề xuất Kho"}
+          </Button>
+        </div>
+      )}
 
-        <Card className="border bg-emerald-500/5">
-          <CardContent className="p-4 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-muted-foreground font-medium">Tổng số bản sao (QR)</p>
-              <p className="text-2xl font-bold font-display text-emerald-600 mt-1">{loading ? "..." : totalCopiesCount}</p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">Quyển sách vật lý trong kho</p>
-            </div>
-            <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600">
-              <QrCode className="h-5 w-5" />
-            </div>
-          </CardContent>
-        </Card>
+      {/* Top Overview Metric Cards (Staff / Warehouse Management only) */}
+      {canInspectWarehouse && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+          <Card className="border bg-primary/5">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground font-medium">Tổng số đầu sách</p>
+                <p className="text-2xl font-bold font-display text-primary mt-1">{loading ? "..." : totalBooksCount}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">Tác phẩm trong thư viện</p>
+              </div>
+              <div className="p-2.5 rounded-xl bg-primary/10 text-primary">
+                <BookOpen className="h-5 w-5" />
+              </div>
+            </CardContent>
+          </Card>
 
-        <Card className="border bg-blue-500/5">
-          <CardContent className="p-4 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-muted-foreground font-medium">Bản sao sẵn sàng</p>
-              <p className="text-2xl font-bold font-display text-blue-600 mt-1">{loading ? "..." : availableCopiesCount}</p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">Trên kệ chờ độc giả</p>
-            </div>
-            <div className="p-2.5 rounded-xl bg-blue-500/10 text-blue-600">
-              <CheckCircle2 className="h-5 w-5" />
-            </div>
-          </CardContent>
-        </Card>
+          <Card className="border bg-emerald-500/5">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground font-medium">Tổng số bản sao (QR)</p>
+                <p className="text-2xl font-bold font-display text-emerald-600 mt-1">{loading ? "..." : totalCopiesCount}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">Quyển sách vật lý trong kho</p>
+              </div>
+              <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600">
+                <QrCode className="h-5 w-5" />
+              </div>
+            </CardContent>
+          </Card>
 
-        <Card className="border bg-amber-500/5">
-          <CardContent className="p-4 flex items-center justify-between">
-            <div>
-              <p className="text-xs text-muted-foreground font-medium">Đang cho mượn</p>
-              <p className="text-2xl font-bold font-display text-amber-600 mt-1">{loading ? "..." : borrowedCopiesCount}</p>
-              <p className="text-[10px] text-muted-foreground mt-0.5">Độc giả đang giữ đọc</p>
-            </div>
-            <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-600">
-              <Building className="h-5 w-5" />
-            </div>
-          </CardContent>
-        </Card>
-      </div>
+          <Card className="border bg-blue-500/5">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground font-medium">Bản sao sẵn sàng</p>
+                <p className="text-2xl font-bold font-display text-blue-600 mt-1">{loading ? "..." : availableCopiesCount}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">Trên kệ chờ độc giả</p>
+              </div>
+              <div className="p-2.5 rounded-xl bg-blue-500/10 text-blue-600">
+                <CheckCircle2 className="h-5 w-5" />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="border bg-amber-500/5">
+            <CardContent className="p-4 flex items-center justify-between">
+              <div>
+                <p className="text-xs text-muted-foreground font-medium">Đang cho mượn</p>
+                <p className="text-2xl font-bold font-display text-amber-600 mt-1">{loading ? "..." : borrowedCopiesCount}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">Toàn thư viện đang giữ đọc</p>
+              </div>
+              <div className="p-2.5 rounded-xl bg-amber-500/10 text-amber-600">
+                <Building className="h-5 w-5" />
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
 
       {/* Active Borrow Draft Banner for Readers */}
       {user?.role === "reader" && myActiveDraft && (() => {
@@ -1496,13 +1755,13 @@ export default function BooksPage() {
 
       {/* Main View Mode Switcher: 3 Chế Độ Quản Lý & Tra Cứu */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 bg-muted/40 p-1.5 rounded-2xl border border-border/70 backdrop-blur-xs">
-        <div className="grid grid-cols-3 sm:flex items-center gap-1.5 w-full sm:w-auto">
+        <div className="flex flex-wrap sm:flex-nowrap items-center gap-1.5 w-full sm:w-auto">
           <Button
             type="button"
             variant={activeViewTab === "catalog" ? "default" : "ghost"}
             size="sm"
             onClick={() => setActiveViewTab("catalog")}
-            className="text-xs gap-1.5 rounded-xl h-9 font-semibold justify-center sm:justify-start transition-all"
+            className="text-xs gap-1.5 rounded-xl h-9 font-semibold justify-center sm:justify-start transition-all flex-1 sm:flex-initial min-w-[120px] sm:min-w-0"
           >
             <Grid3X3 className="h-4 w-4 shrink-0" />
             <span className="truncate">Danh mục sách</span>
@@ -1516,7 +1775,7 @@ export default function BooksPage() {
             variant={activeViewTab === "rooms" ? "default" : "ghost"}
             size="sm"
             onClick={() => setActiveViewTab("rooms")}
-            className="text-xs gap-1.5 rounded-xl h-9 font-semibold justify-center sm:justify-start transition-all"
+            className="text-xs gap-1.5 rounded-xl h-9 font-semibold justify-center sm:justify-start transition-all flex-1 sm:flex-initial min-w-[130px] sm:min-w-0"
           >
             <Building className="h-4 w-4 shrink-0 text-foreground" />
             <span className="truncate">Sơ đồ Phòng & Kệ</span>
@@ -1530,7 +1789,7 @@ export default function BooksPage() {
             variant={activeViewTab === "categories" ? "default" : "ghost"}
             size="sm"
             onClick={() => setActiveViewTab("categories")}
-            className="text-xs gap-1.5 rounded-xl h-9 font-semibold justify-center sm:justify-start transition-all"
+            className="text-xs gap-1.5 rounded-xl h-9 font-semibold justify-center sm:justify-start transition-all flex-1 sm:flex-initial min-w-[120px] sm:min-w-0"
           >
             <FolderTree className="h-4 w-4 shrink-0" />
             <span className="truncate">Thể loại ⇄ Vị trí</span>
@@ -1545,7 +1804,7 @@ export default function BooksPage() {
             <span className="h-2 w-2 rounded-full bg-emerald-500 inline-block animate-pulse"></span>
             Ký hiệu: Phòng - Kệ - Ngăn
           </span>
-          {canManage && (
+          {canOperateWarehouse && (
             <Button
               type="button"
               size="sm"
@@ -1651,8 +1910,8 @@ export default function BooksPage() {
                   </SelectContent>
                 </Select>
 
-                {/* Admin / Librarian Buttons */}
-                {canManage && (
+                {/* Read-only export for staff + Operational catalog mutations for Librarian only */}
+                {canInspectWarehouse && (
                   <div className="flex items-center gap-1.5 shrink-0 ml-auto">
                     <Button 
                       variant="outline" 
@@ -1664,193 +1923,248 @@ export default function BooksPage() {
                       <FileSpreadsheet className="h-4 w-4" /> <span className="hidden sm:inline">Xuất</span> Excel
                     </Button>
 
-                    <input 
-                      type="file" 
-                      ref={fileInputRef} 
-                      onChange={handleFileChange} 
-                      accept=".xlsx, .xls, .csv" 
-                      className="hidden" 
-                    />
+                    {canOperateWarehouse && (
+                      <>
+                        <input 
+                          type="file" 
+                          ref={fileInputRef} 
+                          onChange={handleFileChange} 
+                          accept=".xlsx, .xls, .csv" 
+                          className="hidden" 
+                        />
 
-                    <Button 
-                      variant="outline"
-                      onClick={() => fileInputRef.current?.click()}
-                      size="sm"
-                      className="h-10 gap-1.5 shrink-0 border-primary/40 text-primary hover:bg-primary/10 text-xs font-medium"
-                      title="Tải file Excel để nhập sách hàng loạt"
-                    >
-                      <Upload className="h-4 w-4" /> <span className="hidden sm:inline">Nhập</span> Excel
-                    </Button>
-
-                    <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                      <DialogTrigger asChild>
-                        <Button size="sm" className="h-10 gap-1.5 shrink-0 shadow-xs text-xs font-medium">
-                          <Plus className="h-4 w-4" /> Thêm sách
+                        <Button 
+                          variant="outline"
+                          onClick={() => fileInputRef.current?.click()}
+                          size="sm"
+                          className="h-10 gap-1.5 shrink-0 border-primary/40 text-primary hover:bg-primary/10 text-xs font-medium"
+                          title="Tải file Excel để kiểm tra trước & lập phiếu nhập kho"
+                        >
+                          <Upload className="h-4 w-4" /> <span className="hidden sm:inline">Nhập</span> Excel
                         </Button>
-                      </DialogTrigger>
-                      <DialogContent className="max-w-lg">
-                        <DialogHeader>
-                          <DialogTitle className="font-display">Thêm đầu sách mới vào kho</DialogTitle>
-                          <DialogDescription className="text-xs">
-                            Điền thông tin sách. Mã QR cho từng bản sao sẽ được hệ thống tự động sinh.
-                          </DialogDescription>
-                        </DialogHeader>
-                        <form onSubmit={handleAddBook} className="space-y-3 pt-2">
-                          <div>
-                            <label className="text-xs font-medium text-muted-foreground">Tên đầu sách *</label>
-                            <Input placeholder="Nhập tên sách..." value={newTitle} onChange={(e) => setNewTitle(e.target.value)} required className="text-sm mt-1" />
-                          </div>
-                          <div>
-                            <label className="text-xs font-medium text-muted-foreground">Mã ISBN</label>
-                            <Input placeholder="VD: 978-604-1-15234-8" value={newIsbn} onChange={(e) => setNewIsbn(e.target.value)} className="text-sm mt-1" />
-                          </div>
-                          <div className="grid grid-cols-2 gap-3">
-                            <div>
-                              <label className="text-xs font-medium text-muted-foreground">Tác giả</label>
-                              <Select value={selectedAuthor} onValueChange={setSelectedAuthor}>
-                                <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Chọn tác giả" /></SelectTrigger>
-                                <SelectContent>
-                                  {authors.map((a) => <SelectItem key={a.id} value={a.id.toString()}>{a.name}</SelectItem>)}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <div>
-                              <label className="text-xs font-medium text-muted-foreground">Nhà xuất bản</label>
-                              <Select value={selectedPublisher} onValueChange={setSelectedPublisher}>
-                                <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Chọn NXB" /></SelectTrigger>
-                                <SelectContent>
-                                  {publishers.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>)}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          </div>
-                          <div className="grid grid-cols-2 gap-3">
-                            <div>
-                              <label className="text-xs font-medium text-muted-foreground">Số lượng bản sao</label>
-                              <Input placeholder="Số lượng" type="number" value={newCopies} onChange={(e) => setNewCopies(parseInt(e.target.value) || 1)} min={1} className="text-sm mt-1" />
-                            </div>
-                            <div>
-                              <label className="text-xs font-medium text-muted-foreground">Thể loại</label>
-                              <Select value={selectedCategory} onValueChange={setSelectedCategory}>
-                                <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Chọn thể loại" /></SelectTrigger>
-                                <SelectContent>
-                                  {categories.map((c) => <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>)}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          </div>
-                          <div className="space-y-2 pt-1 border-t">
-                            <label className="text-xs font-semibold text-foreground block">
-                              Vị trí lưu kho (Chọn hoặc Thêm Phòng • Kệ • Ngăn)
-                            </label>
-                            <div className="grid grid-cols-3 gap-2">
-                              {/* Room Picker */}
-                              <div>
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[11px] text-muted-foreground">Phòng</span>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const maxNum = dynamicRoomOptions.reduce((m, r) => {
-                                        const n = parseInt(r.match(/\d+/)?.[0] || "0", 10);
-                                        return Math.max(m, n);
-                                      }, 3);
-                                      const nextNum = maxNum + 1;
-                                      const nextLabel = `Phòng ${pad2(nextNum)}`;
-                                      setNewBookRoom(nextLabel);
-                                      handleAddRoomToLibrary();
-                                    }}
-                                    className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
-                                  >
-                                    + Thêm phòng
-                                  </button>
-                                </div>
-                                <Select value={newBookRoom} onValueChange={setNewBookRoom}>
-                                  <SelectTrigger className="text-xs mt-1 h-9">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {dynamicRoomOptions.map((rm) => (
-                                      <SelectItem key={rm} value={rm}>{rm}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              </div>
 
-                              {/* Shelf Picker */}
+                        <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+                          <DialogTrigger asChild>
+                            <Button size="sm" className="h-10 gap-1.5 shrink-0 shadow-xs text-xs font-medium">
+                              <Plus className="h-4 w-4" /> Thêm sách
+                            </Button>
+                          </DialogTrigger>
+                          <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+                            <DialogHeader>
+                              <DialogTitle className="font-display">Thêm đầu sách mới</DialogTitle>
+                              <DialogDescription className="text-xs">
+                                <strong>0 bản sao:</strong> Lưu trực tiếp thông tin biên mục đầu sách. <strong>≥ 1 bản sao:</strong> Lập phiếu đề xuất chờ Chủ thư viện phê duyệt nhập kho.
+                              </DialogDescription>
+                            </DialogHeader>
+                            <form onSubmit={handleAddBook} className="space-y-3 pt-2">
                               <div>
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[11px] text-muted-foreground">Kệ sách</span>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const maxNum = dynamicShelfOptions.reduce((m, s) => {
-                                        const n = parseInt(s.match(/\d+/)?.[0] || "0", 10);
-                                        return Math.max(m, n);
-                                      }, 6);
-                                      const nextNum = maxNum + 1;
-                                      const nextLabel = `Kệ ${pad2(nextNum)}`;
-                                      setNewBookShelf(nextLabel);
-                                      toast.info(`Đã thêm & chọn ${nextLabel}`);
-                                    }}
-                                    className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
-                                  >
-                                    + Thêm kệ
-                                  </button>
-                                </div>
-                                <Select value={newBookShelf} onValueChange={setNewBookShelf}>
-                                  <SelectTrigger className="text-xs mt-1 h-9">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {dynamicShelfOptions.map((sh) => (
-                                      <SelectItem key={sh} value={sh}>{sh}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
+                                <label className="text-xs font-medium text-muted-foreground">Tên đầu sách *</label>
+                                <Input placeholder="Nhập tên sách..." value={newTitle} onChange={(e) => setNewTitle(e.target.value)} required className="text-sm mt-1" />
                               </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground">Mã ISBN</label>
+                                  <Input placeholder="VD: 978-604-1-15234-8" value={newIsbn} onChange={(e) => setNewIsbn(e.target.value)} className="text-sm mt-1" />
+                                </div>
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground">Năm xuất bản</label>
+                                  <Input
+                                    type="number"
+                                    value={newPublishedYear}
+                                    onChange={(e) => setNewPublishedYear(parseInt(e.target.value, 10) || new Date().getFullYear())}
+                                    min={1800}
+                                    max={new Date().getFullYear() + 1}
+                                    className="text-sm mt-1"
+                                  />
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground">Tác giả</label>
+                                  <Select value={selectedAuthor} onValueChange={setSelectedAuthor}>
+                                    <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Chọn tác giả" /></SelectTrigger>
+                                    <SelectContent>
+                                      {authors.map((a) => <SelectItem key={a.id} value={a.id.toString()}>{a.name}</SelectItem>)}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground">Nhà xuất bản</label>
+                                  <Select value={selectedPublisher} onValueChange={setSelectedPublisher}>
+                                    <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Chọn NXB" /></SelectTrigger>
+                                    <SelectContent>
+                                      {publishers.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>)}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              </div>
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground">Bản sao vật lý nhập kho</label>
+                                  <Input
+                                    placeholder="0 = chỉ tạo đầu sách"
+                                    type="number"
+                                    value={newCopies}
+                                    onChange={(e) => setNewCopies(Math.max(0, parseInt(e.target.value, 10) || 0))}
+                                    min={0}
+                                    max={500}
+                                    className="text-sm mt-1"
+                                  />
+                                  <p className="text-[10px] text-muted-foreground mt-1">
+                                    {newCopies === 0
+                                      ? "✅ Chỉ tạo đầu sách (lưu ngay)"
+                                      : `⏳ Gửi phiếu duyệt nhập +${newCopies} bản sao`}
+                                  </p>
+                                </div>
+                                <div>
+                                  <label className="text-xs font-medium text-muted-foreground">Thể loại</label>
+                                  <Select value={selectedCategory} onValueChange={setSelectedCategory}>
+                                    <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Chọn thể loại" /></SelectTrigger>
+                                    <SelectContent>
+                                      {categories.map((c) => <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>)}
+                                    </SelectContent>
+                                  </Select>
+                                </div>
+                              </div>
+                              <div>
+                                <label className="text-xs font-medium text-muted-foreground">Mô tả đầu sách</label>
+                                <Textarea
+                                  placeholder="Tóm tắt nội dung sách..."
+                                  value={newDescription}
+                                  onChange={(e) => setNewDescription(e.target.value)}
+                                  rows={2}
+                                  className="text-xs mt-1"
+                                />
+                              </div>
+                              {newCopies > 0 && (
+                                <div>
+                                  <label className="text-xs font-medium text-amber-700 dark:text-amber-300">Lý do đề xuất nhập bản sao (gửi Chủ thư viện)</label>
+                                  <Input
+                                    placeholder="VD: Bổ sung tài liệu học kỳ mới..."
+                                    value={newAddReason}
+                                    onChange={(e) => setNewAddReason(e.target.value)}
+                                    className="text-xs mt-1"
+                                  />
+                                </div>
+                              )}
+                              <div className="space-y-2 pt-1 border-t">
+                                <label className="text-xs font-semibold text-foreground block">
+                                  Vị trí lưu kho (Chọn hoặc Thêm Phòng • Kệ • Ngăn)
+                                </label>
+                                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-2">
+                                  {/* Room Picker */}
+                                  <div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] text-muted-foreground">Phòng</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const maxNum = dynamicRoomOptions.reduce((m, r) => {
+                                            const n = parseInt(r.match(/\d+/)?.[0] || "0", 10);
+                                            return Math.max(m, n);
+                                          }, 3);
+                                          const nextNum = maxNum + 1;
+                                          const nextLabel = `Phòng ${pad2(nextNum)}`;
+                                          setNewBookRoom(nextLabel);
+                                          handleAddRoomToLibrary();
+                                        }}
+                                        className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                                      >
+                                        + Thêm phòng
+                                      </button>
+                                    </div>
+                                    <Select value={newBookRoom} onValueChange={setNewBookRoom}>
+                                      <SelectTrigger className="text-xs mt-1 h-9">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {dynamicRoomOptions.map((rm) => (
+                                          <SelectItem key={rm} value={rm}>{rm}</SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
 
-                              {/* Rack Picker */}
-                              <div>
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[11px] text-muted-foreground">Ngăn (Tầng)</span>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      const maxNum = dynamicRackOptions.reduce((m, rk) => {
-                                        const n = parseInt(rk.match(/\d+/)?.[0] || "0", 10);
-                                        return Math.max(m, n);
-                                      }, 5);
-                                      const nextNum = maxNum + 1;
-                                      const nextLabel = `Ngăn ${pad2(nextNum)}`;
-                                      setNewBookRack(nextLabel);
-                                      toast.info(`Đã thêm & chọn ${nextLabel}`);
-                                    }}
-                                    className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
-                                  >
-                                    + Thêm ngăn
-                                  </button>
+                                  {/* Shelf Picker */}
+                                  <div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] text-muted-foreground">Kệ sách</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const maxNum = dynamicShelfOptions.reduce((m, s) => {
+                                            const n = parseInt(s.match(/\d+/)?.[0] || "0", 10);
+                                            return Math.max(m, n);
+                                          }, 6);
+                                          const nextNum = maxNum + 1;
+                                          const nextLabel = `Kệ ${pad2(nextNum)}`;
+                                          setNewBookShelf(nextLabel);
+                                          toast.info(`Đã thêm & chọn ${nextLabel}`);
+                                        }}
+                                        className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                                      >
+                                        + Thêm kệ
+                                      </button>
+                                    </div>
+                                    <Select value={newBookShelf} onValueChange={setNewBookShelf}>
+                                      <SelectTrigger className="text-xs mt-1 h-9">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {dynamicShelfOptions.map((sh) => (
+                                          <SelectItem key={sh} value={sh}>{sh}</SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
+
+                                  {/* Rack Picker */}
+                                  <div>
+                                    <div className="flex items-center justify-between">
+                                      <span className="text-[11px] text-muted-foreground">Ngăn (Tầng)</span>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const maxNum = dynamicRackOptions.reduce((m, rk) => {
+                                            const n = parseInt(rk.match(/\d+/)?.[0] || "0", 10);
+                                            return Math.max(m, n);
+                                          }, 5);
+                                          const nextNum = maxNum + 1;
+                                          const nextLabel = `Ngăn ${pad2(nextNum)}`;
+                                          setNewBookRack(nextLabel);
+                                          toast.info(`Đã thêm & chọn ${nextLabel}`);
+                                        }}
+                                        className="text-[10px] font-semibold text-primary hover:underline cursor-pointer"
+                                      >
+                                        + Thêm ngăn
+                                      </button>
+                                    </div>
+                                    <Select value={newBookRack} onValueChange={setNewBookRack}>
+                                      <SelectTrigger className="text-xs mt-1 h-9">
+                                        <SelectValue />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        {dynamicRackOptions.map((rk) => (
+                                          <SelectItem key={rk} value={rk}>{rk}</SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
                                 </div>
-                                <Select value={newBookRack} onValueChange={setNewBookRack}>
-                                  <SelectTrigger className="text-xs mt-1 h-9">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    {dynamicRackOptions.map((rk) => (
-                                      <SelectItem key={rk} value={rk}>{rk}</SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
+                                <p className="text-[11px] text-muted-foreground">
+                                  Vị trí sẽ lưu: <strong className="text-primary font-mono">{newBookRoom} - {newBookShelf} - {newBookRack}</strong>
+                                </p>
                               </div>
-                            </div>
-                            <p className="text-[11px] text-muted-foreground">
-                              Vị trí sẽ lưu: <strong className="text-primary font-mono">{newBookRoom} - {newBookShelf} - {newBookRack}</strong>
-                            </p>
-                          </div>
-                          <Button type="submit" className="w-full mt-2 font-semibold">Lưu & Sinh Mã QR Bản Sao</Button>
-                        </form>
-                      </DialogContent>
-                    </Dialog>
+                              <Button type="submit" className="w-full mt-2 font-semibold">
+                                {newCopies === 0
+                                  ? "Lưu Thông Tin Đầu Sách (0 bản sao)"
+                                  : `Gửi Phiếu Đề Xuất Kho (+${newCopies} bản sao)`}
+                              </Button>
+                            </form>
+                          </DialogContent>
+                        </Dialog>
+                      </>
+                    )}
                   </div>
                 )}
               </div>
@@ -2009,24 +2323,26 @@ export default function BooksPage() {
                         {b.category_name || "Mặc định"}
                       </Badge>
 
-                      {canManage && (
+                      {canInspectWarehouse && (
                         <div className="absolute top-2.5 right-2.5 flex items-center gap-1">
-                          <button 
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleOpenRelocate(b);
-                            }} 
-                            title="Điều chuyển vị trí sách sang phòng/kệ khác (Thủ thư)"
-                            className="flex h-8 w-8 items-center justify-center rounded-lg bg-background/90 shadow-sm transition-transform hover:scale-110 cursor-pointer text-foreground hover:text-primary"
-                          >
-                            <ArrowRightLeft className="h-4 w-4" />
-                          </button>
+                          {canOperateWarehouse && (
+                            <button 
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleOpenRelocate(b);
+                              }} 
+                              title="Điều chuyển vị trí sách sang phòng/kệ khác (Thủ thư)"
+                              className="flex h-8 w-8 items-center justify-center rounded-lg bg-background/90 shadow-sm transition-transform hover:scale-110 cursor-pointer text-foreground hover:text-primary"
+                            >
+                              <ArrowRightLeft className="h-4 w-4" />
+                            </button>
+                          )}
                           <button 
                             onClick={(e) => {
                               e.stopPropagation();
                               handleOpenQrDialog(b);
                             }} 
-                            title="Quản lý mã QR in dán sách (Thủ thư)"
+                            title={canOperateWarehouse ? "Quản lý mã QR & Đề xuất nhập bản sao" : "Xem mã QR bản sao trong kho"}
                             className="flex h-8 w-8 items-center justify-center rounded-lg bg-background/90 shadow-sm transition-transform hover:scale-110 cursor-pointer text-foreground"
                           >
                             <QrCode className="h-4 w-4" />
@@ -2089,19 +2405,6 @@ export default function BooksPage() {
                           </p>
                         </div>
                       )}
-
-                      {user?.role !== "reader" && (() => {
-                        const bookHoldCount = myBorrowRequests.filter(r => r.book_id === b.id && r.status === 'pending').length;
-                        if (bookHoldCount <= 0) return null;
-                        return (
-                          <div className="pt-0.5">
-                            <Badge variant="outline" className="text-[10px] bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/30 font-semibold gap-1 w-full justify-center">
-                              <Clock className="h-3 w-3 text-amber-600" />
-                              Có {bookHoldCount} cuốn đang giữ chỗ 24h
-                            </Badge>
-                          </div>
-                        );
-                      })()}
 
                       {/* Neutral Location badge with Mini Map trigger */}
                       <div 
@@ -2184,25 +2487,34 @@ export default function BooksPage() {
                           </Button>
                         )}
                       </div>
-                    ) : (
+                    ) : canOperateWarehouse ? (
                       <div className="space-y-1.5">
-                        <div className="grid grid-cols-2 gap-1.5">
+                        <div className="flex flex-wrap gap-1.5">
                           <Button 
                             size="sm" 
                             variant="outline" 
-                            className="text-xs gap-1 border-primary/30 text-primary hover:bg-primary/10 h-8 font-medium"
+                            className="flex-1 min-w-[78px] text-[11px] gap-1 border-primary/30 text-primary hover:bg-primary/10 h-8 font-medium px-1.5"
                             onClick={() => handleOpenBookDetail(b)}
                           >
-                            <Eye className="h-3.5 w-3.5" /> Chi tiết
+                            <Eye className="h-3 w-3 shrink-0" /> Chi tiết
                           </Button>
                           <Button 
                             size="sm" 
                             variant="outline" 
-                            className="text-xs gap-1 border-border hover:bg-muted h-8 font-medium"
+                            className="flex-1 min-w-[68px] text-[11px] gap-1 border-border hover:bg-muted h-8 font-medium px-1.5"
+                            onClick={() => handleOpenEditBook(b)}
+                            title="Sửa thông tin sách (tên, tác giả, mô tả, ISBN)"
+                          >
+                            <Edit className="h-3 w-3 shrink-0 text-muted-foreground" /> Sửa
+                          </Button>
+                          <Button 
+                            size="sm" 
+                            variant="outline" 
+                            className="flex-1 min-w-[72px] text-[11px] gap-1 border-border hover:bg-muted h-8 font-medium px-1.5"
                             onClick={() => handleOpenRelocate(b)}
                             title="Đổi phòng, kệ hoặc ngăn lưu kho cho sách này"
                           >
-                            <ArrowRightLeft className="h-3.5 w-3.5 text-muted-foreground" /> Đổi vị trí
+                            <ArrowRightLeft className="h-3 w-3 shrink-0 text-muted-foreground" /> Vị trí
                           </Button>
                         </div>
                         <Button 
@@ -2211,15 +2523,43 @@ export default function BooksPage() {
                           className="w-full text-xs gap-1.5 shadow-xs h-8"
                           onClick={() => handleOpenQrDialog(b)}
                         >
-                          <QrCode className="h-3.5 w-3.5" /> Quản lý mã QR bản sao
+                          <QrCode className="h-3.5 w-3.5" /> Mã QR & Nhập bổ sung bản sao
                         </Button>
                       </div>
+                    ) : canInspectWarehouse ? (
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="text-xs gap-1 border-primary/30 text-primary hover:bg-primary/10 h-8 font-medium"
+                          onClick={() => handleOpenBookDetail(b)}
+                        >
+                          <Eye className="h-3.5 w-3.5" /> Chi tiết
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          className="text-xs gap-1 h-8 font-medium"
+                          onClick={() => handleOpenQrDialog(b)}
+                        >
+                          <QrCode className="h-3.5 w-3.5" /> Xem bản sao
+                        </Button>
+                      </div>
+                    ) : (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="w-full text-xs gap-1.5 border-primary/30 text-primary hover:bg-primary/10 h-8 font-medium"
+                        onClick={() => handleOpenBookDetail(b)}
+                      >
+                        <Eye className="h-3.5 w-3.5" /> Xem chi tiết
+                      </Button>
                     )}
 
-                    {canManage && (
+                    {canOperateWarehouse && (
                       <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity pt-1">
-                        <Button size="sm" variant="ghost" className="flex-1 text-xs h-7 gap-1 text-destructive hover:bg-destructive/10" onClick={() => handleDeleteBook(b.id, b.title)}>
-                          <Trash2 className="h-3 w-3" /> Xóa đầu sách
+                        <Button size="sm" variant="ghost" className="flex-1 text-xs h-7 gap-1 text-destructive hover:bg-destructive/10" onClick={() => handleDeleteBook(b)}>
+                          <Trash2 className="h-3 w-3" /> Đề xuất thanh lý
                         </Button>
                       </div>
                     )}
@@ -2376,7 +2716,7 @@ export default function BooksPage() {
               </div>
 
               <div className="flex items-center gap-2 shrink-0 flex-wrap">
-                {canManage && (
+                {canOperateWarehouse && (
                   <>
                     <Button
                       type="button"
@@ -2447,7 +2787,7 @@ export default function BooksPage() {
                       </div>
 
                       <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
-                        {canManage && (
+                        {canOperateWarehouse && (
                           <>
                             {room.shelves.length > 6 && lastShelfInRoom && (
                               <Button
@@ -2583,7 +2923,7 @@ export default function BooksPage() {
                                   </div>
 
                                   <div className="flex items-center gap-1 shrink-0">
-                                    {canManage && (
+                                    {canOperateWarehouse && (
                                       <Button
                                         type="button"
                                         variant="outline"
@@ -2620,7 +2960,7 @@ export default function BooksPage() {
                                     <span className="text-[11px] font-semibold text-foreground/80">
                                       Các ngăn trên {shelf.shelfName}:
                                     </span>
-                                    {canManage && (
+                                    {canOperateWarehouse && (
                                       <div className="flex items-center gap-1">
                                         {shelf.maxRack > 5 && topRackObj && (
                                           <button
@@ -2749,7 +3089,7 @@ export default function BooksPage() {
                                           </div>
 
                                           <div className="flex items-center gap-1 shrink-0">
-                                            {canManage && (
+                                            {canOperateWarehouse && (
                                               <Button
                                                 type="button"
                                                 variant="ghost"
@@ -3011,7 +3351,7 @@ export default function BooksPage() {
               {/* Position Pickers */}
               {!useCustomLocation ? (
                 <div className="space-y-3">
-                  <div className="grid grid-cols-3 gap-2">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-2">
                     {/* Room Picker */}
                     <div>
                       <div className="flex items-center justify-between">
@@ -3237,6 +3577,51 @@ export default function BooksPage() {
             <p className="text-[11px] text-muted-foreground">• Mỗi bản sao sách trong kho có 1 mã QR độc lập dán trên bìa/gáy sách để phục vụ kiểm kê và mượn trả.</p>
           </div>
 
+          {canOperateWarehouse && selectedBookForQr && (
+            <div className="rounded-xl border border-amber-500/35 bg-amber-500/5 p-3.5 space-y-2.5 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold text-foreground flex items-center gap-1.5">
+                  <Plus className="h-4 w-4 text-amber-600" /> Đề xuất nhập bổ sung bản sao vật lý (Maker)
+                </span>
+                <Badge variant="outline" className="text-[10px] border-amber-500/40 text-amber-700 bg-background">
+                  Chờ Chủ thư viện phê duyệt
+                </Badge>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                <div className="sm:col-span-3">
+                  <Input
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={restockQty}
+                    onChange={(e) => setRestockQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                    placeholder="Số lượng"
+                    className="h-8 text-xs bg-background"
+                  />
+                </div>
+                <div className="sm:col-span-6">
+                  <Input
+                    value={restockReason}
+                    onChange={(e) => setRestockReason(e.target.value)}
+                    placeholder="Lý do nhập bổ sung (VD: Nhu cầu cao, thay thế bản rách)..."
+                    className="h-8 text-xs bg-background"
+                  />
+                </div>
+                <div className="sm:col-span-3">
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={handleRequestRestockCopies}
+                    disabled={isSubmittingRestock}
+                    className="w-full h-8 text-xs bg-amber-600 hover:bg-amber-700 text-white font-semibold"
+                  >
+                    {isSubmittingRestock ? "Đang gửi..." : `Lập phiếu +${restockQty}`}
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
           {loadingQr ? (
             <div className="flex justify-center py-10">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
@@ -3343,60 +3728,134 @@ export default function BooksPage() {
         </DialogContent>
       </Dialog>
 
-      {/* DIALOG FOR EXCEL BATCH IMPORT */}
+      {/* DIALOG FOR EXCEL BATCH IMPORT (PREVIEW + ERROR REPORT + MAKER PROPOSAL) */}
       <Dialog open={isExcelDialogOpen} onOpenChange={setIsExcelDialogOpen}>
-        <DialogContent className="max-w-3xl max-h-[85vh] flex flex-col">
+        <DialogContent className="max-w-4xl max-h-[88vh] flex flex-col">
           <DialogHeader>
             <DialogTitle className="font-display flex items-center gap-2">
-              <FileSpreadsheet className="h-5 w-5 text-emerald-600" /> Xác Nhận Nhập Sách Hàng Loạt Từ Excel
+              <FileSpreadsheet className="h-5 w-5 text-emerald-600" /> Kiểm Tra & Đề Xuất Nhập Kho Từ Excel
             </DialogTitle>
-            <DialogDescription className="text-xs">
-              File: <span className="font-semibold text-foreground">{excelFileName}</span> — Đã phân tích thành công{" "}
-              <span className="font-bold text-emerald-600">{excelParsedData.length}</span> đầu sách.
+            <DialogDescription className="text-xs flex flex-wrap items-center gap-2 pt-1">
+              <span>File: <strong className="text-foreground">{excelFileName}</strong></span>
+              <Badge variant="outline" className="text-[11px]">Tổng dòng: {excelTotalRawRows}</Badge>
+              <Badge variant="outline" className="text-[11px] bg-emerald-500/10 text-emerald-700 border-emerald-500/40">
+                Hợp lệ: {excelParsedData.length}
+              </Badge>
+              {excelInvalidRows.length > 0 && (
+                <Badge variant="destructive" className="text-[11px]">
+                  Lỗi dữ liệu: {excelInvalidRows.length}
+                </Badge>
+              )}
             </DialogDescription>
           </DialogHeader>
 
-          <div className="flex-1 overflow-y-auto border rounded-xl my-2">
-            <Table>
-              <TableHeader className="bg-muted/50 sticky top-0">
-                <TableRow>
-                  <TableHead className="w-12 text-center text-xs">STT</TableHead>
-                  <TableHead className="text-xs">Tên đầu sách</TableHead>
-                  <TableHead className="text-xs">Tác giả</TableHead>
-                  <TableHead className="text-xs">Thể loại</TableHead>
-                  <TableHead className="text-xs">Vị trí lưu kho</TableHead>
-                  <TableHead className="w-16 text-center text-xs">Số lượng</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {excelParsedData.map((row, idx) => (
-                  <TableRow key={idx} className="hover:bg-muted/30">
-                    <TableCell className="text-center font-mono text-xs">{idx + 1}</TableCell>
-                    <TableCell className="font-medium text-xs max-w-[200px] truncate" title={row.title}>
-                      {row.title}
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground truncate">{row.author || "—"}</TableCell>
-                    <TableCell className="text-xs">
-                      <Badge variant="outline" className="text-[10px]">
-                        {row.category || "Mặc định"}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-xs font-mono text-muted-foreground">
-                      {row.location || "Tự động phân phòng"}
-                    </TableCell>
-                    <TableCell className="text-center font-semibold text-xs text-primary">{row.total_copies}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+          <div className="flex-1 overflow-y-auto space-y-3 my-1 pr-1">
+            {excelInvalidRows.length > 0 && (
+              <div className="rounded-xl border border-destructive/40 bg-destructive/5 p-3 space-y-2 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-semibold text-destructive flex items-center gap-1.5">
+                    <FileWarning className="h-4 w-4" /> Phát hiện {excelInvalidRows.length} dòng không hợp lệ (sẽ bị loại khỏi phiếu nhập)
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={handleDownloadExcelErrorReport}
+                    className="h-7 text-xs gap-1.5 border-destructive/40 text-destructive hover:bg-destructive/10"
+                  >
+                    <FileDown className="h-3.5 w-3.5" /> Tải báo cáo lỗi (.csv)
+                  </Button>
+                </div>
+                <div className="max-h-36 overflow-y-auto rounded-lg border border-destructive/20 bg-background">
+                  <Table>
+                    <TableHeader className="bg-muted/40 sticky top-0">
+                      <TableRow>
+                        <TableHead className="w-16 text-center text-[11px]">Dòng</TableHead>
+                        <TableHead className="text-[11px]">Tên sách</TableHead>
+                        <TableHead className="text-[11px]">ISBN / SL</TableHead>
+                        <TableHead className="text-[11px]">Lỗi phát hiện</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {excelInvalidRows.map((errRow, idx) => (
+                        <TableRow key={`err-${errRow.rowNumber}-${idx}`}>
+                          <TableCell className="text-center font-mono text-[11px] text-destructive">#{errRow.rowNumber}</TableCell>
+                          <TableCell className="text-[11px] font-medium">{errRow.title}</TableCell>
+                          <TableCell className="text-[11px] font-mono text-muted-foreground">
+                            {errRow.isbn || "—"} • SL: {String(errRow.total_copies ?? "—")}
+                          </TableCell>
+                          <TableCell className="text-[11px] text-destructive">
+                            {errRow.errors.join("; ")}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </div>
+            )}
+
+            <div className="border rounded-xl overflow-hidden">
+              <div className="bg-muted/40 px-3 py-2 text-xs font-semibold border-b flex items-center justify-between">
+                <span>Danh sách dòng hợp lệ đưa vào phiếu đề xuất ({excelParsedData.length} đầu sách)</span>
+                <span className="text-[11px] text-muted-foreground font-normal">
+                  Tổng số bản sao: <strong>{excelParsedData.reduce((s, r) => s + (Number(r.total_copies) || 1), 0)} cuốn</strong>
+                </span>
+              </div>
+              {excelParsedData.length === 0 ? (
+                <p className="text-center text-xs text-muted-foreground py-8">
+                  Không có dòng hợp lệ nào. Vui lòng kiểm tra file báo cáo lỗi và tải lên lại.
+                </p>
+              ) : (
+                <div className="max-h-56 overflow-y-auto">
+                  <Table>
+                    <TableHeader className="bg-muted/50 sticky top-0">
+                      <TableRow>
+                        <TableHead className="w-12 text-center text-xs">STT</TableHead>
+                        <TableHead className="text-xs">Tên đầu sách</TableHead>
+                        <TableHead className="text-xs">Tác giả</TableHead>
+                        <TableHead className="text-xs">ISBN</TableHead>
+                        <TableHead className="text-xs">Vị trí lưu kho</TableHead>
+                        <TableHead className="w-16 text-center text-xs">Số lượng</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {excelParsedData.map((row, idx) => (
+                        <TableRow key={idx} className="hover:bg-muted/30">
+                          <TableCell className="text-center font-mono text-xs">{idx + 1}</TableCell>
+                          <TableCell className="font-medium text-xs max-w-[200px] truncate" title={row.title}>
+                            {row.title}
+                          </TableCell>
+                          <TableCell className="text-xs text-muted-foreground truncate">{row.author || "—"}</TableCell>
+                          <TableCell className="text-xs font-mono text-muted-foreground">{row.isbn || "—"}</TableCell>
+                          <TableCell className="text-xs font-mono text-muted-foreground">
+                            {row.location || "Tự động phân phòng"}
+                          </TableCell>
+                          <TableCell className="text-center font-semibold text-xs text-primary">{row.total_copies}</TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-foreground">Lý do / Ghi chú phiếu nhập kho (gửi Chủ thư viện duyệt):</label>
+              <Input
+                value={excelImportReason}
+                onChange={(e) => setExcelImportReason(e.target.value)}
+                placeholder="VD: Nhập lô sách bổ sung Quý 4 theo kế hoạch phát triển nguồn tài liệu..."
+                className="text-xs"
+              />
+            </div>
           </div>
 
-          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-xl p-3 text-xs text-emerald-800 dark:text-emerald-300">
-            <p className="font-semibold">⚡ Cơ chế tự động hóa Athenaeum:</p>
+          <div className="bg-amber-500/10 border border-amber-500/25 rounded-xl p-3 text-xs text-amber-900 dark:text-amber-200">
+            <p className="font-semibold">🛡️ Quy trình kiểm soát nhập kho Athenaeum (Maker–Checker):</p>
             <ul className="list-disc pl-4 mt-1 space-y-0.5 text-[11px] text-muted-foreground">
-              <li>Tự động nhận diện hoặc thêm mới Tác giả, Thể loại, Nhà xuất bản nếu chưa có trong CSDL.</li>
-              <li>Nếu sách đã tồn tại (trùng ISBN hoặc Tên), hệ thống sẽ tăng thêm số lượng bản sao.</li>
-              <li>Tự động gán vị trí Phòng - Kệ - Ngăn chuẩn và sinh mã QR riêng biệt cho từng cuốn sách.</li>
+              <li>Các dòng hợp lệ sẽ được gom thành <strong>Phiếu đề xuất nhập kho (trạng thái Chờ duyệt)</strong>.</li>
+              <li>Sách, mã QR bản sao và số lượng tồn kho chỉ chính thức cập nhật sau khi <strong>Chủ thư viện phê duyệt</strong>.</li>
             </ul>
           </div>
 
@@ -3422,17 +3881,17 @@ export default function BooksPage() {
               <Button
                 size="sm"
                 onClick={handleConfirmBatchImport}
-                disabled={isSubmittingImport}
+                disabled={isSubmittingImport || excelParsedData.length === 0}
                 className="text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
               >
                 {isSubmittingImport ? (
                   <>
                     <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white"></div>
-                    Đang lưu vào CSDL...
+                    Đang tạo phiếu...
                   </>
                 ) : (
                   <>
-                    <CheckCircle2 className="h-4 w-4" /> Xác nhận nhập {excelParsedData.length} sách
+                    <CheckCircle2 className="h-4 w-4" /> Gửi phiếu nhập {excelParsedData.length} đầu sách
                   </>
                 )}
               </Button>
@@ -3557,20 +4016,35 @@ export default function BooksPage() {
                         <span>Mở Sơ Đồ Mini Map Chỉ Đường Đến Kệ</span>
                       </Button>
 
-                      {canManage && (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => {
-                            setDetailDialogOpen(false);
-                            handleOpenRelocate(selectedBookForDetail);
-                          }}
-                          className="text-xs h-8 gap-1 border-border hover:bg-muted font-medium"
-                          title="Đổi phòng, kệ lưu kho"
-                        >
-                          <ArrowRightLeft className="h-3.5 w-3.5" /> Đổi vị trí
-                        </Button>
+                      {canOperateWarehouse && (
+                        <>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              setDetailDialogOpen(false);
+                              handleOpenEditBook(selectedBookForDetail);
+                            }}
+                            className="text-xs h-8 gap-1 border-border hover:bg-muted font-medium"
+                            title="Sửa thông tin đầu sách (tên, tác giả, mô tả, ISBN)"
+                          >
+                            <Edit className="h-3.5 w-3.5" /> Sửa thông tin
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              setDetailDialogOpen(false);
+                              handleOpenRelocate(selectedBookForDetail);
+                            }}
+                            className="text-xs h-8 gap-1 border-border hover:bg-muted font-medium"
+                            title="Đổi phòng, kệ lưu kho"
+                          >
+                            <ArrowRightLeft className="h-3.5 w-3.5" /> Đổi vị trí
+                          </Button>
+                        </>
                       )}
                     </div>
                   </div>
@@ -3659,7 +4133,7 @@ export default function BooksPage() {
                         )}
                       </Button>
                     )
-                  ) : (
+                  ) : canInspectWarehouse ? (
                     <Button
                       size="sm"
                       variant="secondary"
@@ -3669,9 +4143,9 @@ export default function BooksPage() {
                         handleOpenQrDialog(selectedBookForDetail);
                       }}
                     >
-                      <QrCode className="h-3.5 w-3.5" /> Quản lý mã QR bản sao
+                      <QrCode className="h-3.5 w-3.5" /> {canOperateWarehouse ? "Quản lý mã QR & Nhập bản sao" : "Xem mã QR bản sao"}
                     </Button>
-                  )}
+                  ) : null}
                 </div>
               </div>
             </>
@@ -3681,109 +4155,122 @@ export default function BooksPage() {
 
       {/* Transaction QR Modal for Online Borrow Registration (Phiếu mượn nháp - Giữ chỗ 24h) */}
       <Dialog open={isDraftQrModalOpen} onOpenChange={setIsDraftQrModalOpen}>
-        <DialogContent className="sm:max-w-[620px] w-[95vw] max-h-[90vh] overflow-y-auto p-0 gap-0 rounded-2xl border border-indigo-500/30 shadow-2xl">
+        <DialogContent className="w-[calc(100%-1.5rem)] sm:max-w-4xl lg:max-w-5xl max-h-[92dvh] flex flex-col p-0 gap-0 overflow-hidden rounded-2xl border border-indigo-500/30 shadow-2xl bg-background">
           {myActiveDraft ? (
-            <div>
-              {/* Header (pr-10 avoids colliding with the Dialog close X button) */}
-              <div className="px-5 py-4 pr-10 border-b bg-gradient-to-r from-indigo-500/12 via-emerald-500/8 to-primary/5">
-                <div className="flex items-start gap-3">
+            <>
+              {/* Header (Sticky top, pr-12 avoids colliding with Dialog close X) */}
+              <div className="px-5 sm:px-7 py-4.5 border-b bg-gradient-to-r from-indigo-500/10 via-emerald-500/5 to-primary/5 shrink-0 pr-12">
+                <div className="flex items-start gap-3.5">
                   <div className="p-2.5 rounded-xl bg-indigo-600 text-white shadow-sm shrink-0 mt-0.5">
                     <QrCode className="h-5 w-5" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-2 mb-1">
-                      <Badge className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5">
-                        🔒 PHIẾU MƯỢN NHÁP (CHỜ ĐỐI SOÁT)
+                    <div className="flex flex-wrap items-center gap-2 mb-1.5">
+                      <Badge className="bg-indigo-600 text-white text-[11px] font-bold px-2.5 py-0.5 shadow-2xs">
+                        🔒 PHIẾU MƯỢN NHÁP
                       </Badge>
                       <Badge variant="outline" className="bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-500/40 text-[11px] py-0.5 font-semibold">
-                        <Clock className="h-3 w-3 mr-1 text-emerald-600" />
-                        Giữ riêng 24h: Còn {myActiveDraft.time_left_hours != null ? `${myActiveDraft.time_left_hours} giờ` : "24 giờ"}
+                        <Clock className="h-3.5 w-3.5 mr-1 text-emerald-600" />
+                        Giữ chỗ 24h: Còn {myActiveDraft.time_left_hours != null ? `${myActiveDraft.time_left_hours} giờ` : "24 giờ"}
+                      </Badge>
+                      <Badge variant="secondary" className="text-[11px] font-bold">
+                        Tiến độ quét tem: {myActiveDraft.verified_count || 0}/{myActiveDraft.items?.length || 1} cuốn
                       </Badge>
                     </div>
-                    <DialogTitle className="text-base sm:text-lg font-extrabold text-foreground leading-snug">
-                      Phiếu Mượn Nháp & Khóa Riêng Bản Sao 24h
+                    <DialogTitle className="text-base sm:text-lg font-bold text-foreground leading-snug">
+                      Phiếu Mượn Nháp &amp; Khóa Giữ Chỗ 24 Giờ
                     </DialogTitle>
-                    <DialogDescription className="text-xs text-muted-foreground mt-0.5 leading-relaxed">
-                      Hệ thống đã tự động khóa riêng 1 bản sao cụ thể trong 24 giờ cho bạn. Khi Thủ thư quét xác nhận tại quầy, phiếu này sẽ chuyển thành <strong>Phiếu mượn chính thức</strong> (hạn mượn 14 ngày).
+                    <DialogDescription className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                      Hệ thống đã khóa giữ riêng bản sao trên kệ cho bạn trong 24 giờ. Vui lòng lấy sách theo lộ trình bên dưới, quét tem bản sao tại kệ và đến quầy Thủ thư để đối soát nhận sách chính thức.
                     </DialogDescription>
                   </div>
                 </div>
               </div>
 
-              {/* Body */}
-              <div className="p-5 space-y-4">
+              {/* Scrollable Body */}
+              <div className="flex-1 overflow-y-auto overflow-x-hidden p-4 sm:p-6 space-y-4 min-w-0">
                 {/* QR Code and Workflow Steps Grid */}
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-stretch">
-                  {/* Left: QR Display */}
-                  <div className="md:col-span-5 flex flex-col items-center justify-center p-3.5 bg-indigo-500/[0.04] rounded-2xl border border-indigo-500/30 text-center">
-                    <div className="bg-white p-2.5 rounded-xl shadow-2xs border border-slate-200 inline-block">
+                  {/* Left: Compact QR Code Card */}
+                  <div className="md:col-span-4 lg:col-span-4 flex flex-col items-center justify-center p-4 bg-indigo-500/[0.03] rounded-2xl border border-indigo-500/20 text-center space-y-2.5">
+                    <div className="bg-white p-3 rounded-xl shadow-xs border border-slate-200 inline-block">
                       <QRCodeCanvas
                         id="canvas-my-draft-qr"
                         value={myActiveDraft.draft_code}
-                        size={148}
+                        size={140}
                         level="H"
                         includeMargin={true}
                       />
                     </div>
-                    <div className="mt-2.5 flex items-center gap-1">
-                      <code className="text-xs font-mono font-bold px-2.5 py-0.5 bg-background rounded-md border border-border text-foreground">
+                    <div className="flex items-center justify-center gap-1.5 w-full max-w-[220px]">
+                      <code className="text-xs font-mono font-bold px-2 py-1 bg-background rounded-md border border-border text-foreground truncate flex-1 text-center">
                         {myActiveDraft.draft_code}
                       </code>
                       <Button
                         size="sm"
-                        variant="ghost"
-                        className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground cursor-pointer"
+                        variant="outline"
+                        className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground cursor-pointer shrink-0"
                         title="Sao chép mã Phiếu mượn nháp"
                         onClick={() => handleCopyDraftCode(myActiveDraft.draft_code)}
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </Button>
                     </div>
-                    <span className="mt-1.5 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 inline-flex items-center gap-1">
-                      <CheckCircle2 className="h-3 w-3 text-indigo-600 shrink-0" />
-                      Đã khóa bản sao riêng 24h
-                    </span>
+                    <div className="text-[11px] text-muted-foreground leading-tight space-y-1">
+                      <p className="font-semibold text-indigo-700 dark:text-indigo-300">
+                        Độc giả: {user?.name || "Bạn"}
+                      </p>
+                      <p className="font-mono text-[10px]">Thẻ: {user?.card_number || "LIB-RD-000000"}</p>
+                    </div>
                   </div>
 
-                  {/* Right: Compact 3-Step Workflow & Reader Summary */}
-                  <div className="md:col-span-7 flex flex-col justify-between gap-2.5">
-                    <div className="bg-muted/25 border border-border/70 rounded-2xl p-3 space-y-2 flex-1">
-                      <h4 className="text-xs font-bold text-foreground flex items-center gap-1.5">
-                        <Sparkles className="h-3.5 w-3.5 text-indigo-600" />
-                        Quy trình 3 bước Mượn sách & Đối soát:
-                      </h4>
-                      <div className="space-y-1.5 text-xs">
-                        <div className="flex items-start gap-2 p-2 rounded-xl bg-indigo-500/8 border border-indigo-500/20">
-                          <span className="h-4.5 w-4.5 rounded-full bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">1</span>
-                          <div className="leading-snug">
-                            <p className="font-semibold text-indigo-950 dark:text-indigo-200 text-[11px]">Tạo Phiếu mượn nháp & Khóa giữ chỗ 24h</p>
-                            <p className="text-[11px] text-muted-foreground">Hệ thống đã khóa giữ riêng {myActiveDraft.items?.length || 1} suất bản sao trên kệ trong 24h.</p>
+                  {/* Right: Modern 3-Step Guide */}
+                  <div className="md:col-span-8 lg:col-span-8 flex flex-col justify-between gap-2.5 min-w-0">
+                    <div className="bg-muted/30 border border-border/70 rounded-2xl p-4 space-y-2.5 flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 className="text-xs font-bold text-foreground flex items-center gap-1.5 uppercase tracking-wide">
+                          <Sparkles className="h-3.5 w-3.5 text-indigo-600 shrink-0" />
+                          Quy trình 3 bước hoàn tất mượn sách:
+                        </h4>
+                        <span className="text-[11px] text-muted-foreground font-medium">Đối soát tại quầy</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
+                        {/* Step 1 */}
+                        <div className="p-2.5 rounded-xl bg-indigo-500/10 border border-indigo-500/25 space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="h-5 w-5 rounded-full bg-indigo-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0">1</span>
+                            <span className="font-bold text-indigo-950 dark:text-indigo-200 text-[11px]">Khóa giữ 24h</span>
                           </div>
+                          <p className="text-[11px] text-muted-foreground leading-snug">
+                            Đã khóa riêng {myActiveDraft.items?.length || 1} bản sao trên kệ trong 24 giờ.
+                          </p>
                         </div>
 
-                        <div className="flex items-start gap-2 p-2 rounded-xl bg-amber-500/8 border border-amber-500/20">
-                          <span className="h-4.5 w-4.5 rounded-full bg-amber-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">2</span>
-                          <div className="leading-snug">
-                            <p className="font-semibold text-amber-950 dark:text-amber-200 text-[11px]">Tự đến kệ lấy sách & Quét Tem Sách Tại Kệ</p>
-                            <p className="text-[11px] text-muted-foreground">Đến kệ lấy sách và bấm <strong>"Quét Tem Sách Tại Kệ"</strong> để định danh mã bản sao.</p>
+                        {/* Step 2 */}
+                        <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/25 space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="h-5 w-5 rounded-full bg-amber-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0">2</span>
+                            <span className="font-bold text-amber-950 dark:text-amber-200 text-[11px]">Quét tem tại kệ</span>
                           </div>
+                          <p className="text-[11px] text-muted-foreground leading-snug">
+                            Tới kệ lấy sách và bấm &quot;Quét Tem Sách&quot; để định danh mã bản sao.
+                          </p>
                         </div>
 
-                        <div className="flex items-start gap-2 p-2 rounded-xl bg-emerald-500/8 border border-emerald-500/20">
-                          <span className="h-4.5 w-4.5 rounded-full bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0 mt-0.5">3</span>
-                          <div className="leading-snug">
-                            <p className="font-semibold text-emerald-950 dark:text-emerald-200 text-[11px]">Tới quầy đưa mã Phiếu nháp / Thẻ độc giả</p>
-                            <p className="text-[11px] text-muted-foreground">Thủ thư quét đối soát cho mượn → Chuyển thành <strong>Phiếu mượn chính thức</strong>.</p>
+                        {/* Step 3 */}
+                        <div className="p-2.5 rounded-xl bg-emerald-500/10 border border-emerald-500/25 space-y-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="h-5 w-5 rounded-full bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0">3</span>
+                            <span className="font-bold text-emerald-950 dark:text-emerald-200 text-[11px]">Đối soát tại quầy</span>
                           </div>
+                          <p className="text-[11px] text-muted-foreground leading-snug">
+                            Đưa mã QR phiếu này cho Thủ thư để chuyển thành Phiếu mượn 14 ngày.
+                          </p>
                         </div>
                       </div>
-                    </div>
-
-                    <div className="text-xs text-muted-foreground bg-muted/30 px-3 py-2 rounded-xl border border-border/60 flex items-center justify-between">
-                      <span><strong>Độc giả:</strong> {user?.name || "Bạn"} ({user?.card_number || "Thành viên"})</span>
-                      <Badge variant="secondary" className="text-[11px] font-bold">
-                        Đã quét tại kệ: {myActiveDraft.verified_count || 0}/{myActiveDraft.items?.length || 1} cuốn
-                      </Badge>
+                      <p className="text-[11px] text-muted-foreground bg-background/60 p-2 rounded-lg border border-border/50">
+                        💡 <strong>Mẹo:</strong> Bạn có thể tự quét tem từng cuốn tại kệ trước, hoặc mang thẳng toàn bộ sách ra quầy để Thủ thư quét đối soát nhanh đều được!
+                      </p>
                     </div>
                   </div>
                 </div>
@@ -3793,162 +4280,186 @@ export default function BooksPage() {
                   const modalPickPath = optimizeMultiBookPickPath(myActiveDraft.items || []);
                   const orderedModalItems = modalPickPath.orderedItems;
                   return (
-                    <div className="space-y-2.5">
+                    <div className="space-y-3 min-w-0">
                       {/* Route Optimization Banner */}
                       {orderedModalItems.length > 0 && (
-                        <div className="rounded-xl border border-emerald-500/35 bg-gradient-to-r from-emerald-500/10 via-teal-500/5 to-indigo-500/10 p-3 space-y-2">
-                          <div className="flex flex-wrap items-center justify-between gap-1.5">
+                        <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/[0.06] p-3.5 space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
                             <span className="inline-flex items-center gap-1.5 text-xs font-bold text-emerald-800 dark:text-emerald-300">
-                              <Compass className="h-3.5 w-3.5 text-emerald-600" />
-                              Lộ Trình Đi Lấy Nhiều Sách Tối Ưu (Multi-Book Pick Path)
+                              <Compass className="h-4 w-4 text-emerald-600 shrink-0" />
+                              Lộ Trình Đi Lấy Sách Tối Ưu (Multi-Book Pick Path)
                             </span>
-                            <Badge variant="outline" className="text-[10px] border-emerald-500/40 text-emerald-700 bg-background">
+                            <Badge variant="outline" className="text-[10px] border-emerald-500/40 text-emerald-700 bg-background font-normal">
                               Phòng gần sảnh → Kệ thấp đến cao → Ngăn dưới lên trên
                             </Badge>
                           </div>
-                          <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px]">
-                            <span className="px-2 py-0.5 rounded-md bg-background border font-semibold shrink-0">
+                          <div className="flex flex-wrap items-center gap-2 text-xs">
+                            <span className="px-2.5 py-1 rounded-lg bg-background border font-semibold text-foreground flex items-center gap-1 shadow-2xs">
                               🏁 Sảnh chính
                             </span>
                             {orderedModalItems.map((item: any) => {
                               const loc = item._pickPath.parsedLocation;
                               const isVerified = Boolean(item.book_copy_id);
                               return (
-                                <div key={`modal-stop-${item.item_id || item.book_id || item._pickPath.stepOrder}`} className="flex items-center gap-1 shrink-0">
-                                  <ArrowRight className="h-3 w-3 text-emerald-600 shrink-0" />
+                                <div key={`modal-stop-${item.item_id || item.book_id || item._pickPath.stepOrder}`} className="flex items-center gap-2">
+                                  <ArrowRight className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
                                   <button
                                     type="button"
                                     onClick={() => handleOpenMiniMap({ location: item.location, title: item.book_title, cover: item.cover_image })}
-                                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-semibold cursor-pointer ${
+                                    className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border text-xs font-semibold cursor-pointer transition-all shadow-2xs ${
                                       isVerified
-                                        ? "bg-indigo-600 text-white border-indigo-600"
+                                        ? "bg-indigo-600 text-white border-indigo-600 shadow-xs"
                                         : "bg-background hover:bg-emerald-50 border-emerald-500/40 text-foreground"
                                     }`}
                                     title="Bấm xem sơ đồ 2D kệ sách"
                                   >
-                                    <span>Chặng {item._pickPath.stepOrder}:</span>
+                                    <span className="text-[10px] uppercase opacity-80">Chặng {item._pickPath.stepOrder}:</span>
                                     <span>{loc.roomLabel} • {loc.shelfLabel} • {loc.rackLabel}</span>
+                                    <Compass className="h-3 w-3 opacity-70 ml-0.5" />
                                   </button>
                                 </div>
                               );
                             })}
-                            <ArrowRight className="h-3 w-3 text-indigo-600 shrink-0" />
-                            <span className="px-2 py-0.5 rounded-md bg-indigo-500/10 border border-indigo-500/30 font-semibold text-indigo-700 shrink-0">
+                            <ArrowRight className="h-3.5 w-3.5 text-indigo-600 shrink-0" />
+                            <span className="px-2.5 py-1 rounded-lg bg-indigo-500/10 border border-indigo-500/30 font-semibold text-indigo-700 flex items-center gap-1">
                               💁 Quầy Thủ thư
                             </span>
                           </div>
                         </div>
                       )}
 
-                      <div className="flex items-center justify-between text-xs">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="font-bold uppercase tracking-wider text-muted-foreground">
-                          Thứ tự đi lấy sách tối ưu ({orderedModalItems.length || 1} cuốn)
+                          Thứ tự đi lấy sách ({orderedModalItems.length || 1} cuốn)
                         </span>
                         <span className="text-[11px] text-muted-foreground">Đi theo Chặng #1 → #{orderedModalItems.length}</span>
                       </div>
 
-                      <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                      <div className="space-y-3">
                         {orderedModalItems.map((item: any, idx: number) => {
                           const isVerified = Boolean(item.book_copy_id);
                           const stepOrder = item._pickPath?.stepOrder || idx + 1;
                           return (
                             <div
                               key={item.item_id || item.book_id || idx}
-                              className={`flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border transition-colors ${
-                                isVerified ? "border-indigo-500/30 bg-indigo-500/[0.03]" : "border-amber-500/30 bg-amber-500/[0.03]"
+                              className={`rounded-2xl border transition-all overflow-hidden ${
+                                isVerified
+                                  ? "border-indigo-500/30 bg-gradient-to-r from-indigo-500/[0.04] to-background"
+                                  : "border-border/80 bg-card hover:border-amber-500/40"
                               }`}
                             >
-                              <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                                <span className={`px-2 h-6 rounded-md font-bold text-[10px] flex items-center justify-center shrink-0 ${
-                                  isVerified ? "bg-indigo-600 text-white" : "bg-emerald-600 text-white"
-                                }`}>
-                                  {isVerified ? `✓ Chặng ${stepOrder}` : `Chặng ${stepOrder}`}
-                                </span>
-                                {item.cover_image ? (
-                                  <img src={item.cover_image} alt="" className="h-10 w-7 object-cover rounded shadow-2xs shrink-0" />
-                                ) : (
-                                  <div className="h-10 w-7 bg-muted rounded flex items-center justify-center shrink-0">
-                                    <BookOpen className="h-4 w-4 text-muted-foreground" />
-                                  </div>
-                                )}
-                                <div className="min-w-0 flex-1">
-                                  <p className="font-bold text-xs text-foreground truncate" title={item.book_title}>
-                                    {item.book_title}
-                                  </p>
-                                  {item._pickPath?.transitionHint && (
-                                    <p className="text-[10px] font-medium text-emerald-700 dark:text-emerald-400 truncate mt-0.5">
-                                      {item._pickPath.transitionHint}
-                                    </p>
+                              {/* Tier 1: Book Info */}
+                              <div className="p-3.5 sm:p-4 flex items-start justify-between gap-3 min-w-0">
+                                <div className="flex items-start gap-3 min-w-0 flex-1">
+                                  <span
+                                    className={`px-2 py-1 rounded-lg font-bold text-xs flex items-center justify-center shrink-0 mt-0.5 shadow-2xs ${
+                                      isVerified ? "bg-indigo-600 text-white" : "bg-emerald-600 text-white"
+                                    }`}
+                                  >
+                                    Chặng {stepOrder}
+                                  </span>
+                                  {item.cover_image ? (
+                                    <img src={item.cover_image} alt="" className="h-14 w-10 object-cover rounded-md border shadow-2xs shrink-0" />
+                                  ) : (
+                                    <div className="h-14 w-10 bg-muted rounded-md border flex items-center justify-center shrink-0">
+                                      <BookOpen className="h-5 w-5 text-muted-foreground" />
+                                    </div>
                                   )}
-                                  <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                                    {isVerified ? (
-                                      <span className="inline-flex items-center gap-1 bg-indigo-600 text-white text-[10px] font-mono font-bold px-2 py-0.5 rounded-md whitespace-nowrap">
-                                        ✓ Đã quét tại kệ: {item.copy_qr_code || `Bản sao #${item.book_copy_id}`}
-                                      </span>
-                                    ) : (
-                                      <span className="inline-flex items-center border border-amber-400 text-amber-800 bg-amber-50 text-[10px] font-semibold px-2 py-0.5 rounded-md whitespace-nowrap">
-                                        🔒 Đã khóa giữ chỗ 1 bản sao (24h) • Chờ quét tại kệ
-                                      </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <h4 className="font-bold text-sm sm:text-base text-foreground leading-snug line-clamp-1" title={item.book_title}>
+                                        {item.book_title}
+                                      </h4>
+                                      {isVerified ? (
+                                        <Badge className="bg-indigo-600 text-white text-[10px] font-bold px-2 py-0.5 gap-1 shadow-2xs">
+                                          <CheckCircle2 className="h-3 w-3" /> Đã quét tem tại kệ
+                                        </Badge>
+                                      ) : (
+                                        <Badge variant="outline" className="border-amber-500/40 bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 text-[10px] font-semibold">
+                                          🔒 Chờ quét tem tại kệ (24h)
+                                        </Badge>
+                                      )}
+                                    </div>
+                                    {item._pickPath?.transitionHint && (
+                                      <p className="text-xs font-medium text-emerald-700 dark:text-emerald-400 leading-snug mt-1 flex items-center gap-1">
+                                        <Compass className="h-3.5 w-3.5 shrink-0" />
+                                        {item._pickPath.transitionHint}
+                                      </p>
                                     )}
-                                    <span className="text-[11px] text-muted-foreground font-mono truncate">
+                                    <p className="text-xs text-muted-foreground font-mono mt-0.5">
                                       ISBN: {item.isbn || "N/A"}
-                                    </span>
+                                    </p>
                                   </div>
                                 </div>
-                              </div>
 
-                              <div className="flex items-center justify-end gap-1.5 shrink-0">
-                                <Badge variant="outline" className="bg-primary/5 text-primary border-primary/20 text-[11px] py-1 font-medium whitespace-nowrap">
-                                  <MapPin className="h-3 w-3 mr-1 text-primary shrink-0" />
-                                  {item.location || "Phòng 01 - Kệ 01 - Ngăn 01"}
-                                </Badge>
                                 <Button
                                   size="sm"
                                   variant="ghost"
-                                  className="h-7 w-7 p-0 text-primary hover:bg-primary/10 cursor-pointer"
-                                  title="Xem sơ đồ 2D vị trí kệ sách"
-                                  onClick={() => {
-                                    handleOpenMiniMap({
-                                      location: item.location,
-                                      title: item.book_title,
-                                      cover: item.cover_image
-                                    });
-                                  }}
-                                >
-                                  <Compass className="h-3.5 w-3.5" />
-                                </Button>
-                                {!isVerified ? (
-                                  <Button
-                                    size="sm"
-                                    className="h-7 text-[11px] gap-1 px-2.5 font-semibold bg-amber-600 hover:bg-amber-700 text-white cursor-pointer"
-                                    onClick={() => {
-                                      setIsDraftQrModalOpen(false);
-                                      navigate("/borrow?scan=shelf");
-                                    }}
-                                    title="Mở máy quét để quét tem sách tại kệ"
-                                  >
-                                    <Camera className="h-3 w-3" /> Quét Tem Sách Tại Kệ
-                                  </Button>
-                                ) : (
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    className="h-7 text-[11px] gap-1 px-2 font-medium text-amber-700 hover:bg-amber-500/10 border-amber-300 cursor-pointer"
-                                    onClick={() => handleUnverifyDraftItem(item.item_id || item.id, item.book_title)}
-                                    title="Quét nhầm cuốn sách trên kệ? Bấm để gỡ mã và quét lại"
-                                  >
-                                    <RotateCcw className="h-3 w-3 text-amber-600" /> Quét lại
-                                  </Button>
-                                )}
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-7 w-7 p-0 text-destructive/70 hover:text-destructive hover:bg-destructive/10 cursor-pointer shrink-0"
+                                  className="h-8 w-8 p-0 text-destructive/70 hover:text-destructive hover:bg-destructive/10 cursor-pointer shrink-0 rounded-lg"
                                   onClick={() => handleRemoveDraftItem(item.item_id || item.id, item.book_title)}
                                   title="Xóa cuốn sách này khỏi phiếu mượn nháp"
                                 >
-                                  <Trash2 className="h-3.5 w-3.5" />
+                                  <Trash2 className="h-4 w-4" />
                                 </Button>
+                              </div>
+
+                              {/* Tier 2: Location Sub-bar & Actions (Always wraps cleanly, never overflows) */}
+                              <div className="px-3.5 sm:px-4 py-2.5 bg-muted/30 border-t border-border/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                                <div className="flex flex-wrap items-center gap-2 min-w-0">
+                                  <Badge variant="outline" className="bg-background text-foreground border-border text-xs py-1 px-2.5 font-medium flex items-center gap-1.5 shadow-2xs">
+                                    <MapPin className="h-3.5 w-3.5 text-primary shrink-0" />
+                                    <span>{item.location || "Phòng 01 - Kệ 01 - Ngăn 01"}</span>
+                                  </Badge>
+
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 px-2.5 text-xs text-primary hover:bg-primary/10 border-primary/30 cursor-pointer gap-1"
+                                    title="Xem sơ đồ 2D vị trí kệ sách"
+                                    onClick={() => {
+                                      handleOpenMiniMap({
+                                        location: item.location,
+                                        title: item.book_title,
+                                        cover: item.cover_image
+                                      });
+                                    }}
+                                  >
+                                    <Compass className="h-3 w-3" />
+                                    <span>Xem sơ đồ 2D</span>
+                                  </Button>
+
+                                  {isVerified && (
+                                    <span className="text-xs font-mono font-medium text-indigo-700 dark:text-indigo-300">
+                                      Tem: <strong>{item.copy_qr_code || `Bản sao #${item.book_copy_id}`}</strong>
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center gap-2 shrink-0 self-end sm:self-auto">
+                                  {!isVerified ? (
+                                    <Button
+                                      size="sm"
+                                      className="h-7 text-xs gap-1.5 px-3 font-semibold bg-amber-600 hover:bg-amber-700 text-white cursor-pointer shadow-xs"
+                                      onClick={() => {
+                                        setIsDraftQrModalOpen(false);
+                                        navigate("/borrow?scan=shelf");
+                                      }}
+                                      title="Mở máy quét để quét tem sách tại kệ"
+                                    >
+                                      <Camera className="h-3.5 w-3.5" /> Quét Tem Sách Tại Kệ
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      size="sm"
+                                      variant="outline"
+                                      className="h-7 text-xs gap-1.5 px-2.5 font-medium text-amber-700 hover:bg-amber-500/10 border-amber-300 cursor-pointer"
+                                      onClick={() => handleUnverifyDraftItem(item.item_id || item.id, item.book_title)}
+                                      title="Quét nhầm cuốn sách trên kệ? Bấm để gỡ mã và quét lại"
+                                    >
+                                      <RotateCcw className="h-3.5 w-3.5 text-amber-600" /> Quét lại
+                                    </Button>
+                                  )}
+                                </div>
                               </div>
                             </div>
                           );
@@ -3959,8 +4470,8 @@ export default function BooksPage() {
                 })()}
               </div>
 
-              {/* Footer */}
-              <div className="px-5 py-3.5 border-t bg-muted/25 flex flex-col sm:flex-row items-center justify-between gap-2.5">
+              {/* Sticky Footer */}
+              <div className="px-4 sm:px-6 py-3.5 border-t bg-muted/40 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2.5 shrink-0">
                 <Button
                   size="sm"
                   variant="outline"
@@ -3983,7 +4494,7 @@ export default function BooksPage() {
                   </Button>
                   <Button
                     size="sm"
-                    className="flex-1 sm:flex-initial text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer"
+                    className="flex-1 sm:flex-initial text-xs gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold cursor-pointer shadow-xs"
                     onClick={() => {
                       setIsDraftQrModalOpen(false);
                       navigate("/borrow");
@@ -4002,7 +4513,7 @@ export default function BooksPage() {
                   </Button>
                 </div>
               </div>
-            </div>
+            </>
           ) : (
             <div className="p-8 text-center">
               <p className="text-sm text-muted-foreground">Không tìm thấy thông tin phiếu mượn đang hoạt động.</p>
@@ -4011,6 +4522,172 @@ export default function BooksPage() {
               </Button>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Edit Book Metadata Dialog (Librarian directly edits low-risk fields; sensitive ISBN change submits Maker proposal) */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="font-display flex items-center gap-2">
+              <Edit className="h-5 w-5 text-primary" /> Sửa Thông Tin Đầu Sách
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Chỉnh sửa tên sách, tác giả, thể loại, NXB và mô tả áp dụng ngay và lưu nhật ký. Sửa mã ISBN trên sách đã có bản sao hoặc ISBN cũ sẽ lập phiếu chờ Chủ thư viện duyệt.
+            </DialogDescription>
+          </DialogHeader>
+          {editingBook && (
+            <form onSubmit={handleConfirmEditBook} className="space-y-3 pt-1">
+              <div>
+                <label className="text-xs font-medium text-muted-foreground">Tên đầu sách *</label>
+                <Input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} required className="text-sm mt-1" />
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">Mã định danh ISBN</label>
+                  <Input
+                    value={editIsbn}
+                    onChange={(e) => setEditIsbn(e.target.value)}
+                    placeholder="VD: 978-604-..."
+                    className="text-sm mt-1 font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">Năm xuất bản</label>
+                  <Input
+                    type="number"
+                    value={editPublishedYear}
+                    onChange={(e) => setEditPublishedYear(e.target.value)}
+                    className="text-sm mt-1"
+                  />
+                </div>
+              </div>
+
+              {editIsbn.trim() !== String(editingBook.isbn || "").trim() &&
+                ((editingBook.total_copies || 0) > 0 || Boolean(editingBook.isbn)) && (
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-[11px] text-amber-900 dark:text-amber-200 space-y-1.5">
+                    <p className="font-semibold">⚠️ Thay đổi thông tin định danh quan trọng (ISBN):</p>
+                    <p>
+                      Do đầu sách đã có {editingBook.total_copies} bản sao hoặc đã gắn ISBN cũ, thay đổi này sẽ tạo phiếu đề xuất chờ Chủ thư viện phê duyệt.
+                    </p>
+                    <Input
+                      value={editReason}
+                      onChange={(e) => setEditReason(e.target.value)}
+                      placeholder="Lý do điều chỉnh ISBN (gửi Chủ thư viện)..."
+                      className="text-xs bg-background h-8"
+                    />
+                  </div>
+                )}
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 sm:gap-2">
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">Tác giả</label>
+                  <Select value={editAuthorId} onValueChange={setEditAuthorId}>
+                    <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Tác giả" /></SelectTrigger>
+                    <SelectContent>
+                      {authors.map((a) => <SelectItem key={a.id} value={a.id.toString()}>{a.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">Nhà XB</label>
+                  <Select value={editPublisherId} onValueChange={setEditPublisherId}>
+                    <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="NXB" /></SelectTrigger>
+                    <SelectContent>
+                      {publishers.map((p) => <SelectItem key={p.id} value={p.id.toString()}>{p.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground">Thể loại</label>
+                  <Select value={editCategoryId} onValueChange={setEditCategoryId}>
+                    <SelectTrigger className="text-xs mt-1"><SelectValue placeholder="Thể loại" /></SelectTrigger>
+                    <SelectContent>
+                      {categories.map((c) => <SelectItem key={c.id} value={c.id.toString()}>{c.name}</SelectItem>)}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div>
+                <label className="text-xs font-medium text-muted-foreground">Mô tả đầu sách</label>
+                <Textarea
+                  value={editDescription}
+                  onChange={(e) => setEditDescription(e.target.value)}
+                  rows={3}
+                  className="text-xs mt-1"
+                />
+              </div>
+              <DialogFooter className="gap-2 pt-2">
+                <Button type="button" variant="ghost" size="sm" onClick={() => setEditDialogOpen(false)} className="text-xs">
+                  Hủy
+                </Button>
+                <Button type="submit" size="sm" disabled={isSubmittingEdit} className="text-xs font-semibold">
+                  {isSubmittingEdit ? "Đang xử lý..." : "Lưu thay đổi"}
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Book Soft-Delete / Disposal Proposal Dialog */}
+      <Dialog open={disposalModalOpen} onOpenChange={setDisposalModalOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="font-display flex items-center gap-2 text-destructive">
+              <Trash2 className="h-5 w-5" /> Đề Xuất Thanh Lý / Ngừng Lưu Thông
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Hệ thống không xóa cứng bản ghi khỏi CSDL mà chuyển sang xóa mềm (<strong>disposed</strong> / <strong>inactive</strong>) sau khi Chủ thư viện phê duyệt.
+            </DialogDescription>
+          </DialogHeader>
+          {disposingBook && (
+            <div className="space-y-3 text-xs pt-1">
+              <div className="rounded-lg border bg-muted/40 p-3 space-y-1">
+                <p className="font-semibold text-foreground">{disposingBook.title}</p>
+                <p className="text-muted-foreground">
+                  Tổng bản sao: <strong>{disposingBook.total_copies}</strong> • Sẵn sàng: <strong>{disposingBook.available_copies}</strong>
+                </p>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-foreground">Trạng thái mục tiêu sau khi duyệt:</label>
+                <Select value={disposalStatus} onValueChange={(v: "disposed" | "inactive") => setDisposalStatus(v)}>
+                  <SelectTrigger className="text-xs h-9">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="disposed">disposed — Thanh lý khỏi kho lưu thông</SelectItem>
+                    <SelectItem value="inactive">inactive — Ngừng lưu thông tạm thời</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1">
+                <label className="text-xs font-medium text-foreground">Lý do thanh lý / ngừng lưu thông *:</label>
+                <Textarea
+                  value={disposalReason}
+                  onChange={(e) => setDisposalReason(e.target.value)}
+                  rows={3}
+                  placeholder="VD: Ấn bản cũ nát không thể phục hồi sau kiểm kê định kỳ..."
+                  className="text-xs"
+                />
+              </div>
+            </div>
+          )}
+          <DialogFooter className="gap-2 pt-2">
+            <Button variant="ghost" size="sm" onClick={() => setDisposalModalOpen(false)} disabled={isSubmittingDisposal} className="text-xs">
+              Hủy
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={handleConfirmDisposal}
+              disabled={isSubmittingDisposal}
+              className="text-xs font-semibold gap-1.5"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              {isSubmittingDisposal ? "Đang gửi phiếu..." : "Gửi Phiếu Đề Xuất Thanh Lý"}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 

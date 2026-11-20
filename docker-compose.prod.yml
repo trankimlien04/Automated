@@ -1,0 +1,15 @@
+# Production override for Docker Compose:
+# Pulls pre-built container images from GitHub Container Registry (GHCR)
+# instead of rebuilding source code on the production VPS.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --remove-orphans
+
+services:
+  server:
+    image: ${SERVER_IMAGE:-ghcr.io/trankimlien04/automated-server:latest}
+
+  client:
+    image: ${CLIENT_IMAGE:-ghcr.io/trankimlien04/automated-client:latest}
+

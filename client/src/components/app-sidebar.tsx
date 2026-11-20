@@ -21,7 +21,8 @@ import {
   Zap,
   ArrowRightLeft,
   FileSpreadsheet,
-  Inbox
+  Inbox,
+  ClipboardCheck
 } from "lucide-react";
 
 import {
@@ -116,25 +117,27 @@ export function AppSidebar() {
       {
         label: "Tổng quan & Báo cáo",
         items: [
-          { title: "Tổng quan Nghiệp vụ", url: "/", icon: LayoutDashboard },
-          { title: "Dự báo Nhu cầu & Báo cáo", url: "/reports", icon: BarChart3 },
+          { title: "Tổng quan", url: "/", icon: LayoutDashboard },
+          { title: "Thống kê & Báo cáo", url: "/reports", icon: BarChart3 },
           { title: "Thông báo", url: "/notifications", icon: Bell },
         ],
       },
       {
-        label: "Bàn Lưu Thông & Giao Dịch",
+        label: "Nghiệp vụ Lưu thông",
         items: [
           { title: "Quầy Đa Năng Thông Minh", url: "/borrow", icon: Zap },
-          { title: "Sổ Lưu Thông & Lịch Sử", url: "/borrow?mode=history", icon: FileSpreadsheet },
+          { title: "Sổ Lưu thông & Lịch sử", url: "/borrow?mode=history", icon: FileSpreadsheet },
           { title: "Hòm Trả Sách 24/7", url: "/borrow?mode=dropbox", icon: Inbox },
           { title: "Hàng đợi Đặt trước", url: "/reservations", icon: CalendarClock },
-          { title: "Sổ Vi phạm & Khắc phục", url: "/fines", icon: ShieldCheck },
+          { title: "Vi phạm & Kỷ luật", url: "/fines", icon: ShieldCheck },
         ],
       },
       {
-        label: "Quản lý Kho & Bản sao",
+        label: "Kho Sách & Bản sao",
         items: [
-          { title: "Danh mục Sách & Mã QR", url: "/books", icon: BookOpen },
+          { title: "Danh mục Sách & Bản sao", url: "/books", icon: BookOpen },
+          { title: "Đề xuất Kho (Maker)", url: "/book-requests", icon: ClipboardCheck },
+          { title: "Nhật ký hoạt động kho", url: "/activity-logs", icon: Activity },
           { title: "Thể loại & Phân loại", url: "/categories", icon: Tag },
           { title: "Tác giả", url: "/authors", icon: PenTool },
           { title: "Nhà xuất bản", url: "/publishers", icon: Building2 },
@@ -148,27 +151,28 @@ export function AppSidebar() {
       },
     ];
   } else if (isAdmin) {
-    // 3. QUẢN TRỊ VIÊN IT (ADMIN) - Vận hành kỹ thuật, phân quyền, dữ liệu nền tảng và Maker quy chế
+    // 3. QUẢN TRỊ VIÊN IT (ADMIN) - Vận hành hệ thống, phân quyền, dữ liệu nền tảng và Maker quy chế
     menuGroups = [
       {
-        label: "Tổng quan Hệ thống",
+        label: "Tổng quan & Báo cáo",
         items: [
-          { title: "Tổng quan Kỹ thuật", url: "/", icon: LayoutDashboard },
-          { title: "Báo cáo Kỹ thuật & Thống kê", url: "/reports", icon: BarChart3 },
+          { title: "Tổng quan", url: "/", icon: LayoutDashboard },
+          { title: "Thống kê & Báo cáo", url: "/reports", icon: BarChart3 },
           { title: "Thông báo", url: "/notifications", icon: Bell },
         ],
       },
       {
-        label: "Quản trị IT & An ninh",
+        label: "Quản trị Hệ thống",
         items: [
-          { title: "Quản lý Tài khoản & Phân quyền", url: "/accounts", icon: ShieldCheck },
-          { title: "Quản lý Độc giả & Dữ liệu", url: "/readers", icon: Users },
+          { title: "Tài khoản & Phân quyền", url: "/accounts", icon: ShieldCheck },
+          { title: "Quản lý Độc giả", url: "/readers", icon: Users },
           { title: "Đề xuất Quy chế (Maker)", url: "/settings", icon: Settings },
-          { title: "Nhật ký Hoạt động (Audit)", url: "/activity-logs", icon: Activity },
+          { title: "Giám sát Đề xuất Kho", url: "/book-requests", icon: ClipboardCheck },
+          { title: "Nhật ký hoạt động", url: "/activity-logs", icon: Activity },
         ],
       },
       {
-        label: "Quản trị Dữ liệu Kho",
+        label: "Kho Sách & Giám sát",
         items: [
           { title: "Danh mục Sách & Bản sao", url: "/books", icon: BookOpen },
           { title: "Thể loại & Phân loại", url: "/categories", icon: Tag },
@@ -177,38 +181,39 @@ export function AppSidebar() {
         ],
       },
       {
-        label: "Kỹ thuật Lưu thông",
+        label: "Lưu thông & Hòm trả 24/7",
         items: [
-          { title: "Sổ Lưu Thông & Lịch Sử", url: "/borrow?mode=history", icon: FileSpreadsheet },
-          { title: "Trạm Kiosk & Cổng An Ninh", url: "/borrow?mode=kiosk", icon: ArrowRightLeft },
+          { title: "Sổ Lưu thông & Lịch sử", url: "/borrow?mode=history", icon: FileSpreadsheet },
+          { title: "Hòm trả 24/7 & Đối soát phiếu", url: "/borrow?mode=kiosk", icon: ArrowRightLeft },
         ],
       },
     ];
   } else if (isOwner) {
-    // 4. CHỦ THƯ VIỆN / GIÁM ĐỐC (OWNER) - Điều hành chiến lược, phê duyệt Checker, thanh tra và tài chính
+    // 4. CHỦ THƯ VIỆN / GIÁM ĐỐC (OWNER) - Điều hành, phê duyệt Checker và giám sát vận hành
     menuGroups = [
       {
-        label: "Điều hành Chiến lược",
+        label: "Tổng quan & Báo cáo",
         items: [
-          { title: "Trung tâm Điều hành Giám đốc", url: "/", icon: LayoutDashboard },
-          { title: "Báo cáo Phân tích & KPIs", url: "/reports", icon: BarChart3 },
+          { title: "Tổng quan", url: "/", icon: LayoutDashboard },
+          { title: "Thống kê & Báo cáo", url: "/reports", icon: BarChart3 },
           { title: "Thông báo", url: "/notifications", icon: Bell },
         ],
       },
       {
-        label: "Quản trị & Giám sát Tối cao",
+        label: "Quản trị & Giám sát",
         items: [
           { title: "Phê duyệt Quy chế (Checker)", url: "/settings", icon: Settings },
-          { title: "Giám sát Tài khoản Cán bộ", url: "/accounts", icon: ShieldCheck },
-          { title: "Thanh tra Hoạt động (Audit)", url: "/activity-logs", icon: Activity },
-          { title: "Giám sát Vi phạm & Kỷ luật", url: "/fines", icon: ShieldCheck },
+          { title: "Duyệt Đề xuất Kho (Checker)", url: "/book-requests", icon: ClipboardCheck },
+          { title: "Tài khoản & Phân quyền", url: "/accounts", icon: ShieldCheck },
+          { title: "Nhật ký hoạt động", url: "/activity-logs", icon: Activity },
+          { title: "Vi phạm & Kỷ luật", url: "/fines", icon: ShieldCheck },
         ],
       },
       {
-        label: "Tài sản Thư viện",
+        label: "Kho Sách & Lưu thông",
         items: [
-          { title: "Giám sát Kho Sách & Bản sao", url: "/books", icon: BookOpen },
-          { title: "Sổ Lưu Thông & Lịch Sử Giao Dịch", url: "/borrow?mode=history", icon: FileSpreadsheet },
+          { title: "Danh mục Sách & Bản sao", url: "/books", icon: BookOpen },
+          { title: "Sổ Lưu thông & Lịch sử", url: "/borrow?mode=history", icon: FileSpreadsheet },
         ],
       },
     ];
@@ -219,9 +224,9 @@ export function AppSidebar() {
       {items.map((item) => (
         <SidebarMenuItem key={item.url}>
           <SidebarMenuButton asChild isActive={isActive(item.url)} tooltip={item.title}>
-            <Link to={item.url} className="flex items-center gap-3">
-              <item.icon className="h-4 w-4" />
-              <span>{item.title}</span>
+            <Link to={item.url} title={item.title} className="flex items-center gap-3">
+              <item.icon className="h-4 w-4 shrink-0" />
+              <span className="leading-snug whitespace-normal group-data-[collapsible=icon]:hidden">{item.title}</span>
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>

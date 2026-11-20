@@ -1,11 +1,152 @@
 const db = require('../config/db');
-const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
+const {
+    notifyUser,
+    notifyRoles,
+    notifyAllStaff,
+    getUserNotificationPreferences,
+    dispatchReservationReadyNotification,
+    dispatchSuspensionTransitionNotification,
+} = require('../services/notificationService');
 const {
     syncOverdueFines,
     calculateOverdue,
     applyLateReturnSuspension,
     getReaderCirculationStatus
 } = require('../services/fineSyncService');
+const { toLocalDateString } = require('../utils/dateUtils');
+const { saveBase64ToDisk } = require('../utils/fileStorage');
+
+const isOperationalStaff = (role) => role === 'admin' || role === 'librarian';
+const isOwnerRole = (role) => role === 'owner';
+
+const assertCanMutateForReader = (user, ownerUserId, res, actionLabel = 'thực hiện thao tác này') => {
+    if (isOwnerRole(user.role)) {
+        res.status(403).json({ message: `Chủ thư viện chỉ giám sát hệ thống, không ${actionLabel}.` });
+        return false;
+    }
+    if (!isOperationalStaff(user.role) && Number(ownerUserId) !== Number(user.id)) {
+        res.status(403).json({ message: `Bạn không có quyền ${actionLabel} cho độc giả khác.` });
+        return false;
+    }
+    return true;
+};
+
+const extractBookCopyQr = (rawValue) => {
+    let targetQr = (rawValue || '').toString().trim();
+    if (targetQr.startsWith('{') && targetQr.endsWith('}')) {
+        try {
+            const parsed = JSON.parse(targetQr);
+            targetQr = (parsed.bookQrCode || parsed.qrCode || parsed.copyQr || parsed.code || targetQr).toString().trim();
+        } catch (e) {}
+    }
+    return targetQr;
+};
+
+const getCallerActiveBorrowCopies = async (userId) => {
+    if (!userId) return [];
+    const [rows] = await db.execute(
+        `SELECT bc.qr_code, bc.book_id, b.title
+         FROM borrow_records br
+         JOIN book_copies bc ON br.book_copy_id = bc.id
+         JOIN books b ON bc.book_id = b.id
+         WHERE br.user_id = ? AND br.status = 'borrowing'`,
+        [userId]
+    );
+    return rows || [];
+};
+
+const evaluateDropBoxEligibility = ({ copy, callerUser, ownActiveCopies = [] }) => {
+    if (isOwnerRole(callerUser.role)) {
+        return {
+            eligible: false,
+            httpStatus: 403,
+            reason_code: 'FORBIDDEN_OWNER',
+            reason: 'Chủ thư viện chỉ giám sát hệ thống, không thao tác trả sách qua Hòm 24/7.',
+            suggested_qr_codes: [],
+            same_book_qr_code: null,
+        };
+    }
+
+    const title = copy.book_title || copy.title || 'Ấn phẩm';
+    const bookId = Number(copy.book_real_id || copy.book_id);
+    const isStaff = isOperationalStaff(callerUser.role);
+    const ownQrs = ownActiveCopies.map((o) => o.qr_code);
+    const sameBookOwn = ownActiveCopies.find((o) => Number(o.book_id) === bookId) || null;
+
+    if (!copy.active_borrow_id) {
+        let reason;
+        if (!isStaff && sameBookOwn) {
+            const copyStateLabel = copy.status === 'available' ? 'sẵn có trên kệ' : copy.status;
+            reason = `Mã [${copy.qr_code}] là một bản sao khác của cuốn «${title}» (hiện đang "${copyStateLabel}"), không khớp với bản sao bạn đã mượn! Bản sao bạn đang giữ là: ${sameBookOwn.qr_code}.`;
+        } else if (!isStaff && ownQrs.length > 0) {
+            reason = `Bản sao sách [${copy.qr_code}] («${title}») hiện không có giao dịch mượn đang hoạt động. Sách bạn đang mượn gồm: ${ownQrs.join(', ')}.`;
+        } else if (copy.status === 'available') {
+            reason = `Bản sao sách [${copy.qr_code}] («${title}») hiện đang có sẵn trên kệ, không nằm trong giao dịch mượn nào.`;
+        } else {
+            reason = `Bản sao sách [${copy.qr_code}] («${title}») hiện ở trạng thái "${copy.status}", không hợp lệ để ghi nhận trả qua Hòm 24/7.`;
+        }
+        return {
+            eligible: false,
+            httpStatus: 400,
+            reason_code: 'NOT_BORROWED',
+            reason,
+            suggested_qr_codes: isStaff ? [] : ownQrs,
+            same_book_qr_code: isStaff ? null : (sameBookOwn?.qr_code || null),
+        };
+    }
+
+    const borrowerId = Number(copy.borrower_user_id ?? copy.borrower_id);
+    const isOwnLoan = borrowerId === Number(callerUser.id);
+    if (!isStaff && !isOwnLoan) {
+        let reason;
+        if (sameBookOwn) {
+            reason = `Mã bản sao [${copy.qr_code}] («${title}») đang thuộc giao dịch của độc giả khác, không phải bản sao bạn đang mượn! Bản sao của bạn là: ${sameBookOwn.qr_code}.`;
+        } else if (ownQrs.length > 0) {
+            reason = `Mã bản sao [${copy.qr_code}] («${title}») không thuộc danh sách sách bạn đang mượn. Sách bạn đang mượn gồm: ${ownQrs.join(', ')}.`;
+        } else {
+            reason = `Mã bản sao [${copy.qr_code}] («${title}») không thuộc danh sách sách bạn đang mượn.`;
+        }
+        return {
+            eligible: false,
+            httpStatus: 403,
+            reason_code: 'NOT_OWN_LOAN',
+            reason,
+            suggested_qr_codes: ownQrs,
+            same_book_qr_code: sameBookOwn?.qr_code || null,
+        };
+    }
+
+    const alreadyPending = Boolean(
+        copy.is_drop_box_pending ||
+        copy.borrow_status === 'returned_drop_box' ||
+        copy.active_borrow_status === 'returned_drop_box' ||
+        copy.drop_box_status === 'pending_audit'
+    );
+    if (alreadyPending) {
+        const droppedTimeText = copy.drop_box_at
+            ? ` lúc ${new Date(copy.drop_box_at).toLocaleString('vi-VN')}`
+            : '';
+        return {
+            eligible: false,
+            httpStatus: 400,
+            reason_code: 'ALREADY_IN_DROP_BOX',
+            reason: `Cuốn sách «${title}» (${copy.qr_code}) đã được ghi nhận thả vào Hòm trả 24/7${droppedTimeText} và đang chờ thủ thư đối soát!`,
+            suggested_qr_codes: [],
+            same_book_qr_code: null,
+        };
+    }
+
+    return {
+        eligible: true,
+        httpStatus: 200,
+        reason_code: 'OK',
+        reason: isStaff
+            ? 'Bản sao đang được mượn — Sẵn sàng ghi nhận trả Hòm 24/7.'
+            : 'Khớp bản sao sách bạn đang mượn — Hợp lệ để trả qua Hòm 24/7.',
+        suggested_qr_codes: [],
+        same_book_qr_code: null,
+    };
+};
 
 // Helper to reliably find user by any representation of QR code / Card / ID / Email / Phone
 const findUserByAnyCode = async (code) => {
@@ -213,14 +354,15 @@ const cleanupAllExpiredHolds = async () => {
                         'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
                         [nextUser.id]
                     );
-                    await db.execute(
-                        'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
-                        [
-                            nextUser.user_id,
-                            '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
-                            `Người giữ chỗ trước đã hết hạn lấy sách. Suất mượn cuốn sách bạn đặt trước đã được chuyển tiếp ưu tiên cho bạn trong vòng 48 giờ. Hãy vào mục "Đặt trước sách" để xác nhận mượn nhé!`
-                        ]
-                    );
+                    const [bkRows] = await db.execute('SELECT title, location FROM books WHERE id = ? LIMIT 1', [it.book_id]);
+                    await dispatchReservationReadyNotification({
+                        userId: nextUser.user_id,
+                        reservationId: nextUser.id,
+                        bookTitle: bkRows[0]?.title || 'Tài liệu thư viện',
+                        location: bkRows[0]?.location || null,
+                        expiresAt: new Date(Date.now() + 48 * 3600 * 1000),
+                        inAppMessage: 'Người giữ chỗ trước đã hết hạn lấy sách. Suất mượn cuốn sách bạn đặt trước đã được chuyển tiếp ưu tiên cho bạn trong vòng 48 giờ. Hãy vào mục "Đặt trước sách" để xác nhận mượn nhé!',
+                    });
                 } else {
                     await db.execute('UPDATE books SET available_copies = LEAST(total_copies, available_copies + 1) WHERE id = ?', [it.book_id]);
                 }
@@ -263,14 +405,13 @@ const cleanupAllExpiredHolds = async () => {
                     'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
                     [nextUser.id]
                 );
-                await db.execute(
-                    'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
-                    [
-                        nextUser.user_id,
-                        '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
-                        `Cuốn sách "${resv.book_title}" bạn đặt trước đã có sẵn tại thư viện (người giữ chỗ trước đã hết hạn). Thư viện đang giữ sách ưu tiên cho bạn trong vòng 48 giờ. Hãy vào mục "Đặt trước sách" để xác nhận mượn nhé!`
-                    ]
-                );
+                await dispatchReservationReadyNotification({
+                    userId: nextUser.user_id,
+                    reservationId: nextUser.id,
+                    bookTitle: resv.book_title,
+                    expiresAt: new Date(Date.now() + 48 * 3600 * 1000),
+                    inAppMessage: `Cuốn sách "${resv.book_title}" bạn đặt trước đã có sẵn tại thư viện (người giữ chỗ trước đã hết hạn). Thư viện đang giữ sách ưu tiên cho bạn trong vòng 48 giờ. Hãy vào mục "Đặt trước sách" để xác nhận mượn nhé!`,
+                });
             } else {
                 await db.execute('UPDATE books SET available_copies = LEAST(total_copies, available_copies + 1) WHERE id = ?', [resv.book_id]);
             }
@@ -354,6 +495,12 @@ exports.borrowBook = async (req, res) => {
     const callerId = req.user.id;
     const callerRole = req.user.role;
 
+    if (isOwnerRole(callerRole)) {
+        return res.status(403).json({
+            message: 'Chủ thư viện chỉ giám sát số liệu, không trực tiếp thực hiện giao dịch mượn sách tại quầy.'
+        });
+    }
+
     try {
         // If single unified qrCode is provided
         const singleCode = ticketCode || qrCode || readerCardNumber || bookQrCode;
@@ -362,6 +509,11 @@ exports.borrowBook = async (req, res) => {
         // CASE 1: 1-SCAN ONLINE TICKET QR (Format: TICKET-RES-123 or TICKET-123)
         // -------------------------------------------------------------
         if (typeof singleCode === 'string' && (singleCode.startsWith('TICKET-RES-') || singleCode.startsWith('TICKET-'))) {
+            if (!isOperationalStaff(callerRole)) {
+                return res.status(403).json({
+                    message: 'Chỉ Thủ thư hoặc Quản trị viên mới có quyền quét duyệt phiếu nhận sách đặt trước tại quầy!'
+                });
+            }
             const resId = parseInt(singleCode.replace('TICKET-RES-', '').replace('TICKET-', ''));
             if (!resId) {
                 return res.status(400).json({ message: 'Mã phiếu nhận sách không hợp lệ' });
@@ -415,7 +567,7 @@ exports.borrowBook = async (req, res) => {
                 // Create borrow record
                 await connection.execute(
                     'INSERT INTO borrow_records (user_id, book_copy_id, due_date, status, processed_by) VALUES (?, ?, ?, "borrowing", ?)',
-                    [resv.u_id, copy.id, dueDate.toISOString().slice(0, 10), callerId]
+                    [resv.u_id, copy.id, toLocalDateString(dueDate), callerId]
                 );
 
                 // Update copy status
@@ -513,7 +665,7 @@ exports.borrowBook = async (req, res) => {
                 JOIN books b ON bc.book_id = b.id 
                 LEFT JOIN borrow_records br ON bc.id = br.book_copy_id AND br.status = 'borrowing'
                 LEFT JOIN users u ON br.user_id = u.id
-                WHERE bc.qr_code = ?
+                WHERE bc.qr_code = ? AND COALESCE(b.status, 'active') = 'active'
             `, [targetQr]);
             if (copies.length === 0) {
                 return res.status(404).json({ message: 'Không tìm thấy mã sách này trong hệ thống' });
@@ -588,7 +740,7 @@ exports.borrowBook = async (req, res) => {
             try {
                 await connection.execute(
                     'INSERT INTO borrow_records (user_id, book_copy_id, due_date, status, processed_by) VALUES (?, ?, ?, "borrowing", ?)',
-                    [user.id, copy.id, dueDate.toISOString().slice(0, 10), user.id]
+                    [user.id, copy.id, toLocalDateString(dueDate), user.id]
                 );
 
                 await connection.execute(
@@ -699,14 +851,14 @@ exports.borrowBook = async (req, res) => {
 
         // 3. Find book copy by QR code with active borrow check
         const [copies] = await db.execute(`
-            SELECT bc.*, b.title, b.id as book_real_id, b.available_copies,
+            SELECT bc.*, b.title, b.id as book_real_id, b.available_copies, COALESCE(b.status, 'active') as book_status,
                    br.id as active_borrow_id, br.user_id as borrower_user_id, br.due_date,
                    u.full_name as borrower_name, u.card_number as borrower_card_number
             FROM book_copies bc 
             JOIN books b ON bc.book_id = b.id 
             LEFT JOIN borrow_records br ON bc.id = br.book_copy_id AND br.status = 'borrowing'
             LEFT JOIN users u ON br.user_id = u.id
-            WHERE bc.qr_code = ?
+            WHERE bc.qr_code = ? AND COALESCE(b.status, 'active') = 'active'
         `, [bookQrCode]);
         if (copies.length === 0) {
             return res.status(404).json({ message: 'Không tìm thấy mã sách này trong hệ thống' });
@@ -786,7 +938,7 @@ exports.borrowBook = async (req, res) => {
             // Create borrow record
             await connection.execute(
                 'INSERT INTO borrow_records (user_id, book_copy_id, due_date, status, processed_by) VALUES (?, ?, ?, "borrowing", ?)',
-                [user.id, copy.id, dueDate.toISOString().slice(0, 10), callerId]
+                [user.id, copy.id, toLocalDateString(dueDate), callerId]
             );
 
             // Update book copy status
@@ -881,18 +1033,590 @@ exports.borrowBook = async (req, res) => {
     }
 };
 
+let isReturnSlipsSchemaEnsured = false;
+async function ensureReturnSlipsSchema() {
+    if (isReturnSlipsSchemaEnsured) return;
+    try {
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS return_slips (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                return_code VARCHAR(60) UNIQUE NOT NULL,
+                user_id INT NOT NULL,
+                processed_by INT NULL,
+                return_method ENUM('counter', 'drop_box') DEFAULT 'counter',
+                status ENUM('confirmed', 'partial_incident') DEFAULT 'confirmed',
+                book_count INT NOT NULL DEFAULT 1,
+                borrow_slip_codes JSON NULL,
+                items_summary JSON NULL,
+                drop_box_received_at DATETIME NULL,
+                returned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                notes TEXT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (processed_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+        `);
+
+        const [returnSlipIdCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'return_slip_id'");
+        if (returnSlipIdCol.length === 0) {
+            await db.execute("ALTER TABLE borrow_records ADD COLUMN return_slip_id INT NULL");
+        }
+        const [returnCondCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'return_condition'");
+        if (returnCondCol.length === 0) {
+            await db.execute("ALTER TABLE borrow_records ADD COLUMN return_condition ENUM('normal', 'damaged', 'lost') DEFAULT 'normal'");
+        }
+        const [returnCondNoteCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'return_condition_note'");
+        if (returnCondNoteCol.length === 0) {
+            await db.execute("ALTER TABLE borrow_records ADD COLUMN return_condition_note TEXT NULL");
+        }
+
+        // Backfill legacy returned borrow_records that have no return_slip_id yet
+        const [legacyRows] = await db.execute(`
+            SELECT br.id, br.user_id, br.borrow_date, br.due_date, br.return_date, br.status,
+                   br.is_drop_box, br.drop_box_at, br.drop_box_status, br.drop_box_audit_note,
+                   br.drop_box_audited_by, br.drop_box_audited_at, br.processed_by,
+                   br.return_condition, br.return_condition_note,
+                   bc.qr_code, bc.book_id, b.title as book_title, b.cover_image,
+                   COALESCE(b.location, 'Phòng 01 - Kệ 01 - Ngăn 01') as location
+            FROM borrow_records br
+            JOIN book_copies bc ON br.book_copy_id = bc.id
+            JOIN books b ON bc.book_id = b.id
+            WHERE br.status = 'returned' AND br.return_slip_id IS NULL
+            ORDER BY COALESCE(br.drop_box_audited_at, br.return_date, br.borrow_date) ASC, br.id ASC
+        `);
+
+        if (legacyRows.length > 0) {
+            const [allPasses] = await db.execute('SELECT id, user_id, pass_code, items_summary, created_at FROM exit_passes');
+            const parsedPasses = parsePassesWithItems(allPasses);
+
+            const groups = new Map();
+            for (const row of legacyRows) {
+                const isDropBox = Boolean(row.is_drop_box === 1 || row.drop_box_at);
+                const method = isDropBox ? 'drop_box' : 'counter';
+                const confirmedDate = row.drop_box_audited_at || row.return_date || new Date();
+                const dayKey = new Date(confirmedDate).toISOString().slice(0, 10);
+                const key = `${row.user_id}|${method}|${dayKey}`;
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(row);
+            }
+
+            const [maxRow] = await db.execute('SELECT COALESCE(MAX(id), 0) as max_id FROM return_slips');
+            let nextSeq = Number(maxRow[0]?.max_id || 0) + 1;
+
+            for (const groupRows of groups.values()) {
+                const first = groupRows[0];
+                const isDropBox = Boolean(first.is_drop_box === 1 || first.drop_box_at);
+                const method = isDropBox ? 'drop_box' : 'counter';
+                const returnedAt = first.drop_box_audited_at || first.return_date || new Date();
+                const year = new Date(returnedAt).getFullYear() || new Date().getFullYear();
+                const returnCode = `RT-${year}-${String(nextSeq).padStart(4, '0')}`;
+                nextSeq += 1;
+
+                const slipItems = groupRows.map(r => {
+                    const borrowSlipCode = resolveBorrowSlipCodeForRecord(parsedPasses, {
+                        userId: r.user_id,
+                        qrCode: r.qr_code,
+                        borrowDate: r.borrow_date,
+                        recordId: r.id,
+                    });
+                    const cond = r.return_condition || (r.drop_box_status === 'damaged' ? 'damaged' : 'normal');
+                    return {
+                        borrowRecordId: r.id,
+                        borrowSlipCode,
+                        bookId: r.book_id,
+                        bookTitle: r.book_title,
+                        copyQr: r.qr_code,
+                        coverImage: r.cover_image || null,
+                        location: r.location,
+                        borrowDate: r.borrow_date,
+                        dueDate: r.due_date,
+                        condition: cond,
+                        conditionNote: r.return_condition_note || r.drop_box_audit_note || null,
+                        dropBoxReceivedAt: r.drop_box_at || null,
+                        confirmedAt: r.drop_box_audited_at || r.return_date || returnedAt,
+                        statusLabel: cond === 'normal' ? 'Đã trả' : (cond === 'lost' ? 'Mất sách (Chờ khắc phục)' : 'Hư hỏng (Chờ khắc phục)'),
+                    };
+                });
+
+                const borrowSlipCodes = Array.from(new Set(slipItems.map(i => i.borrowSlipCode).filter(Boolean)));
+                const hasIncident = slipItems.some(i => i.condition !== 'normal');
+                const processedBy = first.drop_box_audited_by || first.processed_by || null;
+
+                const [ins] = await db.execute(
+                    `INSERT IGNORE INTO return_slips (
+                        return_code, user_id, processed_by, return_method, status,
+                        book_count, borrow_slip_codes, items_summary, drop_box_received_at, returned_at, notes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                    [
+                        returnCode,
+                        first.user_id,
+                        processedBy,
+                        method,
+                        hasIncident ? 'partial_incident' : 'confirmed',
+                        slipItems.length,
+                        JSON.stringify(borrowSlipCodes),
+                        JSON.stringify(slipItems),
+                        isDropBox ? (first.drop_box_at || null) : null,
+                        returnedAt,
+                        isDropBox ? 'Phiếu trả đối soát Hòm trả sách 24/7' : 'Phiếu trả sách tại quầy thư viện'
+                    ]
+                );
+
+                if (ins.insertId) {
+                    const ids = groupRows.map(r => r.id);
+                    const placeholders = ids.map(() => '?').join(',');
+                    await db.execute(
+                        `UPDATE borrow_records SET return_slip_id = ? WHERE id IN (${placeholders})`,
+                        [ins.insertId, ...ids]
+                    );
+                }
+            }
+        }
+
+        isReturnSlipsSchemaEnsured = true;
+    } catch (e) {
+        console.error('Error ensuring return_slips schema:', e.message);
+    }
+}
+
+function normalizeReturnSlipRow(row) {
+    if (!row) return null;
+    let items = [];
+    let borrowSlipCodes = [];
+    try {
+        items = typeof row.items_summary === 'string' ? JSON.parse(row.items_summary) : (row.items_summary || []);
+    } catch (e) {}
+    try {
+        borrowSlipCodes = typeof row.borrow_slip_codes === 'string' ? JSON.parse(row.borrow_slip_codes) : (row.borrow_slip_codes || []);
+    } catch (e) {}
+
+    if (!Array.isArray(items)) items = [];
+    if (!Array.isArray(borrowSlipCodes)) borrowSlipCodes = [];
+    if (borrowSlipCodes.length === 0 && items.length > 0) {
+        borrowSlipCodes = Array.from(new Set(items.map(it => it.borrowSlipCode).filter(Boolean)));
+    }
+
+    return {
+        ...row,
+        returnCode: row.return_code,
+        return_code: row.return_code,
+        borrowSlipCodes,
+        borrow_slip_codes: borrowSlipCodes,
+        items,
+        librarianName: row.librarian_name || row.processed_by_name || 'Thủ thư trực quầy',
+        readerName: row.reader_name,
+        cardNumber: row.card_number,
+        returnMethod: row.return_method || 'counter',
+        dropBoxReceivedAt: row.drop_box_received_at || null,
+        returnedAt: row.returned_at || row.created_at,
+    };
+}
+
+async function generateUniqueReturnCode(executor) {
+    const year = new Date().getFullYear();
+    const [maxRows] = await executor.execute('SELECT COALESCE(MAX(id), 0) as max_id FROM return_slips');
+    const baseSeq = Number(maxRows[0]?.max_id || 0) + 1;
+    for (let attempt = 0; attempt < 5; attempt++) {
+        const seq = baseSeq + attempt;
+        const candidate = attempt === 0
+            ? `RT-${year}-${String(seq).padStart(4, '0')}`
+            : `RT-${year}-${String(seq).padStart(4, '0')}-${Math.random().toString(36).substring(2, 4).toUpperCase()}`;
+        const [exists] = await executor.execute('SELECT id FROM return_slips WHERE return_code = ? LIMIT 1', [candidate]);
+        if (exists.length === 0) return candidate;
+    }
+    return `RT-${year}-${Date.now().toString().slice(-6)}`;
+}
+
+async function issueReturnSlip(connection, {
+    userId,
+    processedBy = null,
+    returnMethod = 'counter',
+    items = [],
+    dropBoxReceivedAt = null,
+    returnedAt = null,
+    notes = null,
+    sendEmail = true
+}) {
+    if (!userId || !Array.isArray(items) || items.length === 0) return null;
+
+    await ensureReturnSlipsSchema();
+    const executor = connection || db;
+
+    const finalReturnedAt = returnedAt ? new Date(returnedAt) : new Date();
+    const finalDropBoxAt = dropBoxReceivedAt ? new Date(dropBoxReceivedAt) : null;
+    const returnCode = await generateUniqueReturnCode(executor);
+
+    const borrowSlipCodes = Array.from(
+        new Set(items.map(it => it.borrowSlipCode).filter(Boolean))
+    );
+    const hasIncident = items.some(it => it.condition && it.condition !== 'normal');
+    const status = hasIncident ? 'partial_incident' : 'confirmed';
+
+    const normalizedItems = items.map(it => ({
+        borrowRecordId: it.borrowRecordId,
+        borrowSlipCode: it.borrowSlipCode || null,
+        bookId: it.bookId || null,
+        bookTitle: it.bookTitle || it.title || 'Ấn phẩm thư viện',
+        copyQr: it.copyQr || it.qrCode || 'N/A',
+        coverImage: it.coverImage || null,
+        location: it.location || null,
+        borrowDate: it.borrowDate || null,
+        dueDate: it.dueDate || null,
+        condition: it.condition || 'normal',
+        conditionNote: it.conditionNote || null,
+        overdueDays: Number(it.overdueDays || 0),
+        dropBoxReceivedAt: finalDropBoxAt ? finalDropBoxAt.toISOString() : (it.dropBoxReceivedAt || null),
+        confirmedAt: finalReturnedAt.toISOString(),
+        statusLabel: it.condition === 'lost'
+            ? 'Mất sách (Chờ khắc phục)'
+            : it.condition === 'damaged'
+            ? 'Hư hỏng (Chờ khắc phục)'
+            : 'Đã trả'
+    }));
+
+    const finalNotes = notes || (
+        returnMethod === 'drop_box'
+            ? 'Xác nhận hoàn trả sách qua Hòm trả sách 24/7'
+            : 'Xác nhận hoàn trả sách tại quầy thủ thư'
+    );
+
+    const [ins] = await executor.execute(
+        `INSERT INTO return_slips (
+            return_code, user_id, processed_by, return_method, status,
+            book_count, borrow_slip_codes, items_summary, drop_box_received_at, returned_at, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+            returnCode,
+            userId,
+            processedBy,
+            returnMethod,
+            status,
+            normalizedItems.length,
+            JSON.stringify(borrowSlipCodes),
+            JSON.stringify(normalizedItems),
+            finalDropBoxAt,
+            finalReturnedAt,
+            finalNotes
+        ]
+    );
+    const slipId = ins.insertId;
+
+    for (const it of normalizedItems) {
+        if (it.borrowRecordId) {
+            await executor.execute(
+                'UPDATE borrow_records SET return_slip_id = ?, return_condition = ?, return_condition_note = ? WHERE id = ?',
+                [slipId, it.condition || 'normal', it.conditionNote || null, it.borrowRecordId]
+            );
+        }
+    }
+
+    const [readerRows] = await executor.execute(
+        'SELECT full_name, email, card_number, phone, status FROM users WHERE id = ?',
+        [userId]
+    );
+    const readerUser = readerRows[0] || {};
+
+    let librarianName = 'Thủ thư trực quầy';
+    if (processedBy) {
+        const [libRows] = await executor.execute('SELECT full_name FROM users WHERE id = ?', [processedBy]);
+        if (libRows.length > 0 && libRows[0].full_name) {
+            librarianName = libRows[0].full_name;
+        }
+    }
+
+    const slipObj = normalizeReturnSlipRow({
+        id: slipId,
+        return_code: returnCode,
+        user_id: userId,
+        processed_by: processedBy,
+        librarian_name: librarianName,
+        reader_name: readerUser.full_name || 'Độc giả thư viện',
+        card_number: readerUser.card_number || 'Đang cập nhật',
+        reader_phone: readerUser.phone || null,
+        reader_status: readerUser.status || 'active',
+        return_method: returnMethod,
+        status,
+        book_count: normalizedItems.length,
+        borrow_slip_codes: borrowSlipCodes,
+        items_summary: normalizedItems,
+        drop_box_received_at: finalDropBoxAt ? finalDropBoxAt.toISOString() : null,
+        returned_at: finalReturnedAt.toISOString(),
+        notes: finalNotes,
+        created_at: finalReturnedAt.toISOString()
+    });
+
+    if (sendEmail && readerUser.email) {
+        const shouldSendOptionalEmail = returnMethod === 'counter'
+            ? (await getUserNotificationPreferences(userId)).emailReceipts
+            : true;
+        if (shouldSendOptionalEmail) {
+            const emailService = require('../services/emailService');
+            emailService.sendReturnSlipEmail({
+                to: readerUser.email,
+                userId,
+                fullName: readerUser.full_name,
+                cardNumber: readerUser.card_number,
+                returnCode,
+                borrowSlipCodes,
+                returnMethod,
+                droppedAt: finalDropBoxAt,
+                returnedAt: finalReturnedAt,
+                librarianName,
+                items: normalizedItems,
+                dedupKey: `return_slip:${returnCode}`,
+            }).catch(e => console.error('Lỗi khi gửi email Phiếu trả sách:', e.message));
+        }
+    }
+
+    return slipObj;
+}
+
+async function processSingleReturnRecord(connection, {
+    copy,
+    record,
+    processedBy,
+    condition = 'normal',
+    conditionNote = '',
+    parsedPasses = []
+}) {
+    const normalizedCondition = (condition || 'normal').toString().trim().toLowerCase();
+    const trimmedConditionNote = (conditionNote || '').toString().trim();
+    const { overdueDays } = calculateOverdue(record.due_date);
+
+    const [existingFines] = await connection.execute(
+        "SELECT * FROM fines WHERE borrow_record_id = ? AND (violation_type = 'overdue' OR violation_type IS NULL) ORDER BY id DESC LIMIT 1",
+        [record.id]
+    );
+
+    const isIncidentReturn = normalizedCondition === 'damaged' || normalizedCondition === 'lost';
+    const conditionLabel = normalizedCondition === 'lost'
+        ? 'Mất sách'
+        : normalizedCondition === 'damaged'
+        ? 'Hư hỏng'
+        : 'Bình thường';
+
+    const defaultIncidentNote = normalizedCondition === 'lost'
+        ? 'Độc giả báo làm mất sách khi trả tại quầy'
+        : 'Thủ thư ghi nhận sách hư hỏng khi tiếp nhận trả tại quầy';
+    const finalConditionNote = isIncidentReturn ? (trimmedConditionNote || defaultIncidentNote) : (trimmedConditionNote || null);
+
+    // Update borrow record (counter return channel with explicit actual return_date & condition)
+    await connection.execute(
+        'UPDATE borrow_records SET return_date = NOW(), status = "returned", is_drop_box = 0, return_condition = ?, return_condition_note = ? WHERE id = ?',
+        [normalizedCondition, finalConditionNote, record.id]
+    );
+
+    if (isIncidentReturn) {
+        await connection.execute(
+            'UPDATE book_copies SET status = ?, condition_note = ? WHERE id = ?',
+            [normalizedCondition, finalConditionNote, copy.id]
+        );
+
+        const remediationAction = normalizedCondition === 'lost'
+            ? 'Mua/nộp lại bản sao sách tương đương để khôi phục kho'
+            : 'Khắc phục hoặc nộp bản sao sách nguyên vẹn thay thế';
+        await connection.execute(
+            `INSERT INTO fines (
+                borrow_record_id, user_id, amount, reason, status,
+                violation_type, severity, remediation_status, remediation_action, created_at
+            ) VALUES (?, ?, 0, ?, 'unpaid', ?, ?, 'pending_remediation', ?, NOW())`,
+            [
+                record.id,
+                record.u_id,
+                `Biên bản ${normalizedCondition === 'lost' ? 'mất sách' : 'hư hại sách'} tại quầy («${copy.title}»): ${finalConditionNote}`,
+                normalizedCondition,
+                normalizedCondition === 'lost' ? 'lost' : 'moderate',
+                remediationAction
+            ]
+        );
+    } else {
+        await connection.execute(
+            'UPDATE book_copies SET status = "available" WHERE id = ?',
+            [copy.id]
+        );
+        await connection.execute(
+            'UPDATE books SET available_copies = LEAST(total_copies, available_copies + 1) WHERE id = ?',
+            [copy.book_real_id]
+        );
+    }
+
+    let suspensionResult = { overdueDays, effectiveLateDays: 0, suspendedDaysAdded: 0, suspendedUntil: null };
+    let previousSuspendedUntil = null;
+    if (overdueDays > 0) {
+        try {
+            const [prevRows] = await connection.execute('SELECT suspended_until FROM users WHERE id = ? LIMIT 1', [record.u_id]);
+            previousSuspendedUntil = prevRows?.[0]?.suspended_until || null;
+        } catch {
+            previousSuspendedUntil = null;
+        }
+        suspensionResult = await applyLateReturnSuspension(connection, record.u_id, record.due_date, new Date());
+        const suspSuffix = suspensionResult.suspendedDaysAdded > 0 && suspensionResult.suspendedUntil
+            ? ` • Tạm ngưng mượn ${suspensionResult.suspendedDaysAdded} ngày (đến ${new Date(suspensionResult.suspendedUntil).toLocaleDateString('vi-VN')})`
+            : '';
+        const resolvedReason = `Đã hoàn trả sách tại quầy [${conditionLabel}] (Trễ hạn ${overdueDays} ngày • Hạn: ${new Date(record.due_date).toLocaleDateString('vi-VN')}${suspSuffix})`;
+        if (existingFines.length > 0) {
+            await connection.execute(
+                "UPDATE fines SET amount = 0, reason = ?, status = 'paid', violation_type = 'overdue', remediation_status = 'resolved', resolved_by = ?, resolved_at = NOW(), paid_at = NOW() WHERE id = ?",
+                [resolvedReason, processedBy, existingFines[0].id]
+            );
+        } else {
+            await connection.execute(
+                "INSERT INTO fines (borrow_record_id, user_id, amount, reason, status, violation_type, severity, remediation_status, resolved_by, resolved_at, paid_at) VALUES (?, ?, 0, ?, 'paid', 'overdue', 'none', 'resolved', ?, NOW(), NOW())",
+                [record.id, record.u_id, resolvedReason, processedBy]
+            );
+        }
+    } else {
+        await connection.execute(
+            "DELETE FROM fines WHERE borrow_record_id = ? AND (violation_type = 'overdue' OR violation_type IS NULL) AND remediation_status <> 'pending_remediation'",
+            [record.id]
+        );
+    }
+
+    const circulationAfterReturn = await getReaderCirculationStatus(record.u_id, connection);
+
+    await connection.execute(
+        'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?)',
+        [
+            processedBy,
+            'RETURN',
+            'borrow_records',
+            record.id,
+            `Trả sách tại quầy [${conditionLabel}]: ${copy.title}. Độc giả: ${record.full_name}. ${overdueDays > 0 ? `Trả trễ hạn ${overdueDays} ngày${suspensionResult.suspendedDaysAdded > 0 ? ` (Tạm ngưng mượn ${suspensionResult.suspendedDaysAdded} ngày)` : ''}` : 'Trả đúng hạn'}${finalConditionNote ? ` • Ghi chú: ${finalConditionNote}` : ''}`
+        ]
+    );
+
+    if (isIncidentReturn) {
+        await connection.execute(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)',
+            [
+                record.u_id,
+                `⚠️ Ghi nhận trả sách [${conditionLabel}] — Chờ khắc phục`,
+                `Thủ thư đã tiếp nhận trả cuốn "${copy.title}" (${copy.qr_code}) tại quầy với tình trạng ${conditionLabel}${finalConditionNote ? ` (${finalConditionNote})` : ''}. Quyền mượn mới tạm khóa cho đến khi hoàn tất khắc phục theo quy chế.`,
+                'warning'
+            ]
+        );
+    } else if (overdueDays > 0) {
+        const suspNote = suspensionResult.suspendedDaysAdded > 0 && suspensionResult.suspendedUntil
+            ? ` Theo quy chế, thẻ tạm ngưng quyền mượn ${suspensionResult.suspendedDaysAdded} ngày đến hết ${new Date(suspensionResult.suspendedUntil).toLocaleDateString('vi-VN')}.`
+            : '';
+        const remainingNote = circulationAfterReturn?.eligibleToBorrow
+            ? ' Không còn vi phạm khác, quyền mượn sách đã được mở lại.'
+            : ` Trạng thái quyền mượn hiện tại: ${circulationAfterReturn?.blockReason || 'Đang tạm ngưng theo quy chế'}.`;
+
+        await connection.execute(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)',
+            [
+                record.u_id,
+                suspensionResult.suspendedDaysAdded > 0 ? 'Đã nhận trả sách trễ hạn & Áp dụng tạm ngưng mượn' : 'Hoàn tất trả sách trễ hạn',
+                `Bạn đã hoàn trả cuốn sách "${copy.title}" tại quầy (trễ hạn ${overdueDays} ngày).${suspNote}${remainingNote}`,
+                circulationAfterReturn?.eligibleToBorrow ? 'info' : 'warning'
+            ]
+        );
+    } else {
+        const extraHold = !circulationAfterReturn?.eligibleToBorrow && circulationAfterReturn?.blockReason
+            ? ` Lưu ý: thẻ hiện vẫn tạm khóa/đình chỉ do ${circulationAfterReturn.blockReason}.`
+            : '';
+        await connection.execute(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
+            [
+                record.u_id,
+                'Hoàn tất trả sách thành công',
+                `Cảm ơn bạn đã hoàn trả đúng hạn cuốn sách "${copy.title}" tại quầy!${extraHold}`
+            ]
+        );
+    }
+
+    await notifyAllStaff(
+        isIncidentReturn ? `Ghi nhận trả sách [${conditionLabel}]` : 'Độc giả hoàn trả sách tại quầy',
+        `Độc giả ${record.full_name} (${record.card_number}) vừa trả cuốn "${copy.title}" tại quầy [${conditionLabel}]. ${overdueDays > 0 ? `Trả trễ hạn ${overdueDays} ngày${suspensionResult.suspendedDaysAdded > 0 ? ` — Tạm ngưng ${suspensionResult.suspendedDaysAdded} ngày` : ''}.` : 'Trả đúng hạn.'}`,
+        isIncidentReturn || overdueDays > 0 ? 'warning' : 'info'
+    );
+
+    const [pendingReservations] = !isIncidentReturn
+        ? await connection.execute(
+            'SELECT r.id, r.user_id, b.title, u.full_name, u.card_number FROM reservations r JOIN books b ON r.book_id = b.id JOIN users u ON r.user_id = u.id WHERE r.book_id = ? AND r.status IN ("waiting", "pending") ORDER BY r.reservation_date ASC LIMIT 1',
+            [copy.book_real_id]
+        )
+        : [[]];
+    let promotedReservation = null;
+    if (pendingReservations.length > 0) {
+        const nextRes = pendingReservations[0];
+        const nextExpiresAt = new Date(Date.now() + 48 * 3600 * 1000);
+        await connection.execute(
+            'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
+            [nextRes.id]
+        );
+        await connection.execute(
+            'UPDATE books SET available_copies = GREATEST(0, available_copies - 1) WHERE id = ?',
+            [copy.book_real_id]
+        );
+        await connection.execute(
+            'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
+            [
+                nextRes.user_id,
+                '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
+                `Cuốn sách "${nextRes.title}" bạn đặt trước vừa được hoàn trả về thư viện! Thư viện đang giữ sách ưu tiên cho bạn trong vòng 48 giờ. Bạn có muốn mượn cuốn sách này không? Hãy vào mục "Đặt trước sách" để xác nhận mượn hoặc hủy nhường cho bạn đọc khác nhé.`
+            ]
+        );
+        await notifyRoles(
+            ['librarian', 'admin'],
+            'Sách đặt trước đã có mặt - Đang đợi độc giả xác nhận',
+            `Sách "${nextRes.title}" vừa trả về kho đã được giữ chỗ 48h và gửi thông báo mời mượn cho độc giả ${nextRes.full_name} (${nextRes.card_number}) trong hàng đợi.`,
+            'reminder'
+        );
+        promotedReservation = {
+            userId: nextRes.user_id,
+            reservationId: nextRes.id,
+            bookTitle: nextRes.title,
+            location: copy.book_location || null,
+            expiresAt: nextExpiresAt,
+        };
+    }
+
+    const borrowSlipCode = resolveBorrowSlipCodeForRecord(parsedPasses, {
+        userId: record.u_id,
+        qrCode: copy.qr_code,
+        borrowDate: record.borrow_date,
+        recordId: record.id
+    });
+
+    return {
+        userId: record.u_id,
+        borrowRecordId: record.id,
+        borrowSlipCode,
+        bookId: copy.book_real_id,
+        bookTitle: copy.title,
+        copyQr: copy.qr_code,
+        coverImage: copy.cover_image || null,
+        location: copy.book_location || 'Phòng 01 - Kệ 01 - Ngăn 01',
+        borrowDate: record.borrow_date,
+        dueDate: record.due_date,
+        condition: normalizedCondition,
+        conditionLabel,
+        conditionNote: finalConditionNote,
+        isIncidentReturn,
+        overdueDays,
+        previousSuspendedUntil,
+        suspendedDaysAdded: suspensionResult.suspendedDaysAdded,
+        suspendedUntil: circulationAfterReturn?.suspendedUntil || suspensionResult.suspendedUntil || null,
+        promotedReservation,
+        circulationAfterReturn
+    };
+}
+
 exports.returnBook = async (req, res) => {
-    let { bookQrCode, qrCode, copyQr, readerCardNumber, borrowRecordId } = req.body;
+    let { bookQrCode, qrCode, copyQr, readerCardNumber, borrowRecordId, condition, conditionNote } = req.body;
     const processedBy = req.user.id;
 
     try {
-        let targetQr = (bookQrCode || qrCode || copyQr || '').toString().trim();
-        if (targetQr.startsWith('{') && targetQr.endsWith('}')) {
-            try {
-                const parsed = JSON.parse(targetQr);
-                targetQr = (parsed.bookQrCode || parsed.qrCode || parsed.copyQr || parsed.code || targetQr).toString().trim();
-            } catch (e) {}
+        await ensureReturnSlipsSchema();
+        await ensureExitPassesForAllBorrowRecords();
+
+        const normalizedCondition = (condition || 'normal').toString().trim().toLowerCase();
+        if (!['normal', 'damaged', 'lost'].includes(normalizedCondition)) {
+            return res.status(400).json({ message: 'Tình trạng sách không hợp lệ (chỉ chấp nhận normal, damaged hoặc lost)' });
         }
+        let targetQr = extractBookCopyQr(bookQrCode || qrCode || copyQr || '');
 
         if (!targetQr) {
             return res.status(400).json({ message: 'Vui lòng cung cấp mã QR sách để trả' });
@@ -915,7 +1639,6 @@ exports.returnBook = async (req, res) => {
                 });
             }
             if (userBorrows.length === 1) {
-                // If only 1 book borrowed, intelligently use that copy's QR code
                 targetQr = userBorrows[0].qr_code;
             } else {
                 return res.status(400).json({
@@ -926,7 +1649,7 @@ exports.returnBook = async (req, res) => {
 
         // 1. Find book copy
         const [copies] = await db.execute(
-            'SELECT bc.*, b.title, b.id as book_real_id, COALESCE(b.location, "Phòng 01 - Kệ 01 - Ngăn 01") as book_location FROM book_copies bc JOIN books b ON bc.book_id = b.id WHERE bc.qr_code = ?',
+            'SELECT bc.*, b.title, b.cover_image, b.id as book_real_id, COALESCE(b.location, "Phòng 01 - Kệ 01 - Ngăn 01") as book_location FROM book_copies bc JOIN books b ON bc.book_id = b.id WHERE bc.qr_code = ?',
             [targetQr]
         );
         if (copies.length === 0) {
@@ -951,192 +1674,101 @@ exports.returnBook = async (req, res) => {
         }
         const record = records[0];
 
-        // 2.0. If caller is a reader, ensure they are returning their OWN borrowed book
-        if (req.user.role === 'reader' && record.u_id !== req.user.id) {
+        if (isOwnerRole(req.user.role)) {
+            return res.status(403).json({
+                message: 'Chủ thư viện chỉ giám sát số liệu, không trực tiếp thực hiện thao tác trả sách.'
+            });
+        }
+        if (!isOperationalStaff(req.user.role) && Number(record.u_id) !== Number(req.user.id)) {
             return res.status(403).json({
                 message: `Bạn không thể tự trả cuốn sách này vì sách đang được mượn bởi độc giả khác (${record.full_name})!`
             });
         }
 
-        // 2.1. Strict Reader Verification if readerCardNumber provided
         if (readerCardNumber) {
             const rawReaderCode = readerCardNumber.toString().trim();
             const verifiedReader = await findUserByAnyCode(rawReaderCode);
-            if (verifiedReader && verifiedReader.user) {
-                if (verifiedReader.user.id !== record.u_id) {
-                    return res.status(400).json({
-                        message: `SAI ĐỘC GIẢ: Thẻ vừa xác thực là của độc giả "${verifiedReader.user.full_name}" (${verifiedReader.user.card_number || rawReaderCode}), KHÔNG PHẢI độc giả "${record.full_name}" (${record.card_number}) đã mượn cuốn «${copy.title}»!`
-                    });
-                }
+            if (verifiedReader && verifiedReader.user && verifiedReader.user.id !== record.u_id) {
+                return res.status(400).json({
+                    message: `SAI ĐỘC GIẢ: Thẻ vừa xác thực là của độc giả "${verifiedReader.user.full_name}" (${verifiedReader.user.card_number || rawReaderCode}), KHÔNG PHẢI độc giả "${record.full_name}" (${record.card_number}) đã mượn cuốn «${copy.title}»!`
+                });
             }
         }
 
-        const { overdueDays } = calculateOverdue(record.due_date);
-
-        const [existingFines] = await db.execute(
-            "SELECT * FROM fines WHERE borrow_record_id = ? AND (violation_type = 'overdue' OR violation_type IS NULL) ORDER BY id DESC LIMIT 1",
-            [record.id]
+        const [passRows] = await db.execute(
+            'SELECT id, user_id, pass_code, items_summary, created_at FROM exit_passes WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+            [record.u_id]
         );
+        const parsedPasses = parsePassesWithItems(passRows);
 
-        // Start transaction
         const connection = await db.getConnection();
         await connection.beginTransaction();
 
         try {
-            // Update borrow record
-            await connection.execute(
-                'UPDATE borrow_records SET return_date = NOW(), status = "returned" WHERE id = ?',
-                [record.id]
-            );
+            const result = await processSingleReturnRecord(connection, {
+                copy,
+                record,
+                processedBy,
+                condition: normalizedCondition,
+                conditionNote,
+                parsedPasses
+            });
 
-            // Update copy status
-            await connection.execute(
-                'UPDATE book_copies SET status = "available" WHERE id = ?',
-                [copy.id]
-            );
-
-            // Increment book available count
-            await connection.execute(
-                'UPDATE books SET available_copies = LEAST(total_copies, available_copies + 1) WHERE id = ?',
-                [copy.book_real_id]
-            );
-
-            // Apply Case 2 temporary suspension & record non-monetary late return ledger
-            let suspensionResult = { overdueDays, effectiveLateDays: 0, suspendedDaysAdded: 0, suspendedUntil: null };
-            if (overdueDays > 0) {
-                suspensionResult = await applyLateReturnSuspension(connection, record.u_id, record.due_date, new Date());
-                const suspSuffix = suspensionResult.suspendedDaysAdded > 0 && suspensionResult.suspendedUntil
-                    ? ` • Tạm ngưng mượn ${suspensionResult.suspendedDaysAdded} ngày (đến ${new Date(suspensionResult.suspendedUntil).toLocaleDateString('vi-VN')})`
-                    : '';
-                const resolvedReason = `Đã hoàn trả sách (Trễ hạn ${overdueDays} ngày • Hạn: ${new Date(record.due_date).toLocaleDateString('vi-VN')}${suspSuffix})`;
-                if (existingFines.length > 0) {
-                    await connection.execute(
-                        "UPDATE fines SET amount = 0, reason = ?, status = 'paid', violation_type = 'overdue', remediation_status = 'resolved', resolved_by = ?, resolved_at = NOW(), paid_at = NOW() WHERE id = ?",
-                        [resolvedReason, processedBy, existingFines[0].id]
-                    );
-                } else {
-                    await connection.execute(
-                        "INSERT INTO fines (borrow_record_id, user_id, amount, reason, status, violation_type, severity, remediation_status, resolved_by, resolved_at, paid_at) VALUES (?, ?, 0, ?, 'paid', 'overdue', 'none', 'resolved', ?, NOW(), NOW())",
-                        [record.id, record.u_id, resolvedReason, processedBy]
-                    );
-                }
-            } else {
-                await connection.execute(
-                    "DELETE FROM fines WHERE borrow_record_id = ? AND (violation_type = 'overdue' OR violation_type IS NULL) AND remediation_status <> 'pending_remediation'",
-                    [record.id]
-                );
-            }
-
-            // Re-evaluate full circulation status (OVERDUE / SUSPENDED / PENDING_REMEDIATION / ELIGIBLE)
-            const circulationAfterReturn = await getReaderCirculationStatus(record.u_id, connection);
-
-            // Save log
-            await connection.execute(
-                'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?)',
-                [
-                    processedBy,
-                    'RETURN',
-                    'borrow_records',
-                    record.id,
-                    `Trả sách: ${copy.title}. Độc giả: ${record.full_name}. ${overdueDays > 0 ? `Trả trễ hạn ${overdueDays} ngày${suspensionResult.suspendedDaysAdded > 0 ? ` (Tạm ngưng mượn ${suspensionResult.suspendedDaysAdded} ngày)` : ''}` : 'Trả đúng hạn'}`
-                ]
-            );
-
-            // Notify reader accurately based on remaining restrictions
-            if (overdueDays > 0) {
-                const suspNote = suspensionResult.suspendedDaysAdded > 0 && suspensionResult.suspendedUntil
-                    ? ` Theo quy chế, thẻ tạm ngưng quyền mượn ${suspensionResult.suspendedDaysAdded} ngày đến hết ${new Date(suspensionResult.suspendedUntil).toLocaleDateString('vi-VN')}.`
-                    : '';
-                const remainingNote = circulationAfterReturn?.eligibleToBorrow
-                    ? ' Không còn vi phạm khác, quyền mượn sách đã được mở lại.'
-                    : ` Trạng thái quyền mượn hiện tại: ${circulationAfterReturn?.blockReason || 'Đang tạm ngưng theo quy chế'}.`;
-
-                await connection.execute(
-                    'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, ?)',
-                    [
-                        record.u_id,
-                        suspensionResult.suspendedDaysAdded > 0 ? 'Đã nhận trả sách trễ hạn & Áp dụng tạm ngưng mượn' : 'Hoàn tất trả sách trễ hạn',
-                        `Bạn đã hoàn trả cuốn sách "${copy.title}" (trễ hạn ${overdueDays} ngày).${suspNote}${remainingNote}`,
-                        circulationAfterReturn?.eligibleToBorrow ? 'info' : 'warning'
-                    ]
-                );
-            } else {
-                const extraHold = !circulationAfterReturn?.eligibleToBorrow && circulationAfterReturn?.blockReason
-                    ? ` Lưu ý: thẻ hiện vẫn tạm khóa/đình chỉ do ${circulationAfterReturn.blockReason}.`
-                    : '';
-                await connection.execute(
-                    'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "info")',
-                    [
-                        record.u_id,
-                        'Hoàn tất trả sách thành công',
-                        `Cảm ơn bạn đã hoàn trả đúng hạn cuốn sách "${copy.title}" vào kho thư viện!${extraHold}`
-                    ]
-                );
-            }
-
-            // Notify all staff (Librarians, Admin, Owner)
-            await notifyAllStaff(
-                'Độc giả hoàn trả sách',
-                `Độc giả ${record.full_name} (${record.card_number}) vừa hoàn trả cuốn "${copy.title}". ${overdueDays > 0 ? `Trả trễ hạn ${overdueDays} ngày${suspensionResult.suspendedDaysAdded > 0 ? ` — Tạm ngưng ${suspensionResult.suspendedDaysAdded} ngày` : ''}.` : 'Trả đúng hạn.'}`,
-                overdueDays > 0 ? 'warning' : 'info'
-            );
-
-            // Check if any reader is waiting for this book in reservations
-            const [pendingReservations] = await connection.execute(
-                'SELECT r.id, r.user_id, b.title, u.full_name, u.card_number FROM reservations r JOIN books b ON r.book_id = b.id JOIN users u ON r.user_id = u.id WHERE r.book_id = ? AND r.status IN ("waiting", "pending") ORDER BY r.reservation_date ASC LIMIT 1',
-                [copy.book_real_id]
-            );
-            if (pendingReservations.length > 0) {
-                const nextRes = pendingReservations[0];
-                // Cập nhật trạng thái phiếu đặt trước -> 'notified' (giữ sách 48h và gửi thông báo hỏi độc giả có muốn mượn không)
-                await connection.execute(
-                    'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
-                    [nextRes.id]
-                );
-
-                // Giữ riêng cuốn sách này cho độc giả đặt trước, không tăng available_copies công khai
-                await connection.execute(
-                    'UPDATE books SET available_copies = GREATEST(0, available_copies - 1) WHERE id = ?',
-                    [copy.book_real_id]
-                );
-
-                await connection.execute(
-                    'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
-                    [
-                        nextRes.user_id,
-                        '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
-                        `Cuốn sách "${nextRes.title}" bạn đặt trước vừa được hoàn trả về thư viện! Thư viện đang giữ sách ưu tiên cho bạn trong vòng 48 giờ. Bạn có muốn mượn cuốn sách này không? Hãy vào mục "Đặt trước sách" để xác nhận mượn hoặc hủy nhường cho bạn đọc khác nhé.`
-                    ]
-                );
-
-                // Also notify librarians that reserved book is held for next reader
-                await notifyRoles(
-                    ['librarian', 'admin'],
-                    'Sách đặt trước đã có mặt - Đang đợi độc giả xác nhận',
-                    `Sách "${nextRes.title}" vừa trả về kho đã được giữ chỗ 48h và gửi thông báo mời mượn cho độc giả ${nextRes.full_name} (${nextRes.card_number}) trong hàng đợi.`,
-                    'reminder'
-                );
-            }
+            const returnSlip = await issueReturnSlip(connection, {
+                userId: record.u_id,
+                processedBy,
+                returnMethod: 'counter',
+                items: [result],
+                returnedAt: new Date()
+            });
 
             await connection.commit();
 
-            const returnLocation = copy.book_location || 'Phòng 01 - Kệ 01 - Ngăn 01';
-            const suspSummary = suspensionResult.suspendedDaysAdded > 0 && suspensionResult.suspendedUntil
-                ? ` Ghi nhận trả trễ ${overdueDays} ngày — tạm ngưng mượn ${suspensionResult.suspendedDaysAdded} ngày (đến ${new Date(suspensionResult.suspendedUntil).toLocaleDateString('vi-VN')}).`
+            if (result.promotedReservation) {
+                dispatchReservationReadyNotification({
+                    ...result.promotedReservation,
+                    skipInApp: true,
+                }).catch(() => {});
+            }
+            if (result.suspendedDaysAdded > 0 && result.suspendedUntil) {
+                dispatchSuspensionTransitionNotification({
+                    userId: record.u_id,
+                    previousSuspendedUntil: result.previousSuspendedUntil,
+                    newSuspendedUntil: result.suspendedUntil,
+                    suspendedDaysAdded: result.suspendedDaysAdded,
+                    overdueDays: result.overdueDays,
+                    bookTitle: copy.title,
+                    skipInApp: true,
+                }).catch(() => {});
+            }
+
+            const returnLocation = result.location;
+            const suspSummary = result.suspendedDaysAdded > 0 && result.suspendedUntil
+                ? ` Ghi nhận trả trễ ${result.overdueDays} ngày — tạm ngưng mượn ${result.suspendedDaysAdded} ngày (đến ${new Date(result.suspendedUntil).toLocaleDateString('vi-VN')}).`
                 : '';
 
             res.status(200).json({
-                message: overdueDays > 0
+                message: result.isIncidentReturn
+                    ? `Đã tiếp nhận trả cuốn "${copy.title}" [${result.conditionLabel}] và lập Phiếu trả ${returnSlip?.returnCode || ''}!`
+                    : result.overdueDays > 0
                     ? `Đã nhận trả sách "${copy.title}" thành công!${suspSummary} Vui lòng xếp về: ${returnLocation}`
                     : `Đã nhận trả sách "${copy.title}" thành công! Vui lòng xếp về: ${returnLocation}`,
                 data: {
+                    borrowRecordId: record.id,
+                    borrowSlipCode: result.borrowSlipCode,
+                    returnCode: returnSlip?.returnCode || null,
+                    returnSlipId: returnSlip?.id || null,
+                    returnSlip,
                     readerName: record.full_name,
                     bookTitle: copy.title,
                     returnLocation,
-                    overdueDays,
-                    suspendedDaysAdded: suspensionResult.suspendedDaysAdded,
-                    suspendedUntil: circulationAfterReturn?.suspendedUntil || null,
-                    circulationStatus: circulationAfterReturn
+                    returnDate: returnSlip?.returnedAt || new Date().toISOString(),
+                    returnMethod: 'counter',
+                    condition: normalizedCondition,
+                    overdueDays: result.overdueDays,
+                    suspendedDaysAdded: result.suspendedDaysAdded,
+                    suspendedUntil: result.suspendedUntil,
+                    circulationStatus: result.circulationAfterReturn
                 }
             });
         } catch (error) {
@@ -1148,6 +1780,193 @@ exports.returnBook = async (req, res) => {
     } catch (error) {
         console.error('Lỗi khi trả sách:', error);
         res.status(500).json({ message: 'Lỗi server khi trả sách' });
+    }
+};
+
+// POST /api/borrow/return-session
+// Trả nhiều sách tại quầy trong 1 phiên -> gộp vào 1 Phiếu trả sách điện tử (có thể liên kết nhiều Phiếu mượn gốc)
+exports.returnCounterSession = async (req, res) => {
+    const { items, readerCardNumber, notes } = req.body;
+    const processedBy = req.user.id;
+
+    try {
+        if (isOwnerRole(req.user.role)) {
+            return res.status(403).json({ message: 'Chủ thư viện chỉ giám sát số liệu, không trực tiếp thực hiện thao tác trả sách.' });
+        }
+        if (!Array.isArray(items) || items.length === 0) {
+            return res.status(400).json({ message: 'Vui lòng cung cấp danh sách sách cần trả trong phiên' });
+        }
+
+        await ensureReturnSlipsSchema();
+        await ensureExitPassesForAllBorrowRecords();
+
+        let expectedReaderId = null;
+        if (readerCardNumber) {
+            const verifiedReader = await findUserByAnyCode(readerCardNumber.toString().trim());
+            if (verifiedReader && verifiedReader.user) {
+                expectedReaderId = verifiedReader.user.id;
+            }
+        }
+
+        const connection = await db.getConnection();
+        await connection.beginTransaction();
+
+        try {
+            const processedByReader = new Map();
+            const allProcessedItems = [];
+            const passCacheByUser = new Map();
+
+            for (const rawItem of items) {
+                const normalizedCondition = (rawItem.condition || 'normal').toString().trim().toLowerCase();
+                if (!['normal', 'damaged', 'lost'].includes(normalizedCondition)) {
+                    throw Object.assign(new Error('Tình trạng sách không hợp lệ (chỉ chấp nhận normal, damaged hoặc lost)'), { statusCode: 400 });
+                }
+
+                const targetQr = extractBookCopyQr(rawItem.bookQrCode || rawItem.qrCode || rawItem.copyQr || '');
+                if (!targetQr && !rawItem.borrowRecordId) {
+                    throw Object.assign(new Error('Thiếu mã bản sao QR hoặc mã giao dịch mượn'), { statusCode: 400 });
+                }
+
+                let recordRows;
+                if (rawItem.borrowRecordId) {
+                    [recordRows] = await connection.execute(
+                        `SELECT br.*, u.full_name, u.email, u.card_number, u.id as u_id,
+                                bc.id as copy_id, bc.qr_code, bc.status as copy_status, bc.book_id as book_real_id,
+                                b.title, b.cover_image, COALESCE(b.location, "Phòng 01 - Kệ 01 - Ngăn 01") as book_location
+                         FROM borrow_records br
+                         JOIN users u ON br.user_id = u.id
+                         JOIN book_copies bc ON br.book_copy_id = bc.id
+                         JOIN books b ON bc.book_id = b.id
+                         WHERE br.id = ? AND br.status = 'borrowing'
+                         LIMIT 1`,
+                        [rawItem.borrowRecordId]
+                    );
+                } else {
+                    [recordRows] = await connection.execute(
+                        `SELECT br.*, u.full_name, u.email, u.card_number, u.id as u_id,
+                                bc.id as copy_id, bc.qr_code, bc.status as copy_status, bc.book_id as book_real_id,
+                                b.title, b.cover_image, COALESCE(b.location, "Phòng 01 - Kệ 01 - Ngăn 01") as book_location
+                         FROM borrow_records br
+                         JOIN users u ON br.user_id = u.id
+                         JOIN book_copies bc ON br.book_copy_id = bc.id
+                         JOIN books b ON bc.book_id = b.id
+                         WHERE bc.qr_code = ? AND br.status = 'borrowing'
+                         LIMIT 1`,
+                        [targetQr]
+                    );
+                }
+
+                if (!recordRows || recordRows.length === 0) {
+                    throw Object.assign(
+                        new Error(`Không tìm thấy giao dịch đang mượn cho bản sao [${targetQr || rawItem.borrowRecordId}]`),
+                        { statusCode: 404 }
+                    );
+                }
+
+                const rec = recordRows[0];
+                if (!isOperationalStaff(req.user.role) && Number(rec.u_id) !== Number(req.user.id)) {
+                    throw Object.assign(
+                        new Error(`Bạn không có quyền trả cuốn "${rec.title}" đang được mượn bởi ${rec.full_name}`),
+                        { statusCode: 403 }
+                    );
+                }
+                if (expectedReaderId && Number(rec.u_id) !== Number(expectedReaderId)) {
+                    throw Object.assign(
+                        new Error(`Cuốn "${rec.title}" (${rec.qr_code}) thuộc độc giả ${rec.full_name}, không khớp thẻ đang thao tác`),
+                        { statusCode: 400 }
+                    );
+                }
+
+                if (!passCacheByUser.has(rec.u_id)) {
+                    const [pRows] = await connection.execute(
+                        'SELECT id, user_id, pass_code, items_summary, created_at FROM exit_passes WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+                        [rec.u_id]
+                    );
+                    passCacheByUser.set(rec.u_id, parsePassesWithItems(pRows));
+                }
+
+                const copyObj = {
+                    id: rec.copy_id,
+                    qr_code: rec.qr_code,
+                    book_real_id: rec.book_real_id,
+                    title: rec.title,
+                    cover_image: rec.cover_image,
+                    book_location: rec.book_location
+                };
+
+                const processed = await processSingleReturnRecord(connection, {
+                    copy: copyObj,
+                    record: rec,
+                    processedBy,
+                    condition: normalizedCondition,
+                    conditionNote: rawItem.conditionNote || '',
+                    parsedPasses: passCacheByUser.get(rec.u_id)
+                });
+
+                if (!processedByReader.has(rec.u_id)) processedByReader.set(rec.u_id, []);
+                processedByReader.get(rec.u_id).push(processed);
+                allProcessedItems.push(processed);
+            }
+
+            const returnSlips = [];
+            const now = new Date();
+            for (const [readerUserId, readerItems] of processedByReader.entries()) {
+                const slip = await issueReturnSlip(connection, {
+                    userId: readerUserId,
+                    processedBy,
+                    returnMethod: 'counter',
+                    items: readerItems,
+                    returnedAt: now,
+                    notes
+                });
+                if (slip) returnSlips.push(slip);
+            }
+
+            const primarySlip = returnSlips[0] || null;
+            const lastStatus = allProcessedItems[allProcessedItems.length - 1]?.circulationAfterReturn || null;
+
+            await connection.commit();
+
+            for (const item of allProcessedItems) {
+                if (item.promotedReservation) {
+                    dispatchReservationReadyNotification({
+                        ...item.promotedReservation,
+                        skipInApp: true,
+                    }).catch(() => {});
+                }
+                if (item.suspendedDaysAdded > 0 && item.suspendedUntil) {
+                    dispatchSuspensionTransitionNotification({
+                        userId: item.userId,
+                        previousSuspendedUntil: item.previousSuspendedUntil,
+                        newSuspendedUntil: item.suspendedUntil,
+                        suspendedDaysAdded: item.suspendedDaysAdded,
+                        overdueDays: item.overdueDays,
+                        bookTitle: item.bookTitle,
+                        skipInApp: true,
+                    }).catch(() => {});
+                }
+            }
+
+            res.status(200).json({
+                success: true,
+                message: primarySlip
+                    ? `Đã hoàn tất trả ${allProcessedItems.length} cuốn sách và phát hành Phiếu trả ${primarySlip.returnCode}!`
+                    : `Đã hoàn tất trả ${allProcessedItems.length} cuốn sách!`,
+                returnedCount: allProcessedItems.length,
+                returnSlip: primarySlip,
+                returnSlips,
+                items: allProcessedItems,
+                circulationStatus: lastStatus
+            });
+        } catch (err) {
+            await connection.rollback();
+            throw err;
+        } finally {
+            connection.release();
+        }
+    } catch (error) {
+        console.error('Lỗi khi xử lý phiên trả sách tại quầy:', error);
+        res.status(error.statusCode || 500).json({ message: error.message || 'Lỗi server khi xử lý phiên trả sách' });
     }
 };
 
@@ -1245,19 +2064,50 @@ async function ensureExitPassesForAllBorrowRecords() {
     }
 }
 
+function parsePassesWithItems(rows = []) {
+    return (rows || []).map(p => {
+        let items = [];
+        try {
+            items = typeof p.items_summary === 'string' ? JSON.parse(p.items_summary) : (p.items_summary || []);
+        } catch (e) {}
+        return { ...p, items: Array.isArray(items) ? items : [] };
+    });
+}
+
+function resolveBorrowSlipCodeForRecord(parsedPasses, { userId, qrCode, borrowDate, recordId }) {
+    const borrowTs = borrowDate ? new Date(borrowDate).getTime() : 0;
+    const matchedPass =
+        parsedPasses.find(p =>
+            Number(p.user_id) === Number(userId) &&
+            p.items.some(it => (it.qr_code || it.copy_qr_code || it.copyQr) === qrCode) &&
+            (!borrowTs || Math.abs(new Date(p.created_at).getTime() - borrowTs) < 72 * 3600 * 1000)
+        ) ||
+        parsedPasses.find(p =>
+            Number(p.user_id) === Number(userId) &&
+            p.items.some(it => (it.qr_code || it.copy_qr_code || it.copyQr) === qrCode)
+        );
+
+    return matchedPass?.pass_code
+        ? matchedPass.pass_code.replace(/^PASS-EXP-/i, 'PM-BRW-')
+        : (recordId && userId ? `PM-BRW-${String(recordId).padStart(4, '0')}-${userId}` : null);
+}
+
 exports.getBorrowRecords = async (req, res) => {
     const { role, id } = req.user;
 
     try {
         await ensureDropBoxProofColumn();
         await ensureExitPassesForAllBorrowRecords();
+        await ensureReturnSlipsSchema();
         // Sync overdue fines in real-time before fetching records
         await syncOverdueFines(role === 'reader' ? id : null);
 
         let query = `
             SELECT br.id, br.user_id as user_id, br.borrow_date, br.due_date, br.return_date, br.status, br.renewal_count,
                    br.is_drop_box, br.drop_box_at, br.drop_box_status, br.drop_box_audit_note, br.drop_box_audited_at, br.drop_box_proof_image,
-                   u.full_name as reader_name, u.card_number, u.phone as reader_phone,
+                   br.return_slip_id, br.return_condition, br.return_condition_note,
+                   rs.return_code as return_slip_code, rs.returned_at as return_slip_returned_at, rs.drop_box_received_at as return_slip_drop_box_received_at,
+                   u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status,
                    b.id as book_id, b.title as book_title, b.cover_image, bc.qr_code,
                    (SELECT COUNT(*) FROM reservations r WHERE r.book_id = b.id AND r.status IN ('pending', 'ready') AND r.user_id != br.user_id) as waiting_reservations_count,
                    COALESCE(b.location, 'Phòng 01 - Kệ 01 - Ngăn 01') as book_location,
@@ -1274,6 +2124,7 @@ exports.getBorrowRecords = async (req, res) => {
             JOIN users u ON br.user_id = u.id
             JOIN book_copies bc ON br.book_copy_id = bc.id
             JOIN books b ON bc.book_id = b.id
+            LEFT JOIN return_slips rs ON br.return_slip_id = rs.id
             LEFT JOIN users p ON br.processed_by = p.id
             LEFT JOIN users auditor ON br.drop_box_audited_by = auditor.id
             LEFT JOIN fines f ON f.borrow_record_id = br.id
@@ -1317,32 +2168,19 @@ exports.getBorrowRecords = async (req, res) => {
         passQuery += ' ORDER BY ep.created_at DESC LIMIT 300';
         const [allPasses] = await db.execute(passQuery, passParams).catch(() => [[]]);
 
-        const parsedPasses = (allPasses || []).map(p => {
-            let items = [];
-            try {
-                items = typeof p.items_summary === 'string' ? JSON.parse(p.items_summary) : (p.items_summary || []);
-            } catch (e) {}
-            return { ...p, items: Array.isArray(items) ? items : [] };
-        });
+        const parsedPasses = parsePassesWithItems(allPasses);
 
         const formatted = records.map(r => {
             const { overdueDays } = calculateOverdue(r.due_date, r.return_date || r.drop_box_at || new Date());
             const isDropBox = Boolean(r.is_drop_box === 1 || r.status === 'returned_drop_box' || r.drop_box_at);
             const returnMethod = isDropBox ? 'drop_box' : (r.return_date ? 'counter' : null);
 
-            // Match the closest exit_pass for this user and book copy qr_code
-            const matchedPass = parsedPasses.find(p =>
-                p.user_id === r.user_id &&
-                p.items.some(it => (it.qr_code || it.copy_qr_code || it.copyQr) === r.qr_code) &&
-                Math.abs(new Date(p.created_at).getTime() - new Date(r.borrow_date).getTime()) < 72 * 3600 * 1000
-            ) || parsedPasses.find(p =>
-                p.user_id === r.user_id &&
-                p.items.some(it => (it.qr_code || it.copy_qr_code || it.copyQr) === r.qr_code)
-            );
-
-            const passCode = matchedPass?.pass_code
-                ? matchedPass.pass_code.replace(/^PASS-EXP-/i, 'PM-BRW-')
-                : `PM-BRW-${String(r.id).padStart(4, '0')}-${r.user_id}`;
+            const passCode = resolveBorrowSlipCodeForRecord(parsedPasses, {
+                userId: r.user_id,
+                qrCode: r.qr_code,
+                borrowDate: r.borrow_date,
+                recordId: r.id,
+            });
 
             return {
                 ...r,
@@ -1384,7 +2222,10 @@ exports.renewBook = async (req, res) => {
         }
         const record = records[0];
 
-        if (req.user.role === 'reader' && record.user_id !== userId) {
+        if (isOwnerRole(req.user.role)) {
+            return res.status(403).json({ message: 'Chủ thư viện chỉ giám sát hệ thống, không thao tác gia hạn phiếu mượn' });
+        }
+        if (!isOperationalStaff(req.user.role) && Number(record.user_id) !== Number(userId)) {
             return res.status(403).json({ message: 'Bạn chỉ có quyền gia hạn phiếu mượn của chính mình' });
         }
 
@@ -1424,10 +2265,11 @@ exports.renewBook = async (req, res) => {
 
         // Add 7 days to current due date
         const newDueDate = new Date(dueDate);
+        newDueDate.setHours(12, 0, 0, 0);
         newDueDate.setDate(newDueDate.getDate() + 7);
 
         await db.execute('UPDATE borrow_records SET due_date = ?, renewal_count = renewal_count + 1 WHERE id = ?', [
-            newDueDate.toISOString().slice(0, 10),
+            toLocalDateString(newDueDate),
             borrowRecordId
         ]);
 
@@ -1600,11 +2442,30 @@ exports.getReaderCheckoutInfo = async (req, res) => {
         }
         const activeBorrows = Array.from(activeBorrowMap.values());
 
-        // Calculate overdue days for active loans (no monetary fine)
+        // Fetch Official Borrow Slips (PM-BRW-...) for this reader so each active loan carries its slip code
+        const [exitPassRows] = await db.execute(`
+            SELECT ep.*, u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status,
+                   TIMESTAMPDIFF(MINUTE, NOW(), ep.expires_at) as minutes_left
+            FROM exit_passes ep
+            JOIN users u ON ep.user_id = u.id
+            WHERE ep.user_id = ?
+            ORDER BY ep.created_at DESC
+            LIMIT 50
+        `, [user.id]);
+        const parsedReaderPasses = parsePassesWithItems(exitPassRows);
+
+        // Calculate overdue days for active loans (no monetary fine) & attach original borrow slip code
         const enrichedActiveBorrows = activeBorrows.map(loan => {
             const { overdueDays } = calculateOverdue(loan.due_date);
+            const passCode = resolveBorrowSlipCodeForRecord(parsedReaderPasses, {
+                userId: user.id,
+                qrCode: loan.qr_code,
+                borrowDate: loan.borrow_date,
+                recordId: loan.id,
+            });
             return {
                 ...loan,
+                pass_code: passCode,
                 overdue_days: overdueDays,
                 fine_amount: 0,
                 renewal_count: Number(loan.renewal_count) || 0,
@@ -1697,17 +2558,8 @@ exports.getReaderCheckoutInfo = async (req, res) => {
         }
 
             // Recent Official Borrow Slips (Phiếu mượn chính thức PM-BRW-...) for this reader
-            const [exitPassRows] = await db.execute(`
-                SELECT ep.*, u.full_name as reader_name, u.card_number,
-                       TIMESTAMPDIFF(MINUTE, NOW(), ep.expires_at) as minutes_left
-                FROM exit_passes ep
-                JOIN users u ON ep.user_id = u.id
-                WHERE ep.user_id = ?
-                ORDER BY ep.created_at DESC
-                LIMIT 10
-            `, [user.id]);
             const exitPasses = await Promise.all(
-                exitPassRows.map(async (ep) => {
+                exitPassRows.slice(0, 10).map(async (ep) => {
                     const enriched = await enrichExitPassWithBorrowRecords(ep);
                     return {
                         ...ep,
@@ -1733,6 +2585,57 @@ exports.getReaderCheckoutInfo = async (req, res) => {
                 WHERE br.user_id = ? AND (br.status = 'returned_drop_box' OR (br.is_drop_box = 1 AND br.drop_box_status = 'pending_audit'))
                 ORDER BY br.drop_box_at DESC
             `, [user.id]);
+
+            await ensureReturnSlipsSchema();
+
+            // Phiếu trả sách điện tử (RT-...) gần nhất của độc giả
+            const [returnSlipRows] = await db.execute(`
+                SELECT rs.*, u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status,
+                       p.full_name as librarian_name
+                FROM return_slips rs
+                JOIN users u ON rs.user_id = u.id
+                LEFT JOIN users p ON rs.processed_by = p.id
+                WHERE rs.user_id = ?
+                ORDER BY rs.returned_at DESC, rs.id DESC
+                LIMIT 20
+            `, [user.id]);
+            const returnSlips = returnSlipRows.map(normalizeReturnSlipRow);
+
+            // Lịch sử mượn trả đầy đủ trong hồ sơ độc giả (liên kết cả Phiếu mượn PM-... và Phiếu trả RT-...)
+            const [recentHistoryRows] = await db.execute(`
+                SELECT br.id, br.user_id, br.borrow_date, br.due_date, br.return_date, br.status,
+                       br.is_drop_box, br.drop_box_at, br.drop_box_status, br.drop_box_audit_note, br.drop_box_audited_at,
+                       br.return_slip_id, br.return_condition, br.return_condition_note,
+                       rs.return_code as return_slip_code, rs.returned_at as return_slip_returned_at,
+                       b.title as book_title, bc.qr_code,
+                       p.full_name as processed_by_name,
+                       auditor.full_name as drop_box_audited_by_name
+                FROM borrow_records br
+                JOIN book_copies bc ON br.book_copy_id = bc.id
+                JOIN books b ON bc.book_id = b.id
+                LEFT JOIN return_slips rs ON br.return_slip_id = rs.id
+                LEFT JOIN users p ON br.processed_by = p.id
+                LEFT JOIN users auditor ON br.drop_box_audited_by = auditor.id
+                WHERE br.user_id = ?
+                ORDER BY br.borrow_date DESC, br.id DESC
+                LIMIT 30
+            `, [user.id]);
+
+            const recentHistory = recentHistoryRows.map(r => {
+                const isDropBox = Boolean(r.is_drop_box === 1 || r.status === 'returned_drop_box' || r.drop_box_at);
+                const passCode = resolveBorrowSlipCodeForRecord(parsedReaderPasses, {
+                    userId: user.id,
+                    qrCode: r.qr_code,
+                    borrowDate: r.borrow_date,
+                    recordId: r.id,
+                });
+                return {
+                    ...r,
+                    pass_code: passCode,
+                    is_drop_box: isDropBox,
+                    return_method: isDropBox ? 'drop_box' : (r.return_date ? 'counter' : null),
+                };
+            });
 
             res.status(200).json({
                 type: 'reader',
@@ -1774,6 +2677,8 @@ exports.getReaderCheckoutInfo = async (req, res) => {
                 activeDraft,
                 activeExitPass,
                 exitPasses,
+                returnSlips,
+                recentHistory,
                 draftWillExceedLimit,
                 draftExceedReason,
                 scannedCode: rawCode,
@@ -1886,7 +2791,7 @@ exports.approveReservation = async (req, res) => {
             // Tạo bản ghi mượn chính xác với bản sao vừa quét
             await connection.execute(
                 'INSERT INTO borrow_records (user_id, book_copy_id, due_date, status, processed_by) VALUES (?, ?, ?, "borrowing", ?)',
-                [resv.u_id, copy.id, dueDate.toISOString().slice(0, 10), processedBy]
+                [resv.u_id, copy.id, toLocalDateString(dueDate), processedBy]
             );
 
             // Cập nhật trạng thái bản sao -> borrowed
@@ -1961,9 +2866,9 @@ exports.approveReservation = async (req, res) => {
 
 // GET /api/borrow/check-copy/:qrCode
 exports.checkBookCopy = async (req, res) => {
-    const { qrCode } = req.params;
+    const normalizedQr = extractBookCopyQr(req.params.qrCode);
     try {
-        if (!qrCode || !qrCode.trim()) {
+        if (!normalizedQr) {
             return res.status(400).json({ message: 'Vui lòng cung cấp mã QR bản sao sách' });
         }
 
@@ -1985,10 +2890,10 @@ exports.checkBookCopy = async (req, res) => {
             LEFT JOIN borrow_records br ON bc.id = br.book_copy_id AND br.status IN ('borrowing', 'returned_drop_box')
             LEFT JOIN users u ON br.user_id = u.id
             WHERE bc.qr_code = ?
-        `, [qrCode.trim()]);
+        `, [normalizedQr]);
 
         if (copies.length === 0) {
-            return res.status(404).json({ message: `Mã QR [${qrCode}] không tồn tại trong hệ thống thư viện` });
+            return res.status(404).json({ message: `Mã QR [${normalizedQr}] không tồn tại trong hệ thống thư viện` });
         }
 
         const copy = copies[0];
@@ -2016,6 +2921,64 @@ exports.checkBookCopy = async (req, res) => {
         copy.all_copies_held = allCopiesHeld;
         copy.is_this_copy_held = Boolean(specificHold);
         copy.is_drop_box_pending = copy.borrow_status === 'returned_drop_box' || (Boolean(copy.is_drop_box) && copy.drop_box_status === 'pending_audit');
+
+        const isOwnLoan = Boolean(copy.active_borrow_id && Number(copy.borrower_user_id) === Number(req.user.id));
+        const ownActiveCopies = req.user.role === 'reader'
+            ? await getCallerActiveBorrowCopies(req.user.id)
+            : [];
+        const dropBoxEligibility = evaluateDropBoxEligibility({
+            copy,
+            callerUser: req.user,
+            ownActiveCopies,
+        });
+        copy.is_own_loan = isOwnLoan;
+        copy.can_return_by_caller = dropBoxEligibility.eligible;
+        copy.drop_box_eligibility = {
+            eligible: dropBoxEligibility.eligible,
+            reason_code: dropBoxEligibility.reason_code,
+            reason: dropBoxEligibility.reason,
+            suggested_qr_codes: dropBoxEligibility.suggested_qr_codes,
+            same_book_qr_code: dropBoxEligibility.same_book_qr_code,
+        };
+
+        // Redact borrower & holder PII when caller is a reader
+        const canViewPii = ['admin', 'librarian', 'owner'].includes(req.user.role);
+        if (copy.active_borrow_id && copy.borrower_user_id && (canViewPii || isOwnLoan)) {
+            copy.borrow_record_id = copy.active_borrow_id;
+            const [readerPasses] = await db.execute(
+                'SELECT id, user_id, pass_code, items_summary, created_at FROM exit_passes WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+                [copy.borrower_user_id]
+            );
+            copy.pass_code = resolveBorrowSlipCodeForRecord(parsePassesWithItems(readerPasses), {
+                userId: copy.borrower_user_id,
+                qrCode: copy.qr_code,
+                borrowDate: copy.borrow_date,
+                recordId: copy.active_borrow_id,
+            });
+        }
+        if (!canViewPii) {
+            if (!isOwnLoan) {
+                delete copy.borrower_user_id;
+                delete copy.borrower_name;
+                delete copy.borrower_card_number;
+                delete copy.borrow_date;
+                delete copy.due_date;
+                delete copy.drop_box_at;
+                delete copy.drop_box_audit_note;
+            }
+            copy.holds = holdRows.map((h) => {
+                if (Number(h.user_id) === Number(req.user.id)) {
+                    return h;
+                }
+                return {
+                    hold_id: h.hold_id,
+                    hold_type: h.hold_type,
+                    book_copy_id: h.book_copy_id,
+                    time_left_hours: h.time_left_hours,
+                    reader_name: 'Độc giả khác'
+                };
+            });
+        }
 
         // Đồng bộ trạng thái nếu có bản ghi mượn đang active hoặc chờ đối soát hòm trong borrow_records
         if (copy.active_borrow_id || copy.borrower_user_id) {
@@ -2134,8 +3097,8 @@ exports.cancelBorrowRequest = async (req, res) => {
         }
         const request = requests[0];
 
-        if (role === 'reader' && request.user_id !== userId) {
-            return res.status(403).json({ message: 'Bạn không có quyền hủy yêu cầu mượn này' });
+        if (!assertCanMutateForReader(req.user, request.user_id, res, 'hủy yêu cầu mượn này')) {
+            return;
         }
 
         const connection = await db.getConnection();
@@ -2239,7 +3202,7 @@ exports.fulfillBorrowRequest = async (req, res) => {
         try {
             await connection.execute(
                 'INSERT INTO borrow_records (user_id, book_copy_id, due_date, status, processed_by) VALUES (?, ?, ?, "borrowing", ?)',
-                [reqItem.u_id, copy.id, dueDate.toISOString().slice(0, 10), processedBy]
+                [reqItem.u_id, copy.id, toLocalDateString(dueDate), processedBy]
             );
 
             await connection.execute('UPDATE book_copies SET status = "borrowed" WHERE id = ?', [copy.id]);
@@ -2355,7 +3318,12 @@ function sortDraftItemsByPickPath(items) {
 // POST /api/borrow/drafts
 // Tạo giao dịch phiếu mượn nháp gồm nhiều cuốn sách và sinh mã QR
 exports.createBorrowDraft = async (req, res) => {
-    const userId = req.body.userId || req.user.id;
+    if (isOwnerRole(req.user.role)) {
+        return res.status(403).json({ message: 'Chủ thư viện chỉ giám sát hệ thống, không tạo phiếu mượn thay độc giả.' });
+    }
+    const userId = isOperationalStaff(req.user.role) && req.body.userId
+        ? parseInt(req.body.userId, 10)
+        : req.user.id;
     const { bookIds, notes } = req.body;
 
     try {
@@ -2373,7 +3341,7 @@ exports.createBorrowDraft = async (req, res) => {
         const [books] = await db.execute(`
             SELECT id, title, available_copies, COALESCE(location, 'Phòng 01 - Kệ 01 - Ngăn 01') as location
             FROM books
-            WHERE id IN (${uniqueBookIds.map(() => '?').join(',')})
+            WHERE id IN (${uniqueBookIds.map(() => '?').join(',')}) AND COALESCE(status, 'active') = 'active'
         `, uniqueBookIds);
 
         if (books.length !== uniqueBookIds.length) {
@@ -2666,6 +3634,11 @@ exports.getBorrowDraftByCode = async (req, res) => {
 
         const draft = drafts[0];
 
+        const canReadAnyDraft = ['admin', 'librarian', 'owner'].includes(req.user.role);
+        if (!canReadAnyDraft && Number(draft.user_id) !== Number(req.user.id)) {
+            return res.status(403).json({ message: 'Bạn không có quyền xem phiếu mượn của độc giả khác' });
+        }
+
         // Fetch items with copy verification details
         const [rawItems] = await db.execute(`
             SELECT di.id as item_id, di.book_id, di.book_copy_id, di.status as item_status,
@@ -2752,9 +3725,9 @@ exports.verifyDraftItemCopy = async (req, res) => {
 
         const draft = drafts[0];
 
-        // Check ownership if reader
-        if (req.user.role === 'reader' && draft.user_id !== userId) {
-            return res.status(403).json({ message: 'Bạn không có quyền chỉnh sửa phiếu mượn này' });
+        // Check ownership / staff permission (block Owner mutations)
+        if (!assertCanMutateForReader(req.user, draft.user_id, res, 'chỉnh sửa phiếu mượn này')) {
+            return;
         }
 
         // Tìm bản sao sách theo mã QR
@@ -2848,7 +3821,12 @@ exports.verifyDraftItemCopy = async (req, res) => {
 // POST /api/borrow/drafts/scan-direct
 // MƯỢN TRỰC TIẾP TẠI KỆ: Độc giả đến kệ nhặt sách và dùng camera điện thoại quét mã QR bản sao vào giỏ mượn tại chỗ
 exports.addDirectCopyScan = async (req, res) => {
-    const userId = req.body.userId || req.user.id;
+    if (isOwnerRole(req.user.role)) {
+        return res.status(403).json({ message: 'Chủ thư viện chỉ giám sát hệ thống, không quét tạo phiếu mượn.' });
+    }
+    const userId = isOperationalStaff(req.user.role) && req.body.userId
+        ? parseInt(req.body.userId, 10)
+        : req.user.id;
     const { copyQr } = req.body;
 
     try {
@@ -3050,8 +4028,8 @@ exports.removeDraftItem = async (req, res) => {
             return res.status(404).json({ message: 'Không tìm thấy mục sách trong phiếu' });
         }
 
-        if (req.user.role === 'reader' && items[0].user_id !== userId) {
-            return res.status(403).json({ message: 'Bạn không có quyền chỉnh sửa phiếu này' });
+        if (!assertCanMutateForReader(req.user, items[0].user_id, res, 'xóa mục trong phiếu mượn này')) {
+            return;
         }
 
         await db.execute('DELETE FROM borrow_draft_items WHERE id = ?', [itemId]);
@@ -3100,8 +4078,8 @@ exports.unverifyDraftItem = async (req, res) => {
             return res.status(404).json({ message: 'Không tìm thấy mục sách trong phiếu' });
         }
 
-        if (req.user.role === 'reader' && items[0].user_id !== userId) {
-            return res.status(403).json({ message: 'Bạn không có quyền chỉnh sửa phiếu này' });
+        if (!assertCanMutateForReader(req.user, items[0].user_id, res, 'hủy đối soát mục sách này')) {
+            return;
         }
 
         await db.execute('UPDATE borrow_draft_items SET book_copy_id = NULL WHERE id = ?', [itemId]);
@@ -3170,7 +4148,7 @@ exports.approveBorrowDraft = async (req, res) => {
         const maxBorrowDays = eligibility.maxBorrowDays;
         const dueDate = new Date();
         dueDate.setDate(dueDate.getDate() + maxBorrowDays);
-        const dueDateStr = dueDate.toISOString().slice(0, 10);
+        const dueDateStr = toLocalDateString(dueDate);
 
         const connection = await db.getConnection();
         await connection.beginTransaction();
@@ -3298,7 +4276,7 @@ exports.approveBorrowDraft = async (req, res) => {
                 [
                     draft.user_id,
                     'Phiếu mượn nháp đã chuyển thành Phiếu mượn chính thức',
-                    `Thủ thư ${librarianName} đã quét xác nhận cho mượn ${items.length} cuốn sách. Phiếu mượn nháp (${draft.draft_code}) của bạn đã chuyển thành Phiếu mượn chính thức (${officialSlipCode}). Hạn trả sách: ${dueDate.toLocaleDateString('vi-VN')}. Bạn có thể dùng Phiếu mượn này để đối soát và xuất trình khi ra cổng nếu được hỏi.`
+                    `Thủ thư ${librarianName} đã quét xác nhận cho mượn ${items.length} cuốn sách. Phiếu mượn nháp (${draft.draft_code}) của bạn đã chuyển thành Phiếu mượn chính thức (${officialSlipCode}). Hạn trả sách: ${dueDate.toLocaleDateString('vi-VN')}. Bạn có thể lưu giữ Phiếu mượn này làm minh chứng và đối soát thông tin mượn trả khi cần thiết.`
                 ]
             );
 
@@ -3364,8 +4342,8 @@ exports.cancelBorrowDraft = async (req, res) => {
         }
 
         const draft = drafts[0];
-        if (userRole === 'reader' && draft.user_id !== userId) {
-            return res.status(403).json({ message: 'Bạn không có quyền hủy phiếu mượn của người khác' });
+        if (!assertCanMutateForReader(req.user, draft.user_id, res, 'hủy phiếu mượn nháp này')) {
+            return;
         }
 
         if (draft.status !== 'pending') {
@@ -3535,6 +4513,7 @@ exports.batchReturnBooks = async (req, res) => {
             let overdueReturnedCount = 0;
             const affectedReaderIds = new Set();
             const returnedList = [];
+            const batchSuspensionEvents = new Map();
 
             for (const record of records) {
                 const { overdueDays } = calculateOverdue(record.due_date);
@@ -3561,7 +4540,29 @@ exports.batchReturnBooks = async (req, res) => {
                 // Handle non-monetary discipline ledger & temporary suspension
                 if (overdueDays > 0) {
                     overdueReturnedCount += 1;
+                    let prevSuspendedUntil = null;
+                    if (!batchSuspensionEvents.has(record.reader_id)) {
+                        try {
+                            const [prevRows] = await connection.execute('SELECT suspended_until FROM users WHERE id = ? LIMIT 1', [record.reader_id]);
+                            prevSuspendedUntil = prevRows?.[0]?.suspended_until || null;
+                        } catch {
+                            prevSuspendedUntil = null;
+                        }
+                    } else {
+                        prevSuspendedUntil = batchSuspensionEvents.get(record.reader_id).previousSuspendedUntil;
+                    }
                     const suspResult = await applyLateReturnSuspension(connection, record.reader_id, record.due_date, new Date());
+                    if (suspResult.suspendedDaysAdded > 0 && suspResult.suspendedUntil) {
+                        const existingEvt = batchSuspensionEvents.get(record.reader_id);
+                        batchSuspensionEvents.set(record.reader_id, {
+                            userId: record.reader_id,
+                            previousSuspendedUntil: existingEvt ? existingEvt.previousSuspendedUntil : prevSuspendedUntil,
+                            newSuspendedUntil: suspResult.suspendedUntil,
+                            suspendedDaysAdded: (existingEvt?.suspendedDaysAdded || 0) + suspResult.suspendedDaysAdded,
+                            overdueDays: Math.max(existingEvt?.overdueDays || 0, overdueDays),
+                            bookTitle: existingEvt ? existingEvt.bookTitle : record.book_title,
+                        });
+                    }
                     const suspSuffix = suspResult.suspendedDaysAdded > 0 && suspResult.suspendedUntil
                         ? ` • Tạm ngưng ${suspResult.suspendedDaysAdded} ngày`
                         : '';
@@ -3592,28 +4593,65 @@ exports.batchReturnBooks = async (req, res) => {
 
                 returnedList.push({
                     recordId: record.id,
+                    borrowRecordId: record.id,
+                    bookId: record.book_id,
                     bookTitle: record.book_title,
                     qrCode: record.qr_code,
+                    copyQr: record.qr_code,
+                    borrowDate: record.borrow_date,
+                    dueDate: record.due_date,
+                    condition: 'normal',
                     overdueDays
                 });
             }
+
+            await ensureReturnSlipsSchema();
+            await ensureExitPassesForAllBorrowRecords();
+            const [readerPasses] = await connection.execute(
+                'SELECT id, user_id, pass_code, items_summary, created_at FROM exit_passes WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+                [records[0].reader_id]
+            );
+            const parsedReaderPasses = parsePassesWithItems(readerPasses);
+            const slipItems = returnedList.map(it => ({
+                ...it,
+                borrowSlipCode: resolveBorrowSlipCodeForRecord(parsedReaderPasses, {
+                    userId: records[0].reader_id,
+                    qrCode: it.qrCode,
+                    borrowDate: it.borrowDate,
+                    recordId: it.recordId
+                })
+            }));
+            const returnSlip = await issueReturnSlip(connection, {
+                userId: records[0].reader_id,
+                processedBy,
+                returnMethod: 'counter',
+                items: slipItems,
+                returnedAt: new Date()
+            });
 
             const primaryStatusAfter = await getReaderCirculationStatus(records[0].reader_id, connection);
 
             await connection.commit();
             connection.release();
 
+            for (const suspEvt of batchSuspensionEvents.values()) {
+                dispatchSuspensionTransitionNotification({
+                    ...suspEvt,
+                    skipInApp: false,
+                }).catch(() => {});
+            }
+
             // Notify reader accurately
             const extraNotice = primaryStatusAfter && !primaryStatusAfter.eligibleToBorrow
                 ? ` Lưu ý quyền mượn hiện tại: ${primaryStatusAfter.blockReason}.`
                 : ' Không còn hạn chế lưu thông, bạn có thể tiếp tục mượn sách mới.';
 
-            notifyUser(records[0].reader_id, {
-                title: 'Hoàn tất trả sách vào kho',
-                message: `Thủ thư đã tiếp nhận và hoàn tất thủ tục trả ${returnedList.length} cuốn sách vào kho thư viện.${extraNotice}`,
-                type: 'system',
-                link: '/borrow'
-            });
+            notifyUser(
+                records[0].reader_id,
+                'Hoàn tất trả sách vào kho',
+                `Thủ thư đã tiếp nhận và hoàn tất thủ tục trả ${returnedList.length} cuốn sách vào kho thư viện.${extraNotice}`,
+                'info'
+            );
 
             res.status(200).json({
                 success: true,
@@ -3623,6 +4661,7 @@ exports.batchReturnBooks = async (req, res) => {
                 totalFine: 0,
                 readerName: records[0].reader_name,
                 returnedBooks: returnedList,
+                returnSlip,
                 circulationStatus: primaryStatusAfter
             });
         } catch (err) {
@@ -3641,7 +4680,7 @@ exports.cleanupAllExpiredHolds = cleanupAllExpiredHolds;
 
 // =========================================================================
 // HELPER: Chuyển đổi / Phát hành Phiếu mượn chính thức (Official Borrow Slip)
-// Dùng để đối soát mượn trả và xuất trình đối soát khi ra cổng nếu được hỏi
+// Dùng làm minh chứng xác nhận mượn sách và đối soát mượn trả khi cần thiết
 // =========================================================================
 async function issueExitPass(userId, booksArray, callerId = null, options = {}) {
     try {
@@ -3657,8 +4696,11 @@ async function issueExitPass(userId, booksArray, callerId = null, options = {}) 
         const dueDateObj = options.dueDate ? new Date(options.dueDate) : new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
         const dueDateFormatted = dueDateObj.toLocaleDateString('vi-VN');
         const borrowDateFormatted = new Date().toLocaleDateString('vi-VN');
-        // Có hiệu lực trong suốt kỳ hạn mượn sách (14 ngày) để phục vụ đối soát mượn trả & kiểm tra tại cổng
-        const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+        // Có hiệu lực làm chứng từ minh chứng trong suốt kỳ hạn mượn sách
+        const expiresAt = Number.isNaN(dueDateObj.getTime())
+            ? new Date(Date.now() + 14 * 24 * 60 * 60 * 1000)
+            : new Date(dueDateObj.getTime());
+        expiresAt.setHours(23, 59, 59, 999);
 
         const newItems = booksArray.map(b => ({
             bookId: b.book_id || b.book_real_id || b.id,
@@ -3671,6 +4713,20 @@ async function issueExitPass(userId, booksArray, callerId = null, options = {}) 
             draftCode: options.draftCode || null,
             librarianName
         }));
+
+        const [readerRows] = await db.execute(
+            'SELECT full_name, email, card_number, phone, status FROM users WHERE id = ?',
+            [userId]
+        );
+        const readerUser = readerRows[0] || {};
+        const readerMeta = {
+            reader_name: readerUser.full_name || null,
+            readerName: readerUser.full_name || null,
+            card_number: readerUser.card_number || null,
+            cardNumber: readerUser.card_number || null,
+            reader_phone: readerUser.phone || null,
+            reader_status: readerUser.status || 'active',
+        };
 
         // Nếu mượn lẻ nhiều cuốn liên tiếp tại quầy trong vòng 90 giây (không qua draft riêng), gộp chung vào 1 Phiếu mượn chính thức
         if (!options.slipCode) {
@@ -3700,6 +4756,7 @@ async function issueExitPass(userId, booksArray, callerId = null, options = {}) 
                     id: recent.id,
                     passCode: recent.pass_code,
                     pass_code: recent.pass_code,
+                    ...readerMeta,
                     draftCode: options.draftCode || null,
                     librarianName,
                     borrowDate: borrowDateFormatted,
@@ -3732,29 +4789,35 @@ async function issueExitPass(userId, booksArray, callerId = null, options = {}) 
                 : `Phiếu mượn xác nhận tại quầy bởi: ${librarianName} • Hạn trả: ${dueDateFormatted}`
         ]);
 
-        // Gửi Phiếu mượn chính thức qua email bạn đọc
-        const [users] = await db.execute('SELECT full_name, email, card_number FROM users WHERE id = ?', [userId]);
-        if (users.length > 0 && users[0].email) {
-            const emailService = require('../services/emailService');
-            emailService.sendExitPassEmail({
-                to: users[0].email,
-                userId,
-                fullName: users[0].full_name,
-                cardNumber: users[0].card_number,
-                passCode,
-                draftCode: options.draftCode || null,
-                librarianName,
-                dueDate: options.dueDate || dueDateObj,
-                bookCount: newItems.length,
-                books: newItems,
-                expiresAt
-            }).catch(e => console.error('Lỗi khi gửi email Phiếu mượn chính thức:', e.message));
+        // Mượn tại quầy: chỉ gửi Email biên lai khi độc giả bật tùy chọn email_receipts (In-app luôn đã gửi)
+        if (readerUser.email) {
+            const shouldSendOptionalEmail = options.forceEmail === true
+                ? true
+                : (await getUserNotificationPreferences(userId)).emailReceipts;
+            if (shouldSendOptionalEmail) {
+                const emailService = require('../services/emailService');
+                emailService.sendExitPassEmail({
+                    to: readerUser.email,
+                    userId,
+                    fullName: readerUser.full_name,
+                    cardNumber: readerUser.card_number,
+                    passCode,
+                    draftCode: options.draftCode || null,
+                    librarianName,
+                    dueDate: options.dueDate || dueDateObj,
+                    bookCount: newItems.length,
+                    books: newItems,
+                    expiresAt,
+                    dedupKey: `exit_pass:${passCode}`,
+                }).catch(e => console.error('Lỗi khi gửi email Phiếu mượn chính thức:', e.message));
+            }
         }
 
         return {
             id: res.insertId,
             passCode,
             pass_code: passCode,
+            ...readerMeta,
             draftCode: options.draftCode || null,
             librarianName,
             borrowDate: borrowDateFormatted,
@@ -3787,16 +4850,16 @@ exports.dropBoxReturn = async (req, res) => {
     try {
         await ensureDropBoxProofColumn();
 
-        let targetQr = (bookQrCode || '').toString().trim();
-        if (targetQr.startsWith('{') && targetQr.endsWith('}')) {
-            try {
-                const parsed = JSON.parse(targetQr);
-                targetQr = (parsed.bookQrCode || parsed.qrCode || parsed.copyQr || parsed.code || targetQr).toString().trim();
-            } catch (e) {}
-        }
+        const targetQr = extractBookCopyQr(bookQrCode);
 
         if (!targetQr) {
             return res.status(400).json({ message: 'Vui lòng cung cấp mã QR trên gáy/bìa sách cần thả vào hòm' });
+        }
+
+        if (isOwnerRole(req.user.role)) {
+            return res.status(403).json({
+                message: 'Chủ thư viện chỉ giám sát hệ thống, không thao tác trả sách qua hòm 24/7.'
+            });
         }
 
         if (!proofImage || typeof proofImage !== 'string' || !proofImage.trim()) {
@@ -3809,6 +4872,7 @@ exports.dropBoxReturn = async (req, res) => {
         const [copies] = await db.execute(`
             SELECT bc.*, b.title, b.id as book_real_id, b.cover_image,
                    br.id as active_borrow_id, br.user_id as borrower_id, br.due_date,
+                   br.status as active_borrow_status, br.drop_box_at, br.drop_box_status,
                    u.full_name as borrower_name, u.email as borrower_email, u.card_number as borrower_card
             FROM book_copies bc
             JOIN books b ON bc.book_id = b.id
@@ -3818,34 +4882,29 @@ exports.dropBoxReturn = async (req, res) => {
         `, [targetQr]);
 
         if (copies.length === 0) {
-            return res.status(404).json({ message: 'Không tìm thấy mã sách này trong cơ sở dữ liệu thư viện' });
+            return res.status(404).json({ message: `Không tìm thấy mã sách [${targetQr}] trong cơ sở dữ liệu thư viện` });
         }
         const copy = copies[0];
 
-        if (!copy.active_borrow_id) {
-            return res.status(400).json({
-                message: `Bản sao sách [${copy.qr_code}] của cuốn «${copy.title}» hiện không có giao dịch mượn đang hoạt động.`
+        const ownActiveCopies = isReader ? await getCallerActiveBorrowCopies(callerId) : [];
+        const eligibility = evaluateDropBoxEligibility({
+            copy,
+            callerUser: req.user,
+            ownActiveCopies,
+        });
+
+        if (!eligibility.eligible) {
+            return res.status(eligibility.httpStatus || 400).json({
+                message: eligibility.reason,
+                reason_code: eligibility.reason_code,
+                suggested_qr_codes: eligibility.suggested_qr_codes,
+                same_book_qr_code: eligibility.same_book_qr_code,
             });
         }
 
-        // Nếu sách đã ở trong hòm và đang chờ thủ thư kiểm tra
-        if (copy.status === 'borrowed' && copy.active_borrow_id) {
-            const [existingDrop] = await db.execute(
-                'SELECT id, drop_box_at, drop_box_status FROM borrow_records WHERE id = ?',
-                [copy.active_borrow_id]
-            );
-            if (existingDrop.length > 0 && existingDrop[0].drop_box_status === 'pending_audit') {
-                return res.status(400).json({
-                    message: `Cuốn sách «${copy.title}» đã được ghi nhận thả vào Hòm trả 24/7 lúc ${new Date(existingDrop[0].drop_box_at).toLocaleString('vi-VN')} và đang chờ thủ thư đối soát!`
-                });
-            }
-        }
-
-        // Nếu bạn đọc tự trả, kiểm tra đúng người mượn
-        if (isReader && copy.borrower_id !== callerId) {
-            return res.status(403).json({
-                message: `Cuốn sách này đang được mượn bởi độc giả ${copy.borrower_name} (${copy.borrower_card}), bạn không thể thao tác trả thay!`
-            });
+        // Phòng ngừa trường hợp đặc biệt theo phân quyền độc giả / nhân sự
+        if (!assertCanMutateForReader(req.user, copy.borrower_id, res, 'thao tác trả sách qua hòm 24/7')) {
+            return;
         }
 
         // 2. Tính toán ngày quá hạn chốt tại thời điểm thả hòm (không thu phí phạt)
@@ -3857,7 +4916,13 @@ exports.dropBoxReturn = async (req, res) => {
         try {
             const dropTime = new Date();
 
-            // 3. Cập nhật phiếu mượn sang trạng thái 'returned_drop_box' kèm ảnh minh chứng
+            // Lưu ảnh minh chứng từ base64 sang file vật lý trên đĩa nếu cần
+            let storedProofImage = proofImage;
+            if (storedProofImage && storedProofImage.startsWith('data:image/')) {
+                storedProofImage = await saveBase64ToDisk(storedProofImage, 'proofs', `proof_copy_${copy.id}`);
+            }
+
+            // 3. Cập nhật phiếu mượn sang trạng thái 'returned_drop_box' kèm đường dẫn ảnh minh chứng
             await connection.execute(`
                 UPDATE borrow_records 
                 SET status = 'returned_drop_box',
@@ -3867,7 +4932,7 @@ exports.dropBoxReturn = async (req, res) => {
                     drop_box_audit_note = ?,
                     drop_box_proof_image = ?
                 WHERE id = ?
-            `, [note || 'Trả qua Hòm thông minh 24/7 ngoài giờ (Có ảnh minh chứng)', proofImage, copy.active_borrow_id]);
+            `, [note || 'Trả qua Hòm thông minh 24/7 ngoài giờ (Có ảnh minh chứng)', storedProofImage, copy.active_borrow_id]);
 
             // Giữ bản sao ở trạng thái an toàn (không cho mượn lại trên kệ đến khi thủ thư gom hòm kiểm tra)
             await connection.execute('UPDATE book_copies SET status = "borrowed" WHERE id = ?', [copy.id]);
@@ -3900,7 +4965,7 @@ exports.dropBoxReturn = async (req, res) => {
 
             await connection.commit();
 
-            // 4. Gửi email biên nhận đa kênh cho bạn đọc
+            // 4. Gửi email biên nhận tiếp nhận Hòm 24/7 cho bạn đọc (Nhóm 1: Bắt buộc có minh chứng đã thả hòm)
             if (copy.borrower_email) {
                 const emailService = require('../services/emailService');
                 emailService.sendDropBoxReceiptEmail({
@@ -3910,7 +4975,8 @@ exports.dropBoxReturn = async (req, res) => {
                     cardNumber: copy.borrower_card,
                     bookTitle: copy.title,
                     copyQr: copy.qr_code,
-                    droppedAt: dropTime
+                    droppedAt: dropTime,
+                    dedupKey: `drop_box_receipt:${copy.active_borrow_id}:${dropTime.toISOString()}`,
                 }).catch(e => console.error('Lỗi khi gửi email biên nhận hòm 24/7:', e.message));
             }
 
@@ -3991,9 +5057,12 @@ exports.auditDropBoxItem = async (req, res) => {
 
     try {
         await ensureDropBoxProofColumn();
+        await ensureReturnSlipsSchema();
+        await ensureExitPassesForAllBorrowRecords();
         const [records] = await db.execute(`
             SELECT br.*, bc.id as copy_id, bc.qr_code, bc.book_id,
-                   b.title as book_title, u.id as reader_id, u.full_name as reader_name, u.email as reader_email, u.card_number as reader_card
+                   b.title as book_title, b.cover_image, COALESCE(b.location, 'Phòng 01 - Kệ 01 - Ngăn 01') as location,
+                   u.id as reader_id, u.full_name as reader_name, u.email as reader_email, u.card_number as reader_card
             FROM borrow_records br
             JOIN book_copies bc ON br.book_copy_id = bc.id
             JOIN books b ON bc.book_id = b.id
@@ -4029,9 +5098,16 @@ exports.auditDropBoxItem = async (req, res) => {
 
         try {
             let suspensionResult = { overdueDays, effectiveLateDays: 0, suspendedDaysAdded: 0, suspendedUntil: null };
+            let prevSuspendedUntil = null;
 
             const settleLateReturnLedger = async () => {
                 if (overdueDays > 0) {
+                    try {
+                        const [prevRows] = await connection.execute('SELECT suspended_until FROM users WHERE id = ? LIMIT 1', [record.reader_id]);
+                        prevSuspendedUntil = prevRows?.[0]?.suspended_until || null;
+                    } catch {
+                        prevSuspendedUntil = null;
+                    }
                     suspensionResult = await applyLateReturnSuspension(connection, record.reader_id, record.due_date, dropReturnDate);
                     const suspSuffix = suspensionResult.suspendedDaysAdded > 0 && suspensionResult.suspendedUntil
                         ? ` • Tạm ngưng mượn ${suspensionResult.suspendedDaysAdded} ngày`
@@ -4161,6 +5237,54 @@ exports.auditDropBoxItem = async (req, res) => {
 
             const circulationStatus = await getReaderCirculationStatus(record.reader_id, connection);
 
+            // Tạo Phiếu trả sách điện tử chính thức (RT-...) khi Thủ thư xác nhận kiểm kê (nguyên vẹn hoặc hư hỏng)
+            let returnSlip = null;
+            if (action === 'verify_intact' || action === 'report_damaged') {
+                const [readerPassRows] = await connection.execute(
+                    'SELECT id, user_id, pass_code, items_summary, created_at FROM exit_passes WHERE user_id = ? ORDER BY created_at DESC LIMIT 50',
+                    [record.reader_id]
+                );
+                const parsedReaderPasses = parsePassesWithItems(readerPassRows);
+                const borrowSlipCode = resolveBorrowSlipCodeForRecord(parsedReaderPasses, {
+                    userId: record.reader_id,
+                    qrCode: record.qr_code,
+                    borrowDate: record.borrow_date,
+                    recordId: record.id
+                });
+                const slipCondition = action === 'report_damaged'
+                    ? (finalViolationType === 'lost' ? 'lost' : 'damaged')
+                    : 'normal';
+                const slipNote = auditNote || (
+                    action === 'verify_intact'
+                        ? 'Sách nguyên vẹn đạt chuẩn lưu kho'
+                        : 'Phát hiện sách hư hại/rách trang khi kiểm kê sách trả ngoài giờ'
+                );
+
+                returnSlip = await issueReturnSlip(connection, {
+                    userId: record.reader_id,
+                    processedBy: auditorId,
+                    returnMethod: 'drop_box',
+                    dropBoxReceivedAt: dropReturnDate,
+                    returnedAt: auditTime,
+                    notes: `Hòm trả sách 24/7 • Kiểm kê bởi: ${auditorName}`,
+                    sendEmail: false,
+                    items: [{
+                        borrowRecordId: record.id,
+                        borrowSlipCode,
+                        bookId: record.book_id,
+                        bookTitle: record.book_title,
+                        copyQr: record.qr_code,
+                        coverImage: record.cover_image || null,
+                        location: record.location,
+                        borrowDate: record.borrow_date,
+                        dueDate: record.due_date,
+                        condition: slipCondition,
+                        conditionNote: action === 'report_damaged' ? slipNote : null,
+                        overdueDays
+                    }]
+                });
+            }
+
             // Ghi log
             await connection.execute(`
                 INSERT INTO activity_logs (user_id, action, target_type, target_id, details)
@@ -4168,13 +5292,26 @@ exports.auditDropBoxItem = async (req, res) => {
             `, [
                 auditorId,
                 record.id,
-                `Thủ thư ${auditorName} đối soát hòm 24/7 cho cuốn «${record.book_title}»: ${action} (${auditNote || '---'})`
+                `Thủ thư ${auditorName} đối soát hòm 24/7 cho cuốn «${record.book_title}»: ${action} (${auditNote || '---'})${returnSlip ? ` • Phiếu trả: ${returnSlip.returnCode}` : ''}`
             ]);
 
             await connection.commit();
 
-            // Gửi email kết quả đối soát cho độc giả (non-monetary)
-            if (record.reader_email) {
+            // Gửi email khi trạng thái thực sự chuyển sang SUSPENDED (không lặp lại)
+            if (suspensionResult.suspendedDaysAdded > 0 && suspensionResult.suspendedUntil) {
+                dispatchSuspensionTransitionNotification({
+                    userId: record.reader_id,
+                    previousSuspendedUntil: prevSuspendedUntil,
+                    newSuspendedUntil: suspensionResult.suspendedUntil,
+                    suspendedDaysAdded: suspensionResult.suspendedDaysAdded,
+                    overdueDays,
+                    bookTitle: record.book_title,
+                    skipInApp: true,
+                }).catch(() => {});
+            }
+
+            // Hòm 24/7 kiểm kê bình thường -> CHỈ In-app (KHÔNG gửi email trùng lặp); chỉ gửi Email khi phát hiện sự cố hư hỏng / mất sách
+            if (record.reader_email && (action === 'report_damaged' || action === 'report_missing')) {
                 const emailService = require('../services/emailService');
                 emailService.sendDropBoxAuditResultEmail({
                     to: record.reader_email,
@@ -4188,14 +5325,18 @@ exports.auditDropBoxItem = async (req, res) => {
                     auditNote,
                     severity: finalSeverity,
                     remediationAction: finalRemediationAction,
-                    auditedAt: auditTime
+                    auditedAt: auditTime,
+                    dedupKey: `drop_box_incident:${record.id}:${action}:${toLocalDateString(auditTime)}`,
                 }).catch(e => console.error('Lỗi khi gửi email kết quả đối soát hòm 24/7:', e.message));
             }
 
             res.status(200).json({
                 success: true,
-                message: `Đã hoàn tất đối soát cuốn sách "${record.book_title}" (${action}) và gửi thông báo cho bạn đọc!`,
-                circulationStatus
+                message: returnSlip
+                    ? `Đã hoàn tất đối soát cuốn sách "${record.book_title}" và phát hành Phiếu trả ${returnSlip.returnCode}!`
+                    : `Đã hoàn tất đối soát cuốn sách "${record.book_title}" (${action}) và gửi thông báo cho bạn đọc!`,
+                circulationStatus,
+                returnSlip
             });
         } catch (err) {
             await connection.rollback();
@@ -4210,7 +5351,7 @@ exports.auditDropBoxItem = async (req, res) => {
 };
 
 // =========================================================================
-// 2. NGHIỆP VỤ VÉ THÔNG HÀNH RA CỬA (DIGITAL EXIT PASS / LOSS PREVENTION)
+// 2. NGHIỆP VỤ PHIẾU MƯỢN CHÍNH THỨC & ĐỐI SOÁT CHỨNG TỪ (OFFICIAL BORROW SLIP)
 // =========================================================================
 
 // Helper: Đồng bộ chính xác ngày mượn (borrowDate) và hạn trả 14 ngày (dueDate) từ borrow_records hoặc từ thời điểm tạo phiếu (created_at + 14 ngày)
@@ -4307,12 +5448,12 @@ exports.getMyActiveExitPass = async (req, res) => {
             return res.status(200).json(null);
         }
 
-        // 2. Tìm Phiếu mượn đang active và còn hạn
+        // 2. Tìm Phiếu mượn còn hiệu lực lưu thông (bao gồm cả phiếu đã ghi nhận kiểm tra đối soát)
         const [activePasses] = await db.execute(`
-            SELECT ep.*, u.full_name as reader_name, u.card_number, u.avatar_url
+            SELECT ep.*, u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status, u.avatar_url
             FROM exit_passes ep
             JOIN users u ON ep.user_id = u.id
-            WHERE ep.user_id = ? AND ep.status = 'active' AND ep.expires_at > NOW()
+            WHERE ep.user_id = ? AND ep.status IN ('active', 'used') AND ep.expires_at > NOW()
             ORDER BY ep.created_at DESC LIMIT 1
         `, [userId]);
 
@@ -4335,7 +5476,7 @@ exports.getMyActiveExitPass = async (req, res) => {
             librarianName: enriched.librarianName,
             minutesLeft,
             isExpired: false,
-            displayStatus: 'active',
+            displayStatus: pass.status === 'used' ? 'used' : 'active',
             isValid: true
         };
 
@@ -4344,8 +5485,8 @@ exports.getMyActiveExitPass = async (req, res) => {
             ...resultObj
         });
     } catch (error) {
-        console.error('Lỗi khi lấy vé ra cửa:', error);
-        res.status(500).json({ message: 'Lỗi server khi lấy vé ra cửa' });
+        console.error('Lỗi khi lấy phiếu mượn chính thức:', error);
+        res.status(500).json({ message: 'Lỗi server khi lấy phiếu mượn chính thức' });
     }
 };
 
@@ -4358,7 +5499,7 @@ exports.getMyExitPassesHistory = async (req, res) => {
         await ensureExitPassesForAllBorrowRecords();
 
         const [passes] = await db.execute(`
-            SELECT ep.*, u.full_name as reader_name, u.card_number, u.avatar_url
+            SELECT ep.*, u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status, u.avatar_url
             FROM exit_passes ep
             JOIN users u ON ep.user_id = u.id
             WHERE ep.user_id = ?
@@ -4408,13 +5549,13 @@ exports.getMyExitPassesHistory = async (req, res) => {
 };
 
 // GET /api/borrow/exit-passes/active-list
-// Bảo vệ / Thủ thư lấy danh sách lịch sử Phiếu mượn chính thức (PM-BRW-...) trong thư viện để đối soát
+// Thủ thư / Quản trị viên lấy danh sách Phiếu mượn chính thức (PM-BRW-...) trong thư viện để tra cứu & đối soát
 exports.getActiveExitPassesList = async (req, res) => {
     try {
         await ensureExitPassesForAllBorrowRecords();
 
         const [passes] = await db.execute(`
-            SELECT ep.*, u.full_name as reader_name, u.card_number, u.avatar_url, u.email, u.phone,
+            SELECT ep.*, u.full_name as reader_name, u.card_number, u.avatar_url, u.email, u.phone, u.phone as reader_phone, u.status as reader_status,
                    v.full_name as verified_by_name
             FROM exit_passes ep
             JOIN users u ON ep.user_id = u.id
@@ -4441,13 +5582,13 @@ exports.getActiveExitPassesList = async (req, res) => {
 
         res.status(200).json(formatted);
     } catch (error) {
-        console.error('Lỗi khi lấy danh sách vé ra cửa:', error);
-        res.status(500).json({ message: 'Lỗi server khi lấy danh sách vé ra cửa' });
+        console.error('Lỗi khi lấy danh sách phiếu mượn chính thức:', error);
+        res.status(500).json({ message: 'Lỗi server khi lấy danh sách phiếu mượn chính thức' });
     }
 };
 
 // POST /api/borrow/exit-passes/verify
-// Bảo vệ / Thủ thư quét mã QR Phiếu mượn hoặc Thẻ Độc Giả để đối soát mượn trả & ra cổng
+// Thủ thư / Nhân viên quét mã QR Phiếu mượn hoặc Thẻ Độc Giả để tra cứu & đối soát chứng từ mượn trả
 exports.verifyExitPass = async (req, res) => {
     let { passCode } = req.body;
     if (!passCode) {
@@ -4492,7 +5633,7 @@ exports.verifyExitPass = async (req, res) => {
 
         // 1. Tìm Phiếu mượn theo pass_code trực tiếp HOẶC mã chuyển đổi từ DRAFT HOẶC theo mã thẻ độc giả / user id / email
         const [passes] = await db.execute(`
-            SELECT ep.*, u.full_name as reader_name, u.card_number, u.avatar_url, u.email, u.phone
+            SELECT ep.*, u.full_name as reader_name, u.card_number, u.avatar_url, u.email, u.phone, u.phone as reader_phone, u.status as reader_status
             FROM exit_passes ep
             JOIN users u ON ep.user_id = u.id
             WHERE ep.pass_code = ? OR ep.pass_code = ? OR ep.pass_code = ? OR u.card_number = ? OR u.id = ? OR u.email = ?
@@ -4542,7 +5683,7 @@ exports.verifyExitPass = async (req, res) => {
             return res.status(200).json({
                 valid: true,
                 status: 'used',
-                message: `✅ PHIẾU MƯỢN ĐÃ ĐỐI SOÁT QUA CỔNG: Phiếu mượn (${enrichedPass.pass_code}) đã được đối soát lúc ${new Date(pass.verified_at).toLocaleTimeString('vi-VN')}.`,
+                message: `✅ PHIẾU MƯỢN ĐÃ ĐỐI SOÁT KIỂM TRA: Phiếu mượn (${enrichedPass.pass_code}) đã được ghi nhận đối soát lúc ${new Date(pass.verified_at).toLocaleTimeString('vi-VN')}.`,
                 pass: enrichedPass
             });
         }
@@ -4561,7 +5702,7 @@ exports.verifyExitPass = async (req, res) => {
 };
 
 // POST /api/borrow/exit-passes/clear
-// Thủ thư / Nhân viên nhấn "Xác nhận đối soát Phiếu mượn hoàn tất"
+// Thủ thư / Nhân viên nhấn "Ghi nhận đã kiểm tra đối soát"
 exports.clearExitPass = async (req, res) => {
     const { passCode, notes } = req.body;
     const verifiedBy = req.user.id;
@@ -4596,7 +5737,7 @@ exports.clearExitPass = async (req, res) => {
         const pass = passes[0];
 
         if (pass.status === 'used') {
-            return res.status(400).json({ message: 'Phiếu mượn này đã được xác nhận đối soát tại cổng trước đó!' });
+            return res.status(400).json({ message: 'Phiếu mượn này đã được ghi nhận kiểm tra đối soát trước đó!' });
         }
 
         await db.execute(`
@@ -4615,25 +5756,114 @@ exports.clearExitPass = async (req, res) => {
         `, [
             verifiedBy,
             pass.id,
-            `Đối soát Phiếu mượn khi ra cổng cho độc giả ${pass.reader_name} (${pass.book_count} cuốn sách theo mã ${pass.pass_code})`
+            `Ghi nhận kiểm tra đối soát Phiếu mượn cho độc giả ${pass.reader_name} (${pass.book_count} cuốn sách theo mã ${pass.pass_code})`
         ]);
 
         // Thông báo bạn đọc
         await db.execute(`
             INSERT INTO notifications (user_id, title, message, type)
-            VALUES (?, 'Đã xác nhận đối soát Phiếu mượn tại cổng', ?, 'info')
+            VALUES (?, 'Đã ghi nhận kiểm tra đối soát Phiếu mượn', ?, 'info')
         `, [
             pass.user_id,
-            `Phiếu mượn sách (${pass.pass_code}) của bạn đã được nhân viên thư viện xác nhận đối soát hoàn tất khi qua cổng. Chúc bạn đọc sách vui vẻ!`
+            `Phiếu mượn sách (${pass.pass_code}) của bạn đã được nhân viên thư viện kiểm tra đối soát hợp lệ.`
         ]);
 
         res.status(200).json({
             success: true,
-            message: `Đã xác nhận đối soát Phiếu mượn (${pass.pass_code}) cho độc giả ${pass.reader_name} thành công!`
+            message: `Đã ghi nhận kiểm tra đối soát Phiếu mượn (${pass.pass_code}) cho độc giả ${pass.reader_name} thành công!`
         });
     } catch (error) {
         console.error('Lỗi khi xác nhận đối soát Phiếu mượn:', error);
         res.status(500).json({ message: 'Lỗi server khi xác nhận đối soát Phiếu mượn' });
+    }
+};
+
+// =========================================================================
+// 3. NGHIỆP VỤ PHIẾU TRẢ SÁCH ĐIỆN TỬ (ELECTRONIC RETURN SLIPS)
+// =========================================================================
+
+// GET /api/borrow/return-slips/my-history
+exports.getMyReturnSlipsHistory = async (req, res) => {
+    const userId = req.user.id;
+    try {
+        await ensureReturnSlipsSchema();
+        const [rows] = await db.execute(`
+            SELECT rs.*, u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status,
+                   p.full_name as librarian_name
+            FROM return_slips rs
+            JOIN users u ON rs.user_id = u.id
+            LEFT JOIN users p ON rs.processed_by = p.id
+            WHERE rs.user_id = ?
+            ORDER BY rs.returned_at DESC, rs.id DESC
+            LIMIT 50
+        `, [userId]);
+        res.status(200).json(rows.map(normalizeReturnSlipRow));
+    } catch (error) {
+        console.error('Lỗi khi lấy lịch sử Phiếu trả sách:', error);
+        res.status(500).json({ message: 'Lỗi server khi lấy lịch sử Phiếu trả sách' });
+    }
+};
+
+// GET /api/borrow/return-slips/list
+exports.getReturnSlipsList = async (req, res) => {
+    const { userId, cardNumber } = req.query;
+    try {
+        await ensureReturnSlipsSchema();
+        let query = `
+            SELECT rs.*, u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status,
+                   p.full_name as librarian_name
+            FROM return_slips rs
+            JOIN users u ON rs.user_id = u.id
+            LEFT JOIN users p ON rs.processed_by = p.id
+        `;
+        const params = [];
+        if (userId) {
+            query += ' WHERE rs.user_id = ?';
+            params.push(userId);
+        } else if (cardNumber) {
+            query += ' WHERE u.card_number = ?';
+            params.push(cardNumber);
+        }
+        query += ' ORDER BY rs.returned_at DESC, rs.id DESC LIMIT 100';
+
+        const [rows] = await db.execute(query, params);
+        res.status(200).json(rows.map(normalizeReturnSlipRow));
+    } catch (error) {
+        console.error('Lỗi khi lấy danh sách Phiếu trả sách:', error);
+        res.status(500).json({ message: 'Lỗi server khi lấy danh sách Phiếu trả sách' });
+    }
+};
+
+// GET /api/borrow/return-slips/:code
+exports.getReturnSlipByCode = async (req, res) => {
+    const rawCode = (req.params.code || '').toString().trim();
+    if (!rawCode) {
+        return res.status(400).json({ message: 'Vui lòng cung cấp mã Phiếu trả' });
+    }
+    try {
+        await ensureReturnSlipsSchema();
+        const isNumeric = /^\d+$/.test(rawCode);
+        const [rows] = await db.execute(`
+            SELECT rs.*, u.full_name as reader_name, u.card_number, u.phone as reader_phone, u.status as reader_status,
+                   p.full_name as librarian_name
+            FROM return_slips rs
+            JOIN users u ON rs.user_id = u.id
+            LEFT JOIN users p ON rs.processed_by = p.id
+            WHERE rs.return_code = ? ${isNumeric ? 'OR rs.id = ?' : ''}
+            LIMIT 1
+        `, isNumeric ? [rawCode, parseInt(rawCode, 10)] : [rawCode]);
+
+        if (rows.length === 0) {
+            return res.status(404).json({ message: 'Không tìm thấy Phiếu trả sách điện tử' });
+        }
+        const slip = normalizeReturnSlipRow(rows[0]);
+        if (req.user.role === 'reader' && Number(slip.user_id) !== Number(req.user.id)) {
+            return res.status(403).json({ message: 'Bạn chỉ được phép xem Phiếu trả sách của chính mình' });
+        }
+        res.status(200).json(slip);
+    } catch (error) {
+        console.error('Lỗi khi tra cứu Phiếu trả sách:', error);
+        res.status(500).json({ message: 'Lỗi server khi tra cứu Phiếu trả sách' });
     }
 };
 

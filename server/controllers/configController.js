@@ -1,5 +1,36 @@
 const db = require('../config/db');
 
+const PUBLIC_READER_RULE_DEFAULTS = {
+    max_books_per_user: '5',
+    max_borrow_days: '14',
+    grace_days: '0',
+    suspension_days_per_late_day: '1',
+    max_suspension_days: '14',
+    block_reserve_when_suspended: '1',
+};
+
+// 0. Get public reader-facing circulation & discipline rules (Unauthenticated safe whitelist)
+exports.getPublicReaderRules = async (req, res) => {
+    try {
+        const keys = Object.keys(PUBLIC_READER_RULE_DEFAULTS);
+        const placeholders = keys.map(() => '?').join(',');
+        const [rows] = await db.execute(
+            `SELECT key_name, value FROM system_configs WHERE key_name IN (${placeholders})`,
+            keys
+        );
+        const rules = { ...PUBLIC_READER_RULE_DEFAULTS };
+        for (const row of rows || []) {
+            if (row?.key_name && Object.prototype.hasOwnProperty.call(rules, row.key_name) && row.value !== null && row.value !== undefined) {
+                rules[row.key_name] = String(row.value);
+            }
+        }
+        res.status(200).json(rules);
+    } catch (error) {
+        console.error('Lỗi khi lấy nội quy công khai cho độc giả:', error);
+        res.status(200).json({ ...PUBLIC_READER_RULE_DEFAULTS });
+    }
+};
+
 // 1. Get all current system configs
 exports.getConfigs = async (req, res) => {
     try {
@@ -212,42 +243,9 @@ exports.reviewConfigRequest = async (req, res) => {
     }
 };
 
-// Direct update fallback (Admin / Owner)
-exports.updateConfigs = async (req, res) => {
-    const { configs } = req.body;
-    const processedBy = req.user.id;
-
-    try {
-        if (!configs || typeof configs !== 'object') {
-            return res.status(400).json({ message: 'Vui lòng cung cấp cấu hình hợp lệ' });
-        }
-
-        const connection = await db.getConnection();
-        await connection.beginTransaction();
-
-        try {
-            for (const [key, value] of Object.entries(configs)) {
-                await connection.execute(
-                    'UPDATE system_configs SET value = ? WHERE key_name = ?',
-                    [String(value), key]
-                );
-            }
-
-            await connection.execute(
-                'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, ?, ?, ?, ?)',
-                [processedBy, 'UPDATE_CONFIG', 'system_configs', null, `Cập nhật trực tiếp cấu hình hệ thống: ${JSON.stringify(configs)}`]
-            );
-
-            await connection.commit();
-            res.status(200).json({ message: 'Đã cập nhật cấu hình hệ thống thành công' });
-        } catch (error) {
-            await connection.rollback();
-            throw error;
-        } finally {
-            connection.release();
-        }
-    } catch (error) {
-        console.error('Lỗi khi cập nhật cấu hình:', error);
-        res.status(500).json({ message: 'Lỗi server' });
-    }
+// Direct update disabled: enforce Maker - Checker regulation workflow
+exports.updateConfigs = async (_req, res) => {
+    return res.status(403).json({
+        message: 'Không được phép cập nhật trực tiếp cấu hình quy chế! Mọi thay đổi phải đi qua quy trình Maker - Checker (Admin đề xuất qua /configs/propose và Chủ thư viện phê duyệt).'
+    });
 };

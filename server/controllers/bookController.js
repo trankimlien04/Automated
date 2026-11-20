@@ -1,5 +1,14 @@
 const db = require('../config/db');
 const { computeSmartWaitPrediction } = require('../utils/waitTimePredictor');
+const {
+    normalizeLocationString,
+    recordAuditLog,
+    validateExcelImportRows,
+    checkBookDisposalBlockers,
+    buildBookSnapshot,
+    createWarehouseRequest,
+} = require('../services/warehouseGovernance');
+const { saveBase64ToDisk } = require('../utils/fileStorage');
 
 // Helper: Đảm bảo available_copies luôn nằm trong khoảng hợp lệ [0, total_copies]
 // và khớp với số bản sao thực tế đang mượn / giữ chỗ 24h / giữ ưu tiên đặt trước 48h
@@ -31,6 +40,7 @@ exports.getAllBooks = async (req, res) => {
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN categories c ON b.category_id = c.id
             LEFT JOIN publishers p ON b.publisher_id = p.id
+            WHERE COALESCE(b.status, 'active') = 'active'
         `);
 
         // Batch-fetch active borrow due_dates, hold expiries & waiting reservation counts for Smart Wait-Time Predictor
@@ -124,7 +134,7 @@ exports.getBookById = async (req, res) => {
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN categories c ON b.category_id = c.id
             LEFT JOIN publishers p ON b.publisher_id = p.id
-            WHERE b.id = ?
+            WHERE b.id = ? AND COALESCE(b.status, 'active') = 'active'
         `, [req.params.id]);
 
         if (books.length === 0) {
@@ -185,27 +195,128 @@ exports.getBookById = async (req, res) => {
 };
 
 exports.createBook = async (req, res) => {
-    const { title, author_id, publisher_id, category_id, isbn, published_year, description, total_copies, location } = req.body;
-    try {
-        const bookLocation = (location || '').trim() || 'Phòng 01 - Kệ 01 - Ngăn 01';
-        const [result] = await db.execute(
-            `INSERT INTO books (title, author_id, publisher_id, category_id, isbn, published_year, description, total_copies, available_copies, location)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [title, author_id || null, publisher_id || null, category_id || null, isbn || null, published_year || null, description || null, total_copies || 0, total_copies || 0, bookLocation]
-        );
-        
-        const newBookId = result.insertId;
+    const {
+        title,
+        author_id,
+        publisher_id,
+        category_id,
+        isbn,
+        published_year,
+        description,
+        cover_image,
+        total_copies,
+        location,
+        reason,
+    } = req.body;
+    const userId = req.user?.id || null;
+    const cleanTitle = String(title || '').trim();
 
-        // Automatically generate book copies if total_copies > 0
-        if (total_copies > 0) {
-            const qrPrefix = 'LIB-BK-';
-            for (let i = 1; i <= total_copies; i++) {
-                const uniqueQR = qrPrefix + newBookId + '-' + i + '-' + Date.now();
-                await db.execute('INSERT INTO book_copies (book_id, qr_code) VALUES (?, ?)', [newBookId, uniqueQR]);
+    if (!cleanTitle) {
+        return res.status(400).json({ message: 'Vui lòng nhập tên đầu sách' });
+    }
+
+    const cleanIsbn = isbn ? String(isbn).trim() : null;
+    const requestedCopies = Math.max(0, parseInt(total_copies, 10) || 0);
+    const bookLocation = normalizeLocationString(location);
+
+    try {
+        if (cleanIsbn) {
+            const [dup] = await db.execute(
+                "SELECT id FROM books WHERE isbn = ? AND COALESCE(status, 'active') = 'active' LIMIT 1",
+                [cleanIsbn]
+            );
+            if (dup.length > 0) {
+                return res.status(409).json({ message: `Mã ISBN "${cleanIsbn}" đã tồn tại trên hệ thống` });
             }
         }
 
-        res.status(201).json({ message: 'Thêm sách thành công', bookId: newBookId, location: bookLocation });
+        // Lưu ảnh bìa từ base64 sang tệp tin đĩa tĩnh nếu cần
+        let storedCover = cover_image || null;
+        if (storedCover && typeof storedCover === 'string' && storedCover.startsWith('data:image/')) {
+            storedCover = await saveBase64ToDisk(storedCover, 'covers', 'book_cover');
+        }
+
+        // Tách biệt Đầu sách vs Bản sao vật lý:
+        // - 0 bản sao: Thủ thư biên mục trực tiếp đầu sách + ghi nhật ký
+        // - >= 1 bản sao: Tạo phiếu đề xuất kho chờ Chủ thư viện phê duyệt (chưa cộng tồn kho)
+        if (requestedCopies === 0) {
+            const [result] = await db.execute(
+                `INSERT INTO books (title, author_id, publisher_id, category_id, isbn, published_year, description, cover_image, total_copies, available_copies, location, status)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, 'active')`,
+                [
+                    cleanTitle,
+                    author_id || null,
+                    publisher_id || null,
+                    category_id || null,
+                    cleanIsbn,
+                    published_year || new Date().getFullYear(),
+                    description || null,
+                    storedCover,
+                    bookLocation,
+                ]
+            );
+
+            const newBookId = result.insertId;
+            const afterSnapshot = await buildBookSnapshot(db, newBookId);
+
+            await recordAuditLog(db, {
+                userId,
+                action: 'CREATE_BOOK',
+                targetType: 'books',
+                targetId: newBookId,
+                details: `Biên mục trực tiếp đầu sách «${cleanTitle}» (0 bản sao vật lý, vị trí ${bookLocation})`,
+                beforeData: null,
+                afterData: afterSnapshot,
+                outcome: 'success',
+            });
+
+            return res.status(201).json({
+                requiresApproval: false,
+                message: `Đã thêm thông tin đầu sách «${cleanTitle}» (0 bản sao). Khi cần nhập bản sao vật lý, vui lòng gửi phiếu đề xuất kho!`,
+                bookId: newBookId,
+                location: bookLocation,
+                book: afterSnapshot,
+            });
+        }
+
+        const connection = await db.getConnection();
+        await connection.beginTransaction();
+        try {
+            const request = await createWarehouseRequest(connection, {
+                requestType: 'create',
+                title: `Thêm đầu sách «${cleanTitle}» (+${requestedCopies} bản sao)`,
+                reason: reason || `Đề xuất tạo đầu sách mới kèm nhập ${requestedCopies} bản sao vật lý`,
+                requestedBy: userId,
+                quantity: requestedCopies,
+                location: bookLocation,
+                payload: {
+                    title: cleanTitle,
+                    author_id: author_id || null,
+                    publisher_id: publisher_id || null,
+                    category_id: category_id || null,
+                    isbn: cleanIsbn,
+                    published_year: published_year || new Date().getFullYear(),
+                    description: description || null,
+                    cover_image: cover_image || null,
+                    location: bookLocation,
+                    total_copies: requestedCopies,
+                },
+                before: null,
+                actionLog: 'PROPOSE_BOOK_CREATE',
+            });
+            await connection.commit();
+
+            return res.status(202).json({
+                requiresApproval: true,
+                message: `Đã tạo phiếu ${request.request_code} thêm đầu sách «${cleanTitle}» (+${requestedCopies} bản sao) chờ Chủ thư viện phê duyệt!`,
+                request,
+            });
+        } catch (txErr) {
+            await connection.rollback();
+            throw txErr;
+        } finally {
+            connection.release();
+        }
     } catch (error) {
         console.error('Lỗi khi thêm sách:', error);
         res.status(500).json({ message: 'Lỗi server' });
@@ -213,22 +324,158 @@ exports.createBook = async (req, res) => {
 };
 
 exports.updateBook = async (req, res) => {
-    const { title, author_id, publisher_id, category_id, isbn, published_year, description, location } = req.body;
+    const bookId = parseInt(req.params.id, 10);
+    const {
+        title,
+        author_id,
+        publisher_id,
+        category_id,
+        isbn,
+        published_year,
+        description,
+        location,
+        reason,
+    } = req.body;
+    const userId = req.user?.id || null;
+
+    if (!bookId) {
+        return res.status(400).json({ message: 'ID đầu sách không hợp lệ' });
+    }
+
     try {
+        const before = await buildBookSnapshot(db, bookId);
+        if (!before || before.status !== 'active') {
+            return res.status(404).json({ message: 'Không tìm thấy đầu sách đang hoạt động' });
+        }
+
+        const hasIsbnField = Object.prototype.hasOwnProperty.call(req.body, 'isbn');
+        const nextIsbn = hasIsbnField ? (String(isbn || '').trim() || null) : before.isbn;
+        const isbnChanged = hasIsbnField && nextIsbn !== (before.isbn || null);
+
+        // Kiểm tra sửa thông tin định danh quan trọng (ISBN khi sách đã có bản sao hoặc đã có ISBN cũ)
+        if (isbnChanged && (Number(before.total_copies) > 0 || Boolean(before.isbn))) {
+            if (nextIsbn) {
+                const [dup] = await db.execute(
+                    "SELECT id FROM books WHERE isbn = ? AND id <> ? AND COALESCE(status, 'active') = 'active' LIMIT 1",
+                    [nextIsbn, bookId]
+                );
+                if (dup.length > 0) {
+                    return res.status(409).json({ message: `Mã ISBN "${nextIsbn}" đã thuộc về một đầu sách khác` });
+                }
+            }
+
+            const connection = await db.getConnection();
+            await connection.beginTransaction();
+            try {
+                const request = await createWarehouseRequest(connection, {
+                    requestType: 'update_sensitive',
+                    title: `Đổi mã định danh ISBN «${before.title}»`,
+                    reason: reason || `Đề xuất thay đổi ISBN từ "${before.isbn || 'Trống'}" sang "${nextIsbn || 'Trống'}"`,
+                    requestedBy: userId,
+                    bookId,
+                    quantity: before.total_copies,
+                    location: location !== undefined ? normalizeLocationString(location) : before.location,
+                    payload: {
+                        book_id: bookId,
+                        title: title !== undefined ? String(title).trim() : before.title,
+                        author_id: author_id !== undefined ? (author_id || null) : before.author_id,
+                        publisher_id: publisher_id !== undefined ? (publisher_id || null) : before.publisher_id,
+                        category_id: category_id !== undefined ? (category_id || null) : before.category_id,
+                        isbn: nextIsbn,
+                        published_year: published_year !== undefined ? (published_year || null) : before.published_year,
+                        description: description !== undefined ? description : before.description,
+                        location: location !== undefined ? normalizeLocationString(location) : before.location,
+                    },
+                    before,
+                    actionLog: 'PROPOSE_BOOK_UPDATE_SENSITIVE',
+                });
+                await connection.commit();
+
+                return res.status(202).json({
+                    requiresApproval: true,
+                    message: `Thay đổi ISBN trên sách đang lưu thông cần Chủ thư viện phê duyệt. Đã tạo phiếu ${request.request_code}!`,
+                    request,
+                });
+            } catch (txErr) {
+                await connection.rollback();
+                throw txErr;
+            } finally {
+                connection.release();
+            }
+        }
+
+        // Thao tác ít rủi ro (sửa tên, tác giả, mô tả, NXB, thể loại, năm XB, vị trí kệ) -> Thực hiện trực tiếp + ghi nhật ký
+        const nextTitle = title !== undefined ? String(title).trim() : before.title;
+        if (!nextTitle) {
+            return res.status(400).json({ message: 'Tên đầu sách không được để trống' });
+        }
+
+        const nextLocation = location !== undefined && String(location).trim()
+            ? normalizeLocationString(location)
+            : before.location;
+
+        if (nextIsbn && isbnChanged) {
+            const [dup] = await db.execute(
+                "SELECT id FROM books WHERE isbn = ? AND id <> ? AND COALESCE(status, 'active') = 'active' LIMIT 1",
+                [nextIsbn, bookId]
+            );
+            if (dup.length > 0) {
+                return res.status(409).json({ message: `Mã ISBN "${nextIsbn}" đã thuộc về một đầu sách khác` });
+            }
+        }
+
         await db.execute(
-            `UPDATE books SET 
-                title=COALESCE(?, title), 
-                author_id=COALESCE(?, author_id), 
-                publisher_id=COALESCE(?, publisher_id), 
-                category_id=COALESCE(?, category_id), 
-                isbn=COALESCE(?, isbn), 
-                published_year=COALESCE(?, published_year), 
-                description=COALESCE(?, description), 
-                location=COALESCE(?, location) 
-             WHERE id=?`,
-            [title || null, author_id || null, publisher_id || null, category_id || null, isbn || null, published_year || null, description || null, location || null, req.params.id]
+            `UPDATE books SET
+                title = ?,
+                author_id = ?,
+                publisher_id = ?,
+                category_id = ?,
+                isbn = ?,
+                published_year = ?,
+                description = ?,
+                location = ?
+             WHERE id = ? AND COALESCE(status, 'active') = 'active'`,
+            [
+                nextTitle,
+                author_id !== undefined ? (author_id || null) : before.author_id,
+                publisher_id !== undefined ? (publisher_id || null) : before.publisher_id,
+                category_id !== undefined ? (category_id || null) : before.category_id,
+                nextIsbn,
+                published_year !== undefined ? (published_year || null) : before.published_year,
+                description !== undefined ? description : before.description,
+                nextLocation,
+                bookId,
+            ]
         );
-        res.status(200).json({ message: 'Cập nhật sách thành công' });
+
+        const after = await buildBookSnapshot(db, bookId);
+        const onlyLocationChanged =
+            before.location !== after.location &&
+            before.title === after.title &&
+            before.author_id === after.author_id &&
+            before.publisher_id === after.publisher_id &&
+            before.category_id === after.category_id &&
+            before.description === after.description &&
+            before.published_year === after.published_year;
+
+        await recordAuditLog(db, {
+            userId,
+            action: onlyLocationChanged ? 'MOVE_LOCATION' : 'UPDATE_BOOK_METADATA',
+            targetType: 'books',
+            targetId: bookId,
+            details: onlyLocationChanged
+                ? `Điều chuyển vị trí «${after.title}»: "${before.location}" → "${after.location}"`
+                : `Cập nhật thông tin biên mục «${after.title}»`,
+            beforeData: before,
+            afterData: after,
+            outcome: 'success',
+        });
+
+        res.status(200).json({
+            requiresApproval: false,
+            message: 'Cập nhật thông tin đầu sách thành công',
+            book: after,
+        });
     } catch (error) {
         console.error('Lỗi khi cập nhật sách:', error);
         res.status(500).json({ message: 'Lỗi server' });
@@ -236,165 +483,132 @@ exports.updateBook = async (req, res) => {
 };
 
 exports.deleteBook = async (req, res) => {
-    try {
-        await db.execute('DELETE FROM books WHERE id=?', [req.params.id]);
-        res.status(200).json({ message: 'Xóa sách thành công' });
-    } catch (error) {
-        console.error('Lỗi khi xóa sách:', error);
-        res.status(500).json({ message: 'Lỗi server' });
-    }
-};
+    const bookId = parseInt(req.params.id, 10);
+    const userId = req.user?.id || null;
+    const reason = String(req.body?.reason || req.query?.reason || '').trim();
+    const disposalStatus = (req.body?.disposal_status || req.query?.disposal_status) === 'inactive' ? 'inactive' : 'disposed';
 
-// Batch Import Books from Excel
-exports.importBooksBatch = async (req, res) => {
-    const { books } = req.body;
-    const userId = req.user.id;
-
-    if (!books || !Array.isArray(books) || books.length === 0) {
-        return res.status(400).json({ message: 'Danh sách sách tải lên không hợp lệ hoặc rỗng' });
+    if (!bookId) {
+        return res.status(400).json({ message: 'ID đầu sách không hợp lệ' });
     }
 
     const connection = await db.getConnection();
     await connection.beginTransaction();
 
     try {
-        let importedCount = 0;
-        let totalCopiesGenerated = 0;
-
-        // Pre-cache existing lookups to maximize import speed and prevent timeouts
-        const [allAuthors] = await connection.execute('SELECT id, name FROM authors');
-        const authorMap = new Map(allAuthors.map(a => [a.name.toLowerCase().trim(), a.id]));
-
-        const [allCats] = await connection.execute('SELECT id, name FROM categories');
-        const catMap = new Map(allCats.map(c => [c.name.toLowerCase().trim(), c.id]));
-
-        const [allPubs] = await connection.execute('SELECT id, name FROM publishers');
-        const pubMap = new Map(allPubs.map(p => [p.name.toLowerCase().trim(), p.id]));
-
-        const [allExistingBooks] = await connection.execute('SELECT id, isbn FROM books WHERE isbn IS NOT NULL');
-        const isbnMap = new Map(allExistingBooks.map(b => [b.isbn.trim(), b.id]));
-
-        for (const item of books) {
-            const title = (item.title || item.name || item['Tên sách'] || item['Tên đầu sách'] || '').toString().trim();
-            if (!title) continue;
-
-            const authorName = (item.author || item.author_name || item['Tác giả'] || '').toString().trim();
-            const categoryName = (item.category || item.category_name || item['Thể loại'] || '').toString().trim();
-            const publisherName = (item.publisher || item.publisher_name || item['Nhà xuất bản'] || item['NXB'] || '').toString().trim();
-            const isbn = (item.isbn || item['Mã ISBN'] || item['ISBN'] || '').toString().trim();
-            const publishedYear = parseInt(item.published_year || item['Năm xuất bản'] || item['Năm XB'] || new Date().getFullYear(), 10) || new Date().getFullYear();
-            const copiesCount = parseInt(item.total_copies || item.copies || item['Số lượng'] || item['Số bản sao'] || 1, 10) || 1;
-            const description = (item.description || item['Mô tả'] || 'Sách nhập từ file Excel').toString().trim();
-            const coverImage = (item.cover_image || item.cover || item['Hình ảnh'] || item['Ảnh bìa'] || '').toString().trim() || null;
-            const location = (item.location || item['Vị trí'] || item['Vị trí kho'] || item['Vị trí sách'] || '').toString().trim() || null;
-
-            // 1. Author lookup or insert
-            let authorId = null;
-            if (authorName) {
-                const aKey = authorName.toLowerCase().trim();
-                if (authorMap.has(aKey)) {
-                    authorId = authorMap.get(aKey);
-                } else {
-                    const [newAuthor] = await connection.execute('INSERT INTO authors (name) VALUES (?)', [authorName]);
-                    authorId = newAuthor.insertId;
-                    authorMap.set(aKey, authorId);
-                }
-            }
-
-            // 2. Category lookup or insert
-            let categoryId = null;
-            if (categoryName) {
-                const cKey = categoryName.toLowerCase().trim();
-                if (catMap.has(cKey)) {
-                    categoryId = catMap.get(cKey);
-                } else {
-                    const [newCat] = await connection.execute('INSERT INTO categories (name) VALUES (?)', [categoryName]);
-                    categoryId = newCat.insertId;
-                    catMap.set(cKey, categoryId);
-                }
-            }
-
-            // 3. Publisher lookup or insert
-            let publisherId = null;
-            if (publisherName) {
-                const pKey = publisherName.toLowerCase().trim();
-                if (pubMap.has(pKey)) {
-                    publisherId = pubMap.get(pKey);
-                } else {
-                    const [newPub] = await connection.execute('INSERT INTO publishers (name) VALUES (?)', [publisherName]);
-                    publisherId = newPub.insertId;
-                    pubMap.set(pKey, publisherId);
-                }
-            }
-
-            // 4. Check if Book with this ISBN already exists
-            let newBookId = null;
-            let isExisting = false;
-
-            if (isbn && isbnMap.has(isbn)) {
-                newBookId = isbnMap.get(isbn);
-                isExisting = true;
-                // Increase copies for existing book & update cover image if missing
-                await connection.execute(
-                    'UPDATE books SET total_copies = total_copies + ?, available_copies = available_copies + ?, cover_image = COALESCE(cover_image, ?) WHERE id = ?',
-                    [copiesCount, copiesCount, coverImage, newBookId]
-                );
-            }
-
-            if (!isExisting) {
-                // Generate a deterministic room-shelf-rack location if not provided
-                const fallbackRoom = `Phòng 0${((categoryId || 1) % 3) + 1} - Kệ 0${((importedCount * 2) % 6) + 1} - Ngăn 0${((importedCount * 3) % 4) + 1}`;
-                const bookLocation = location || fallbackRoom;
-
-                // Insert New Book
-                const [bookResult] = await connection.execute(
-                    `INSERT INTO books (title, author_id, publisher_id, category_id, isbn, published_year, description, cover_image, location, total_copies, available_copies)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-                    [title, authorId, publisherId, categoryId, isbn || null, publishedYear, description, coverImage, bookLocation, copiesCount, copiesCount]
-                );
-                newBookId = bookResult.insertId;
-                if (isbn) {
-                    isbnMap.set(isbn, newBookId);
-                }
-            }
-
-            importedCount++;
-
-            // 5. Generate Book Copies & unique QR
-            const [existingCopiesCount] = await connection.execute(
-                'SELECT COUNT(*) as count FROM book_copies WHERE book_id = ?',
-                [newBookId]
-            );
-            const startCopyIndex = (existingCopiesCount[0]?.count || 0) + 1;
-
-            for (let i = 0; i < copiesCount; i++) {
-                const copyNum = startCopyIndex + i;
-                const uniqueQR = `QR-BK-${newBookId}-${copyNum}`;
-                await connection.execute(
-                    'INSERT INTO book_copies (book_id, qr_code, status) VALUES (?, ?, "available")',
-                    [newBookId, uniqueQR]
-                );
-                totalCopiesGenerated++;
-            }
+        const before = await buildBookSnapshot(connection, bookId);
+        if (!before || before.status !== 'active') {
+            await connection.rollback();
+            return res.status(404).json({ message: 'Đầu sách không tồn tại hoặc đã được thanh lý trước đó' });
         }
 
-        // 6. Activity log
-        await connection.execute(
-            'INSERT INTO activity_logs (user_id, action, target_type, details) VALUES (?, ?, ?, ?)',
-            [userId, 'IMPORT_EXCEL', 'books', `Nhập ${importedCount} đầu sách (${totalCopiesGenerated} bản sao) từ file Excel`]
+        const [existingPending] = await connection.execute(
+            `SELECT br.id, br.request_code
+             FROM book_requests br
+             JOIN book_request_details brd ON brd.request_id = br.id
+             WHERE br.request_type = 'delete' AND br.status = 'pending' AND brd.book_id = ?
+             LIMIT 1`,
+            [bookId]
         );
+        if (existingPending.length > 0) {
+            await connection.rollback();
+            return res.status(409).json({
+                message: `Đầu sách «${before.title}» đã có phiếu đề xuất thanh lý ${existingPending[0].request_code} đang chờ Chủ thư viện duyệt.`,
+            });
+        }
+
+        const blockerCheck = await checkBookDisposalBlockers(connection, bookId);
+        if (blockerCheck.blocked) {
+            await connection.rollback();
+            return res.status(409).json({
+                message: blockerCheck.summary,
+                blockers: blockerCheck.blockers,
+            });
+        }
+
+        const request = await createWarehouseRequest(connection, {
+            requestType: 'delete',
+            title: `Đề xuất thanh lý «${before.title}» (${before.total_copies} bản sao)`,
+            reason: reason || 'Đề xuất thanh lý / ngừng lưu thông đầu sách theo kiểm kê kho',
+            requestedBy: userId,
+            bookId,
+            quantity: before.total_copies,
+            location: before.location,
+            payload: { book_id: bookId, disposal_status: disposalStatus },
+            before,
+            actionLog: 'PROPOSE_BOOK_DELETE',
+        });
 
         await connection.commit();
-
-        res.status(200).json({
-            message: `Nhập thành công ${importedCount} đầu sách với ${totalCopiesGenerated} bản sao và mã QR tương ứng!`,
-            importedCount,
-            totalCopiesGenerated
+        res.status(202).json({
+            requiresApproval: true,
+            message: `Đã gửi phiếu đề xuất thanh lý ${request.request_code} cho «${before.title}» chờ Chủ thư viện phê duyệt (không xóa cứng CSDL).`,
+            request,
         });
     } catch (error) {
         await connection.rollback();
-        console.error('Lỗi khi nhập sách từ Excel:', error);
-        res.status(500).json({ message: 'Lỗi server khi nhập sách từ Excel' });
+        console.error('Lỗi khi đề xuất xóa/thanh lý sách:', error);
+        res.status(500).json({ message: 'Lỗi server' });
+    } finally {
+        connection.release();
+    }
+};
+
+// Batch Import Books from Excel -> Maker proposal awaiting Owner review
+exports.importBooksBatch = async (req, res) => {
+    const { books, fileName, reason } = req.body;
+    const userId = req.user.id;
+
+    if (!books || !Array.isArray(books) || books.length === 0) {
+        return res.status(400).json({ message: 'Danh sách sách tải lên không hợp lệ hoặc rỗng' });
+    }
+
+    const { validRows, invalidRows } = validateExcelImportRows(books);
+    if (validRows.length === 0) {
+        return res.status(400).json({
+            message: 'Không có dòng sách hợp lệ trong file Excel để tạo phiếu nhập kho',
+            invalidRows,
+        });
+    }
+
+    const totalCopies = validRows.reduce((sum, item) => sum + (Number(item.total_copies) || 1), 0);
+    const cleanFileName = String(fileName || 'Excel batch').trim();
+
+    const connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    try {
+        const request = await createWarehouseRequest(connection, {
+            requestType: 'import',
+            title: `Nhập Excel (${validRows.length} đầu sách • ${totalCopies} bản sao)`,
+            reason: reason || `Đề xuất nhập kho hàng loạt từ file "${cleanFileName}"`,
+            requestedBy: userId,
+            quantity: totalCopies,
+            location: 'Theo cấu hình từng dòng Excel',
+            payload: {
+                fileName: cleanFileName,
+                validCount: validRows.length,
+                invalidCount: invalidRows.length,
+                totalCopies,
+                rows: validRows,
+            },
+            before: { fileName: cleanFileName, validCount: validRows.length, invalidCount: invalidRows.length },
+            actionLog: 'PROPOSE_BOOK_IMPORT',
+        });
+
+        await connection.commit();
+
+        res.status(202).json({
+            requiresApproval: true,
+            message: `Đã tạo phiếu nhập Excel ${request.request_code} (${validRows.length} đầu sách hợp lệ / ${totalCopies} bản sao) chờ Chủ thư viện duyệt!`,
+            request,
+            validCount: validRows.length,
+            invalidCount: invalidRows.length,
+        });
+    } catch (error) {
+        await connection.rollback();
+        console.error('Lỗi khi tạo phiếu nhập sách từ Excel:', error);
+        res.status(500).json({ message: 'Lỗi server khi tạo phiếu nhập sách từ Excel' });
     } finally {
         connection.release();
     }
@@ -403,18 +617,6 @@ exports.importBooksBatch = async (req, res) => {
 // =============================================================================
 // KIỂM KÊ KHO SÁCH NHANH BẰNG QUÉT QR HÀNG LOẠT (SMART SHELF INVENTORY AUDIT)
 // =============================================================================
-
-function normalizeLocationString(raw) {
-    const str = String(raw || 'Phòng 01 - Kệ 01 - Ngăn 01').trim();
-    const roomMatch = str.match(/Ph[oò]ng\s*(\d+)/i);
-    const shelfMatch = str.match(/K[eệ]\s*(\d+)/i);
-    const rackMatch = str.match(/Ng[aă]n\s*(\d+)/i);
-    const pad2 = (n) => String(Math.max(1, n)).padStart(2, '0');
-    const r = roomMatch ? parseInt(roomMatch[1], 10) || 1 : 1;
-    const s = shelfMatch ? parseInt(shelfMatch[1], 10) || 1 : 1;
-    const k = rackMatch ? parseInt(rackMatch[1], 10) || 1 : 1;
-    return `Phòng ${pad2(r)} - Kệ ${pad2(s)} - Ngăn ${pad2(k)}`;
-}
 
 // GET /api/books/shelf-audit/location?location=Phòng 01 - Kệ 02 - Ngăn 01
 exports.getShelfAuditData = async (req, res) => {
@@ -432,7 +634,7 @@ exports.getShelfAuditData = async (req, res) => {
                    br.id as active_borrow_id, u.full_name as borrower_name, u.card_number as borrower_card_number,
                    di.id as active_draft_item_id, d.draft_code as active_draft_code, du.full_name as draft_reader_name
             FROM book_copies bc
-            JOIN books b ON bc.book_id = b.id
+            JOIN books b ON bc.book_id = b.id AND COALESCE(b.status, 'active') = 'active'
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN categories c ON b.category_id = c.id
             LEFT JOIN borrow_records br ON bc.id = br.book_copy_id AND br.status = 'borrowing'
@@ -542,7 +744,7 @@ exports.scanCopyForShelfAudit = async (req, res) => {
                    a.name as author_name, c.name as category_name,
                    br.id as active_borrow_id, u.full_name as borrower_name, u.card_number as borrower_card_number
             FROM book_copies bc
-            JOIN books b ON bc.book_id = b.id
+            JOIN books b ON bc.book_id = b.id AND COALESCE(b.status, 'active') = 'active'
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN categories c ON b.category_id = c.id
             LEFT JOIN borrow_records br ON bc.id = br.book_copy_id AND br.status = 'borrowing'
@@ -602,8 +804,11 @@ exports.scanCopyForShelfAudit = async (req, res) => {
 // =============================================================================
 exports.restockBookCopies = async (req, res) => {
     const bookId = parseInt(req.params.id, 10);
-    const additionalCopies = Math.max(1, Math.min(50, parseInt(req.body.additionalCopies, 10) || 1));
+    const rawQty = parseInt(req.body.additionalCopies ?? req.body.quantity, 10);
+    const additionalCopies = Math.max(1, Math.min(500, Number.isInteger(rawQty) ? rawQty : 1));
     const userId = req.user?.id || null;
+    const reason = String(req.body.reason || '').trim();
+    const location = req.body.location ? normalizeLocationString(req.body.location) : null;
 
     if (!bookId) {
         return res.status(400).json({ message: 'ID đầu sách không hợp lệ' });
@@ -613,85 +818,39 @@ exports.restockBookCopies = async (req, res) => {
     await connection.beginTransaction();
 
     try {
-        const [books] = await connection.execute(
-            'SELECT id, title, total_copies, available_copies, location FROM books WHERE id = ? FOR UPDATE',
-            [bookId]
-        );
-
-        if (books.length === 0) {
+        const before = await buildBookSnapshot(connection, bookId);
+        if (!before || before.status !== 'active') {
             await connection.rollback();
             return res.status(404).json({ message: 'Không tìm thấy đầu sách cần nhập bổ sung' });
         }
 
-        const book = books[0];
-
-        // Tìm chỉ số bản sao hiện tại để sinh mã QR tiếp theo (QR-BK-{id}-{n})
-        const [existingCopies] = await connection.execute(
-            'SELECT qr_code FROM book_copies WHERE book_id = ?',
-            [bookId]
-        );
-
-        let maxSeq = existingCopies.length;
-        for (const c of existingCopies) {
-            const m = String(c.qr_code || '').match(/(\d+)$/);
-            if (m) {
-                const n = parseInt(m[1], 10);
-                if (n > maxSeq && n < 10000) maxSeq = n;
-            }
-        }
-
-        const generatedQrCodes = [];
-        for (let i = 1; i <= additionalCopies; i++) {
-            const seq = maxSeq + i;
-            const qrCode = `QR-BK-${bookId}-${seq}`;
-            await connection.execute(
-                'INSERT INTO book_copies (book_id, qr_code, status) VALUES (?, ?, "available")',
-                [bookId, qrCode]
-            );
-            generatedQrCodes.push(qrCode);
-        }
-
-        await connection.execute(
-            'UPDATE books SET total_copies = total_copies + ?, available_copies = available_copies + ? WHERE id = ?',
-            [additionalCopies, additionalCopies, bookId]
-        );
-
-        if (userId) {
-            await connection.execute(
-                'INSERT INTO activity_logs (user_id, action, target_type, details) VALUES (?, ?, ?, ?)',
-                [
-                    userId,
-                    'SMART_RESTOCK',
-                    'books',
-                    `Nhập bổ sung +${additionalCopies} bản sao cho «${book.title}» (${generatedQrCodes.join(', ')})`
-                ]
-            );
-        }
+        const targetLoc = location || before.location;
+        const request = await createWarehouseRequest(connection, {
+            requestType: 'restock',
+            title: `Nhập bổ sung +${additionalCopies} bản sao «${before.title}»`,
+            reason: reason || `Đề xuất nhập bổ sung +${additionalCopies} bản sao theo cảnh báo nhu cầu cao`,
+            requestedBy: userId,
+            bookId,
+            quantity: additionalCopies,
+            location: targetLoc,
+            payload: { book_id: bookId, additionalCopies, location: targetLoc },
+            before,
+            actionLog: 'PROPOSE_BOOK_RESTOCK',
+        });
 
         await connection.commit();
 
-        // Tự động đồng bộ hàng đợi đặt trước nếu có độc giả đang chờ cuốn sách này
-        try {
-            const { syncWaitingReservationsWithStock } = require('./reservationController');
-            if (typeof syncWaitingReservationsWithStock === 'function') {
-                await syncWaitingReservationsWithStock(bookId);
-            }
-        } catch (syncErr) {
-            // Non-blocking
-        }
-
-        res.status(200).json({
-            message: `Đã nhập bổ sung +${additionalCopies} bản sao mới cho «${book.title}» (${generatedQrCodes.join(', ')})!`,
+        res.status(202).json({
+            requiresApproval: true,
+            message: `Đã gửi phiếu đề xuất ${request.request_code} (+${additionalCopies} bản sao cho «${before.title}») chờ Chủ thư viện phê duyệt!`,
+            request,
             bookId,
-            title: book.title,
-            addedCopies: additionalCopies,
-            newTotalCopies: Number(book.total_copies) + additionalCopies,
-            generatedQrCodes
+            title: before.title,
         });
     } catch (error) {
         await connection.rollback();
-        console.error('Lỗi khi nhập bổ sung bản sao sách:', error);
-        res.status(500).json({ message: 'Lỗi server khi nhập bổ sung bản sao sách' });
+        console.error('Lỗi khi tạo phiếu nhập bổ sung bản sao:', error);
+        res.status(500).json({ message: 'Lỗi server khi tạo phiếu nhập bổ sung bản sao sách' });
     } finally {
         connection.release();
     }

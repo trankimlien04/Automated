@@ -19,10 +19,10 @@ export function KioskToolsView() {
     <div className="space-y-6 max-w-5xl mx-auto">
       <div>
         <h2 className="text-xl font-bold tracking-tight text-foreground">
-          Trạm Kiosk Tự Phục Vụ & Kiểm Soát An Ninh
+          Hòm Trả Sách 24/7 & Tra Cứu Chứng Từ Mượn
         </h2>
         <p className="text-xs text-muted-foreground mt-0.5">
-          Quản lý các trạm thiết bị vật lý đặt tại cửa thư viện: Hòm trả sách 24/7 ngoài giờ và Cổng kiểm soát lối ra.
+          Hỗ trợ tiếp nhận & kiểm kê sách trả ngoài giờ 24/7 và tra cứu, đối soát minh chứng Phiếu mượn chính thức (PM-BRW-...) khi cần thiết.
         </p>
       </div>
 
@@ -71,15 +71,15 @@ export function KioskToolsView() {
           </CardContent>
         </Card>
 
-        {/* Card 3: Đối soát Phiếu mượn tại cổng */}
+        {/* Card 3: Tra cứu & Đối soát Phiếu mượn */}
         <Card className="border-border hover:border-primary/40 transition-all shadow-xs flex flex-col justify-between">
           <CardHeader className="pb-3">
             <div className="h-10 w-10 rounded-xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center mb-2">
               <ShieldCheck className="h-5 w-5" />
             </div>
-            <CardTitle className="text-base font-bold">Đối Soát Phiếu Mượn & Cổng Ra</CardTitle>
+            <CardTitle className="text-base font-bold">Tra Cứu & Đối Soát Phiếu Mượn</CardTitle>
             <CardDescription className="text-xs">
-              Màn hình trạm quét đối soát tại lối ra: Quét mã QR Phiếu mượn chính thức (PM-BRW-...) hoặc Thẻ độc giả để kiểm tra sách mang ra khỏi thư viện.
+              Quét mã QR Phiếu mượn chính thức (PM-BRW-...) hoặc Thẻ độc giả để kiểm tra đối chiếu minh chứng mượn sách hợp lệ khi cần thiết.
             </CardDescription>
           </CardHeader>
           <CardContent className="pt-0">
@@ -87,7 +87,7 @@ export function KioskToolsView() {
               onClick={() => setSecurityExitOpen(true)}
               className="w-full h-9 text-xs font-semibold gap-1.5 cursor-pointer bg-emerald-600 hover:bg-emerald-700 text-white"
             >
-              <span>Mở Trạm Đối Soát Phiếu Mượn</span>
+              <span>Mở Tra Cứu & Đối Soát Phiếu</span>
               <ArrowRight className="h-3.5 w-3.5" />
             </Button>
           </CardContent>

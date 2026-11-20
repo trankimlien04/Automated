@@ -5,11 +5,24 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Inbox, Camera, CheckCircle2, BookOpen, Upload, Image as ImageIcon, Trash2, Bell, Mail, ClipboardCheck
+  Inbox, Camera, CheckCircle2, BookOpen, Upload, Image as ImageIcon, Trash2, Bell, Mail, ClipboardCheck,
+  AlertTriangle, XCircle, Loader2, Clock
 } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/services/api";
+import { useAuth } from "@/contexts/AuthContext";
 import { Html5Qrcode } from "html5-qrcode";
+
+const extractNormalizedQr = (rawValue: string): string => {
+  let cleaned = (rawValue || "").trim();
+  if (cleaned.startsWith("{") && cleaned.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(cleaned);
+      cleaned = String(parsed.bookQrCode || parsed.qrCode || parsed.copyQr || parsed.code || cleaned).trim();
+    } catch {}
+  }
+  return cleaned;
+};
 
 interface SmartBookDropModalProps {
   open: boolean;
@@ -19,6 +32,7 @@ interface SmartBookDropModalProps {
 }
 
 export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingBooks = [] }: SmartBookDropModalProps) {
+  const { user } = useAuth();
   const [bookQrInput, setBookQrInput] = useState("");
   const [note, setNote] = useState("");
   const [proofImage, setProofImage] = useState<string>("");
@@ -27,9 +41,10 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
   const [isProofCameraActive, setIsProofCameraActive] = useState(false);
   const [receiptData, setReceiptData] = useState<any | null>(null);
 
-  // Live copy preview
+  // Live copy preview & validation
   const [checkingCopy, setCheckingCopy] = useState(false);
   const [copyPreview, setCopyPreview] = useState<any | null>(null);
+  const [copyLookupError, setCopyLookupError] = useState<string | null>(null);
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const proofFileInputRef = useRef<HTMLInputElement>(null);
@@ -148,6 +163,7 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
       setReceiptData(null);
       setBookQrInput("");
       setCopyPreview(null);
+      setCopyLookupError(null);
       setNote("");
       setProofImage("");
     } else {
@@ -156,33 +172,107 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
     }
   }, [open]);
 
+  const normalizedQr = extractNormalizedQr(bookQrInput);
+  const isReaderRole = user?.role === "reader";
+  const matchedBorrowedBook = myBorrowingBooks.find(
+    (b: any) => String(b.qr_code || "").trim().toUpperCase() === normalizedQr.toUpperCase()
+  );
+  const ownQrList = myBorrowingBooks.map((b: any) => b.qr_code).filter(Boolean);
+
   // Live search copy info when QR is entered
   useEffect(() => {
-    const raw = bookQrInput.trim();
-    if (!raw) {
+    if (!normalizedQr) {
+      setCheckingCopy(false);
       setCopyPreview(null);
+      setCopyLookupError(null);
       return;
     }
 
+    let cancelled = false;
+    setCopyPreview(null);
+    setCopyLookupError(null);
+    setCheckingCopy(true);
+
     const timer = setTimeout(async () => {
-      setCheckingCopy(true);
       try {
-        const res = await api.get(`/borrow/check-copy/${encodeURIComponent(raw)}`);
-        setCopyPreview(res.data);
-      } catch (e) {
-        setCopyPreview(null);
+        const res = await api.get(`/borrow/check-copy/${encodeURIComponent(normalizedQr)}`);
+        if (!cancelled) {
+          setCopyPreview(res.data);
+          setCopyLookupError(null);
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setCopyPreview(null);
+          setCopyLookupError(
+            e?.response?.data?.message || `Không thể xác minh mã QR [${normalizedQr}] trong hệ thống thư viện.`
+          );
+        }
       } finally {
-        setCheckingCopy(false);
+        if (!cancelled) {
+          setCheckingCopy(false);
+        }
       }
     }, 250);
 
-    return () => clearTimeout(timer);
-  }, [bookQrInput]);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [normalizedQr]);
+
+  const apiEligibility = copyPreview?.drop_box_eligibility;
+  const isCopyEligible = Boolean(
+    copyPreview &&
+      !checkingCopy &&
+      !copyLookupError &&
+      (typeof apiEligibility?.eligible === "boolean" ? apiEligibility.eligible : Boolean(copyPreview.is_already_borrowed && !copyPreview.is_drop_box_pending)) &&
+      (!isReaderRole || myBorrowingBooks.length === 0 || Boolean(matchedBorrowedBook))
+  );
+
+  const isAlreadyPendingInDropBox = Boolean(
+    apiEligibility?.reason_code === "ALREADY_IN_DROP_BOX" || copyPreview?.is_drop_box_pending
+  );
+
+  const invalidCopyReason = (() => {
+    if (copyLookupError) return copyLookupError;
+    if (!copyPreview || isCopyEligible) return null;
+    if (apiEligibility?.reason && apiEligibility?.eligible === false) {
+      return apiEligibility.reason;
+    }
+    if (isReaderRole && myBorrowingBooks.length > 0 && !matchedBorrowedBook) {
+      return `Mã bản sao [${copyPreview.qr_code || normalizedQr}] không khớp với sách bạn đang mượn (${ownQrList.join(", ")}).`;
+    }
+    return `Mã bản sao [${copyPreview.qr_code || normalizedQr}] hiện không hợp lệ để ghi nhận trả qua Hòm 24/7.`;
+  })();
+
+  const suggestedCorrectQr: string | null = (() => {
+    if (!isReaderRole || isCopyEligible) return null;
+    if (apiEligibility?.same_book_qr_code) return apiEligibility.same_book_qr_code;
+    if (copyPreview?.book_id) {
+      const sameTitleBorrow = myBorrowingBooks.find((b: any) => {
+        const bBookId = b.book_id ?? b.book_real_id;
+        if (bBookId !== undefined && Number(bBookId) === Number(copyPreview.book_id)) return true;
+        return String(b.book_title || "").trim().toLowerCase() === String(copyPreview.book_title || "").trim().toLowerCase();
+      });
+      if (sameTitleBorrow?.qr_code) return sameTitleBorrow.qr_code;
+    }
+    if (myBorrowingBooks.length === 1 && myBorrowingBooks[0]?.qr_code) {
+      return myBorrowingBooks[0].qr_code;
+    }
+    return null;
+  })();
 
   const handleSubmitDrop = async () => {
-    const rawQr = bookQrInput.trim();
-    if (!rawQr) {
+    if (!normalizedQr) {
       toast.error("Vui lòng nhập hoặc quét mã QR trên gáy sách");
+      return;
+    }
+    if (checkingCopy) {
+      toast.info("Hệ thống đang kiểm tra mã QR bản sao, vui lòng chờ giây lát...");
+      return;
+    }
+    if (!isCopyEligible) {
+      toast.error(invalidCopyReason || "Mã QR sách không hợp lệ để ghi nhận trả qua Hòm 24/7");
       return;
     }
     if (!proofImage) {
@@ -193,7 +283,7 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
     setIsSubmitting(true);
     try {
       const res = await api.post("/borrow/drop-box-return", {
-        bookQrCode: rawQr,
+        bookQrCode: normalizedQr,
         note: note.trim() || "Độc giả gửi sách vào hòm trả ngoài giờ (Có ảnh minh chứng)",
         proofImage
       });
@@ -355,6 +445,8 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
                 onClick={() => {
                   setReceiptData(null);
                   setBookQrInput("");
+                  setCopyPreview(null);
+                  setCopyLookupError(null);
                   setNote("");
                   setProofImage("");
                 }}
@@ -366,6 +458,15 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
           ) : (
             /* Form Input */
             <div className="space-y-4">
+              {isReaderRole && myBorrowingBooks.length === 0 && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    Hiện tại bạn không có cuốn sách nào ở trạng thái đang mượn cần trả qua Hòm 24/7.
+                  </span>
+                </div>
+              )}
+
               {/* Quick Select from User's Currently Borrowed Books */}
               {myBorrowingBooks.length > 0 && (
                 <div className="space-y-2">
@@ -373,27 +474,30 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
                     Chọn nhanh từ sách bạn đang mượn ({myBorrowingBooks.length} cuốn):
                   </label>
                   <div className="grid grid-cols-1 gap-2 max-h-36 overflow-y-auto pr-1">
-                    {myBorrowingBooks.map((b: any) => (
-                      <div
-                        key={b.id}
-                        onClick={() => setBookQrInput(b.qr_code)}
-                        className={`p-2.5 rounded-xl border text-xs cursor-pointer transition-all flex items-center justify-between ${
-                          bookQrInput === b.qr_code
-                            ? "border-sky-500 bg-sky-50 text-sky-950 font-bold shadow-xs"
-                            : "bg-slate-50 hover:bg-slate-100 text-slate-700"
-                        }`}
-                      >
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate">{b.book_title}</p>
-                          <p className="text-[10px] text-muted-foreground font-mono">
-                            Mã: {b.qr_code} • Hạn: {new Date(b.due_date).toLocaleDateString("vi-VN")}
-                          </p>
+                    {myBorrowingBooks.map((b: any) => {
+                      const isSelected = normalizedQr.toUpperCase() === String(b.qr_code || "").trim().toUpperCase();
+                      return (
+                        <div
+                          key={b.id}
+                          onClick={() => setBookQrInput(b.qr_code)}
+                          className={`p-2.5 rounded-xl border text-xs cursor-pointer transition-all flex items-center justify-between ${
+                            isSelected
+                              ? "border-sky-500 bg-sky-50 text-sky-950 font-bold shadow-xs"
+                              : "bg-slate-50 hover:bg-slate-100 text-slate-700"
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate">{b.book_title}</p>
+                            <p className="text-[10px] text-muted-foreground font-mono">
+                              Mã: {b.qr_code} • Hạn: {new Date(b.due_date).toLocaleDateString("vi-VN")}
+                            </p>
+                          </div>
+                          {isSelected && (
+                            <Badge className="bg-sky-600 text-white text-[10px] ml-2">Đã chọn</Badge>
+                          )}
                         </div>
-                        {bookQrInput === b.qr_code && (
-                          <Badge className="bg-sky-600 text-white text-[10px] ml-2">Đã chọn</Badge>
-                        )}
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -463,22 +567,111 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
                 </div>
               )}
 
-              {/* Copy preview */}
-              {copyPreview && (
-                <div className="p-3 rounded-xl bg-sky-50 border border-sky-200 text-xs flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-sky-600 text-white flex items-center justify-center shrink-0">
+              {/* Live Copy Validation & Preview */}
+              {checkingCopy && (
+                <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 text-xs flex items-center gap-2.5 text-slate-600">
+                  <Loader2 className="w-4 h-4 animate-spin text-sky-600 shrink-0" />
+                  <span>Đang kiểm tra tính hợp lệ của mã QR bản sao...</span>
+                </div>
+              )}
+
+              {!checkingCopy && copyLookupError && (
+                <div className="p-3 rounded-xl bg-red-50 border border-red-300 text-xs flex items-start gap-3">
+                  <div className="w-9 h-9 rounded-lg bg-red-600 text-white flex items-center justify-center shrink-0">
+                    <XCircle className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <Badge variant="destructive" className="text-[10px]">
+                      Mã QR không hợp lệ
+                    </Badge>
+                    <p className="text-red-900 font-medium leading-relaxed">{copyLookupError}</p>
+                    {suggestedCorrectQr && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setBookQrInput(suggestedCorrectQr)}
+                        className="h-7 text-[11px] border-red-300 bg-white text-red-800 hover:bg-red-100 mt-1"
+                      >
+                        Chọn đúng mã đang mượn: {suggestedCorrectQr}
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {!checkingCopy && copyPreview && isCopyEligible && (
+                <div className="p-3 rounded-xl bg-emerald-50/80 border border-emerald-300 text-xs flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-emerald-600 text-white flex items-center justify-center shrink-0">
                     <BookOpen className="w-5 h-5" />
                   </div>
                   <div className="min-w-0 flex-1">
-                    <Badge variant="outline" className="text-sky-700 border-sky-300 text-[10px] mb-1">
-                      Xác nhận sách hợp lệ
+                    <Badge variant="outline" className="text-emerald-800 border-emerald-400 bg-white text-[10px] mb-1">
+                      ✓ {isReaderRole ? "Hợp lệ — Khớp sách bạn đang mượn" : "Hợp lệ — Sẵn sàng trả Hòm 24/7"}
                     </Badge>
                     <h4 className="font-bold text-slate-900 truncate">
-                      {copyPreview.title}
+                      {copyPreview.book_title || copyPreview.title}
                     </h4>
                     <p className="text-[11px] text-slate-600 font-mono mt-0.5">
                       Mã: {copyPreview.qr_code} • {copyPreview.location || "Khu vực lưu kho"}
+                      {(matchedBorrowedBook?.due_date || copyPreview.due_date)
+                        ? ` • Hạn: ${new Date(matchedBorrowedBook?.due_date || copyPreview.due_date).toLocaleDateString("vi-VN")}`
+                        : ""}
                     </p>
+                  </div>
+                </div>
+              )}
+
+              {!checkingCopy && copyPreview && !isCopyEligible && (
+                <div
+                  className={`p-3 rounded-xl border text-xs flex items-start gap-3 ${
+                    isAlreadyPendingInDropBox
+                      ? "bg-amber-50 border-amber-300"
+                      : "bg-red-50 border-red-300"
+                  }`}
+                >
+                  <div
+                    className={`w-9 h-9 rounded-lg text-white flex items-center justify-center shrink-0 ${
+                      isAlreadyPendingInDropBox ? "bg-amber-600" : "bg-red-600"
+                    }`}
+                  >
+                    {isAlreadyPendingInDropBox ? <Clock className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+                  </div>
+                  <div className="min-w-0 flex-1 space-y-1">
+                    <Badge
+                      variant={isAlreadyPendingInDropBox ? "outline" : "destructive"}
+                      className={`text-[10px] ${
+                        isAlreadyPendingInDropBox ? "border-amber-400 bg-white text-amber-800" : ""
+                      }`}
+                    >
+                      {isAlreadyPendingInDropBox
+                        ? "Sách đang chờ Thủ thư đối soát"
+                        : "Không hợp lệ — Sai mã bản sao trả"}
+                    </Badge>
+                    <h4 className="font-bold text-slate-900 truncate">
+                      {copyPreview.book_title || copyPreview.title}
+                    </h4>
+                    <p className="text-[11px] text-slate-600 font-mono">
+                      Mã vừa nhập: {copyPreview.qr_code} • {copyPreview.location || "Khu vực lưu kho"}
+                    </p>
+                    <p
+                      className={`leading-relaxed font-medium ${
+                        isAlreadyPendingInDropBox ? "text-amber-900" : "text-red-900"
+                      }`}
+                    >
+                      {invalidCopyReason}
+                    </p>
+                    {suggestedCorrectQr && (
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => setBookQrInput(suggestedCorrectQr)}
+                        className="h-7 text-[11px] border-red-300 bg-white text-red-800 hover:bg-red-100 mt-1"
+                      >
+                        Chuyển sang đúng mã đang mượn: {suggestedCorrectQr}
+                      </Button>
+                    )}
                   </div>
                 </div>
               )}
@@ -602,12 +795,18 @@ export function SmartBookDropModal({ open, onOpenChange, onSuccess, myBorrowingB
 
               <Button
                 onClick={handleSubmitDrop}
-                disabled={isSubmitting || !bookQrInput.trim() || !proofImage}
+                disabled={isSubmitting || checkingCopy || !normalizedQr || !isCopyEligible || !proofImage}
                 className="w-full h-11 bg-sky-600 hover:bg-sky-700 text-white font-bold text-sm shadow-md gap-2"
               >
                 <Inbox className="w-4 h-4" />
                 {isSubmitting
                   ? "Đang ghi nhận..."
+                  : !normalizedQr
+                  ? "Vui lòng chọn hoặc quét mã QR sách cần trả"
+                  : checkingCopy
+                  ? "Đang kiểm tra mã QR sách..."
+                  : !isCopyEligible
+                  ? "Mã QR sách không hợp lệ để trả"
                   : !proofImage
                   ? "Vui lòng đính kèm ảnh minh chứng để xác nhận"
                   : "Xác nhận gửi sách vào hòm ngoài giờ"}

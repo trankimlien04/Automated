@@ -2,7 +2,7 @@ node_modules
 dist
 npm-debug.log
 .env
-.env.local
+.env.*
 .git
 .gitignore
 *.md

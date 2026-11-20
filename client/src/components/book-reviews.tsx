@@ -17,6 +17,7 @@ interface Review {
   created_at: string;
   user_name?: string;
   avatar_url?: string | null;
+  is_verified_reader?: number | boolean;
 }
 
 interface BookReviewsProps {
@@ -278,6 +279,12 @@ export default function BookReviews({ bookId, bookTitle, onRatingUpdated }: Book
                         </AvatarFallback>
                       </Avatar>
                       <span className="font-semibold text-foreground">{rev.user_name || "Độc giả ẩn danh"}</span>
+                      {Boolean(rev.is_verified_reader) && (
+                        <Badge variant="outline" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 text-[9px] py-0 px-1.5 font-medium flex items-center gap-0.5">
+                          <CheckCircle2 className="h-2.5 w-2.5 text-emerald-600" />
+                          Đã mượn sách
+                        </Badge>
+                      )}
                       {isOwner && (
                         <Badge variant="outline" className="text-[9px] py-0 px-1.5 text-primary border-primary/30">
                           Bạn

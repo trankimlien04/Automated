@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 import { Badge } from "@/components/ui/badge";
 import { 
@@ -20,7 +20,8 @@ import {
   Crown,
   History,
   Check,
-  X
+  X,
+  ClipboardCheck
 } from "lucide-react";
 import {
   Dialog,
@@ -69,6 +70,7 @@ const CONFIG_LABELS: Record<string, { label: string; unit: string }> = {
 };
 
 export default function SettingsPage() {
+  const navigate = useNavigate();
   const { user } = useAuth();
   const [configs, setConfigs] = useState<ConfigMap>({});
   const [requests, setRequests] = useState<ConfigRequest[]>([]);
@@ -211,16 +213,27 @@ export default function SettingsPage() {
                   </Badge>
                 </div>
                 <p className="text-sm text-muted-foreground mt-0.5 max-w-2xl">
-                  Bạn có thẩm quyền cao nhất để phê duyệt hoặc từ chối các đề xuất thay đổi chính sách vận hành (mức phạt, hạn mượn, giới hạn sách). Mọi thay đổi đều được ghi vết kiểm toán.
+                  Bạn có thẩm quyền cao nhất để phê duyệt hoặc từ chối các đề xuất thay đổi chính sách vận hành (kỷ luật mượn, hạn mượn, giới hạn sách). Mọi thay đổi đều được lưu vết trong nhật ký hệ thống.
                 </p>
               </div>
             </div>
-            {pendingRequests.length > 0 && (
-              <div className="flex items-center gap-2 rounded-lg bg-warning/15 border border-warning/30 px-3.5 py-2 text-warning font-medium text-xs whitespace-nowrap">
-                <AlertCircle className="h-4 w-4" />
-                <span>Có {pendingRequests.length} đề xuất đang chờ bạn phê duyệt</span>
-              </div>
-            )}
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {pendingRequests.length > 0 && (
+                <div className="flex items-center gap-2 rounded-lg bg-warning/15 border border-warning/30 px-3.5 py-2 text-warning font-medium text-xs whitespace-nowrap">
+                  <AlertCircle className="h-4 w-4" />
+                  <span>Có {pendingRequests.length} đề xuất quy chế chờ duyệt</span>
+                </div>
+              )}
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => navigate("/book-requests")}
+                className="text-xs gap-1.5 bg-background border-primary/30 text-primary hover:bg-primary/10 font-semibold"
+              >
+                <ClipboardCheck className="h-3.5 w-3.5" /> Nhóm 2: Phê duyệt Kho sách
+              </Button>
+            </div>
           </div>
         </div>
       )}
@@ -285,19 +298,23 @@ export default function SettingsPage() {
             <Separator />
 
             <div className="space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <div>
                   <Label className="font-medium text-xs">Khóa mượn đa nguyên nhân (Quá hạn / Tạm ngưng / Chờ khắc phục)</Label>
                   <p className="text-[10px] text-muted-foreground">Quản lý độc lập từng nguyên nhân; chỉ mở quyền mượn khi không còn điều kiện hạn chế nào</p>
                 </div>
-                <Switch defaultChecked disabled={!isOwner && !isAdmin} />
+                <Badge variant="outline" className="bg-success/10 text-success border-success/30 shrink-0">
+                  Đang bật
+                </Badge>
               </div>
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-3">
                 <div>
                   <Label className="font-medium text-xs">Gửi email & thông báo nhắc nhở trả sách</Label>
-                  <p className="text-[10px] text-muted-foreground">Tự động kích hoạt thông báo in-app trước thời hạn 2 ngày</p>
+                  <p className="text-[10px] text-muted-foreground">Tự động kích hoạt thông báo in-app &amp; email thực tế trước thời hạn 2 ngày (Cron 08:00 • Asia/Ho_Chi_Minh)</p>
                 </div>
-                <Switch defaultChecked disabled={!isOwner && !isAdmin} />
+                <Badge variant="outline" className="bg-primary/10 text-primary border-primary/30 shrink-0">
+                  Tự động hằng ngày
+                </Badge>
               </div>
             </div>
           </CardContent>
@@ -322,7 +339,7 @@ export default function SettingsPage() {
               <Badge variant="outline">Mặc định</Badge>
             </div>
             <div className="flex items-center justify-between">
-              <span>Ghi nhật ký kiểm toán (Audit Trail)</span>
+              <span>Ghi nhật ký hoạt động hệ thống</span>
               <Badge variant="outline" className="bg-primary/10 text-primary">
                 100% Thao tác
               </Badge>
@@ -369,7 +386,7 @@ export default function SettingsPage() {
                 <thead>
                   <tr className="border-b text-left text-muted-foreground">
                     <th className="py-2.5 px-3 font-medium">Tham số</th>
-                    <th className="py-2.5 px-3 font-medium">Giá trị cũ $\rightarrow$ Mới</th>
+                    <th className="py-2.5 px-3 font-medium">Giá trị cũ → Mới</th>
                     <th className="py-2.5 px-3 font-medium">Lý do đề xuất</th>
                     <th className="py-2.5 px-3 font-medium">Người gửi</th>
                     <th className="py-2.5 px-3 font-medium">Trạng thái</th>
@@ -386,7 +403,7 @@ export default function SettingsPage() {
                       </td>
                       <td className="py-3 px-3">
                         <span className="text-muted-foreground line-through mr-1.5">{req.current_value || "Mặc định"}</span>
-                        $\rightarrow$
+                        →
                         <span className="font-bold text-foreground ml-1.5">{req.proposed_value}</span>
                       </td>
                       <td className="py-3 px-3 max-w-[200px] truncate" title={req.reason}>
@@ -561,7 +578,7 @@ export default function SettingsPage() {
                   <span className="text-muted-foreground">Điều chỉnh:</span>
                   <span>
                     <span className="line-through text-muted-foreground mr-1">{activeRequest.current_value}</span>
-                    $\rightarrow$ <span className="font-bold text-primary">{activeRequest.proposed_value}</span>
+                    → <span className="font-bold text-primary">{activeRequest.proposed_value}</span>
                   </span>
                 </div>
                 <div className="flex justify-between">

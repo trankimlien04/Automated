@@ -5,20 +5,33 @@ on:
     branches:
       - main
       - master
+      - develop
       - 'feature/**'
   pull_request:
     branches:
       - main
       - master
+      - develop
   workflow_dispatch:
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   # ========================================================
-  # JOB 1: Backend Check & Verification
+  # JOB 1: Backend Syntax Verification & Automated Tests
   # ========================================================
   server-ci:
-    name: Backend Lint & Syntax Verification
+    name: Backend Syntax & Automated Tests
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
 
     steps:
       - name: Checkout Source Code
@@ -32,24 +45,23 @@ jobs:
           cache-dependency-path: server/package-lock.json
 
       - name: Install Server Dependencies
-        run: |
-          cd server
-          npm ci
+        run: npm ci
 
-      - name: Validate Backend Code Syntax
-        run: |
-          cd server
-          node -c index.js
-          node -c config/db.js
-          node -c config/initDb.js
-          echo "Backend syntax validation passed successfully."
+      - name: Validate Syntax of All Backend JS Files
+        run: npm run lint:syntax
+
+      - name: Run Backend Unit & API Smoke Tests
+        run: npm test
 
   # ========================================================
-  # JOB 2: Frontend Build & Typecheck
+  # JOB 2: Frontend Typecheck, Lint & Production Bundle
   # ========================================================
   client-ci:
-    name: Frontend Build & Bundle Verification
+    name: Frontend Typecheck, Lint & Build
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
 
     steps:
       - name: Checkout Source Code
@@ -63,75 +75,266 @@ jobs:
           cache-dependency-path: client/package-lock.json
 
       - name: Install Frontend Dependencies
-        run: |
-          cd client
-          npm ci
+        run: npm ci
+
+      - name: Run TypeScript Typecheck
+        run: npm run typecheck
+
+      - name: Run ESLint Code Quality Check
+        run: npm run lint
 
       - name: Build Frontend Production Bundle
-        run: |
-          cd client
-          npm run build
+        run: npm run build
 
   # ========================================================
-  # JOB 3: Docker Build & Compose Verification
+  # JOB 3: Docker Build, Runtime E2E Smoke Test & GHCR Push
   # ========================================================
-  docker-build:
-    name: Docker Image Build & Validation
+  docker-ci:
+    name: Docker Build, E2E Smoke Test & Publish
     runs-on: ubuntu-latest
     needs: [server-ci, client-ci]
+    outputs:
+      server_image: ${{ steps.meta.outputs.server_image }}
+      client_image: ${{ steps.meta.outputs.client_image }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
 
     steps:
       - name: Checkout Source Code
         uses: actions/checkout@v4
 
+      - name: Prepare Normalized Container Metadata
+        id: meta
+        run: |
+          OWNER_LC=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "server_image=ghcr.io/${OWNER_LC}/automated-server" >> "$GITHUB_OUTPUT"
+          echo "client_image=ghcr.io/${OWNER_LC}/automated-client" >> "$GITHUB_OUTPUT"
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Verify Docker Compose Configuration
+      - name: Validate Docker Compose Configurations
         run: |
-          docker compose config
+          docker compose --env-file .env.example config --quiet
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env.example config --quiet
 
-      - name: Build Server Image
+      - name: Build Server Image for E2E Smoke Test
         uses: docker/build-push-action@v5
         with:
           context: ./server
           file: ./server/Dockerfile
+          load: true
           push: false
-          tags: smart-library-server:latest
+          tags: ${{ steps.meta.outputs.server_image }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha,scope=server
+          cache-to: type=gha,scope=server,mode=max
 
-      - name: Build Client Image
+      - name: Build Client Image for E2E Smoke Test
         uses: docker/build-push-action@v5
         with:
           context: ./client
           file: ./client/Dockerfile
+          load: true
           push: false
-          tags: smart-library-client:latest
+          tags: ${{ steps.meta.outputs.client_image }}:${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha,scope=client
+          cache-to: type=gha,scope=client,mode=max
+
+      - name: Start Full Stack & Run End-to-End Smoke Test
+        env:
+          SERVER_IMAGE: ${{ steps.meta.outputs.server_image }}:${{ steps.meta.outputs.image_tag }}
+          CLIENT_IMAGE: ${{ steps.meta.outputs.client_image }}:${{ steps.meta.outputs.image_tag }}
+        run: |
+          tr -d '\r' < .env.example > .env
+          sed -i 's/^DB_ROOT_PASSWORD=.*/DB_ROOT_PASSWORD=ci_root_password_2026/' .env
+          sed -i 's/^JWT_SECRET=.*/JWT_SECRET=ci_smoke_jwt_secret_2026/' .env
+
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build
+
+          echo "Waiting for Nginx -> Express -> MySQL stack to become healthy..."
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8088/api/health | grep -q '"success"'; then
+              echo "API health endpoint responded OK."
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "Timed out waiting for /api/health."
+              exit 1
+            fi
+            sleep 4
+          done
+
+          # Verify SPA serving & protected route guard
+          curl -fsS http://127.0.0.1:8088/ > /dev/null
+          UNAUTH_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8088/api/books)
+          if [ "$UNAUTH_CODE" != "401" ]; then
+            echo "Expected 401 on unauthenticated /api/books, got $UNAUTH_CODE"
+            exit 1
+          fi
+
+          # Verify MySQL schema + initDb seeding + bcrypt login + authenticated /api/books query
+          TOKEN=""
+          for i in $(seq 1 10); do
+            LOGIN_RES=$(curl -s -X POST http://127.0.0.1:8088/api/auth/login \
+              -H 'Content-Type: application/json' \
+              -d '{"email":"reader@library.com","password":"123456"}')
+            TOKEN=$(node -e "const d = JSON.parse(process.argv[1] || '{}'); process.stdout.write(d.token || '');" "$LOGIN_RES" 2>/dev/null || true)
+            if [ -n "$TOKEN" ]; then
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$TOKEN" ]; then
+            echo "Login smoke test failed to return JWT token."
+            exit 1
+          fi
+
+          BOOKS_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $TOKEN" \
+            http://127.0.0.1:8088/api/books)
+          if [ "$BOOKS_CODE" != "200" ]; then
+            echo "Expected 200 on authenticated /api/books, got $BOOKS_CODE"
+            exit 1
+          fi
+          echo "Docker Compose E2E smoke test passed (Nginx + Express + MySQL + Auth + Books)."
+
+      - name: Dump Container Diagnostics on Failure
+        if: failure()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=100
+
+      - name: Cleanup Smoke Test Containers
+        if: always()
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml down -v || true
+          rm -f .env
+
+      - name: Login to GitHub Container Registry (GHCR)
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push Tested Images to GHCR
+        if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          SERVER_IMAGE: ${{ steps.meta.outputs.server_image }}
+          CLIENT_IMAGE: ${{ steps.meta.outputs.client_image }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+        run: |
+          docker tag "${SERVER_IMAGE}:${IMAGE_TAG}" "${SERVER_IMAGE}:latest"
+          docker tag "${CLIENT_IMAGE}:${IMAGE_TAG}" "${CLIENT_IMAGE}:latest"
+          docker push "${SERVER_IMAGE}:${IMAGE_TAG}"
+          docker push "${SERVER_IMAGE}:latest"
+          docker push "${CLIENT_IMAGE}:${IMAGE_TAG}"
+          docker push "${CLIENT_IMAGE}:latest"
 
   # ========================================================
-  # JOB 4: Automated Deployment (CD to VPS / Server)
+  # JOB 4: Automated Production Deployment (VPS via GHCR)
   # ========================================================
   deploy:
     name: Deploy to Production Server
     runs-on: ubuntu-latest
-    needs: [docker-build]
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    needs: [docker-ci]
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
 
     steps:
-      - name: Deploy to Remote Server via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        if: "${{ env.SSH_HOST != '' }}"
+      - name: Check Deployment Configuration
+        id: check
         env:
           SSH_HOST: ${{ secrets.SERVER_HOST }}
+          SSH_USER: ${{ secrets.SERVER_USER }}
+          SSH_KEY: ${{ secrets.SERVER_SSH_KEY }}
+        run: |
+          if [ -n "$SSH_HOST" ] && [ -n "$SSH_USER" ] && [ -n "$SSH_KEY" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Report Published Images When VPS Secrets Are Not Configured
+        if: steps.check.outputs.ready != 'true'
+        run: |
+          {
+            echo "### Docker Images Published to GHCR (VPS SSH Deploy Not Configured)"
+            echo "- Server image: \`${{ needs.docker-ci.outputs.server_image }}:${{ needs.docker-ci.outputs.image_tag }}\`"
+            echo "- Client image: \`${{ needs.docker-ci.outputs.client_image }}:${{ needs.docker-ci.outputs.image_tag }}\`"
+            echo ""
+            echo "To enable automatic VPS deployment on push to \`main\`/\`master\`, configure Repository Secrets:"
+            echo "- \`SERVER_HOST\`"
+            echo "- \`SERVER_USER\`"
+            echo "- \`SERVER_SSH_KEY\`"
+            echo "- *(Optional)* \`SERVER_PORT\` (default: \`22\`) & \`DEPLOY_PATH\` (default: \`/opt/smart-library\` or \`~/smart-library\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deploy Pre-Built GHCR Images to Remote Server
+        if: steps.check.outputs.ready == 'true'
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GHCR_USER: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SERVER_IMAGE: ${{ needs.docker-ci.outputs.server_image }}:${{ needs.docker-ci.outputs.image_tag }}
+          CLIENT_IMAGE: ${{ needs.docker-ci.outputs.client_image }}:${{ needs.docker-ci.outputs.image_tag }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || 22 }}
+          envs: GHCR_USER,GHCR_TOKEN,SERVER_IMAGE,CLIENT_IMAGE,BRANCH_NAME,DEPLOY_PATH
           script: |
-            echo "Starting deployment on production server..."
-            cd /opt/smart-library || cd ~/smart-library
-            git pull origin main || git pull origin master
-            docker compose down
-            docker compose up -d --build
-            docker compose ps
-            echo "Smart Library 4.0 successfully deployed!"
+            set -euo pipefail
+            echo "Starting Smart Library deployment..."
+
+            TARGET_DIR=""
+            if [ -n "${DEPLOY_PATH:-}" ] && [ -d "$DEPLOY_PATH" ]; then
+              TARGET_DIR="$DEPLOY_PATH"
+            elif [ -d /opt/smart-library ]; then
+              TARGET_DIR="/opt/smart-library"
+            elif [ -d "$HOME/smart-library" ]; then
+              TARGET_DIR="$HOME/smart-library"
+            else
+              echo "[ERROR] Deployment directory not found (/opt/smart-library or ~/smart-library)."
+              exit 1
+            fi
+
+            cd "$TARGET_DIR"
+            git fetch origin "$BRANCH_NAME"
+            git checkout "$BRANCH_NAME" || git checkout -b "$BRANCH_NAME" "origin/$BRANCH_NAME"
+            git pull --ff-only origin "$BRANCH_NAME"
+
+            if [ ! -f .env ]; then
+              echo "[WARN] .env missing on server; creating baseline from .env.example."
+              tr -d '\r' < .env.example > .env
+            fi
+
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+            trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+
+            export SERVER_IMAGE CLIENT_IMAGE
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull server client
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --no-build --remove-orphans
+
+            APP_PORT_VAL=$(grep -E '^APP_PORT=' .env | cut -d'=' -f2 | tr -d '[:space:]' || true)
+            APP_PORT_VAL="${APP_PORT_VAL:-8088}"
+
+            for i in $(seq 1 15); do
+              if curl -fsS "http://127.0.0.1:${APP_PORT_VAL}/api/health" >/dev/null 2>&1; then
+                echo "Deployment health check passed on port ${APP_PORT_VAL}."
+                docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+                docker image prune -f >/dev/null 2>&1 || true
+                exit 0
+              fi
+              sleep 4
+            done
+
+            echo "[ERROR] Post-deploy health check failed on port ${APP_PORT_VAL}!"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --tail=60
+            exit 1

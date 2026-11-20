@@ -3,6 +3,9 @@ const router = express.Router();
 const configController = require('../controllers/configController');
 const { authenticateToken, requireRole } = require('../middlewares/authMiddleware');
 
+// Public reader-facing library circulation rules (safe whitelisted values for /login & guide)
+router.get('/public-rules', configController.getPublicReaderRules);
+
 // Get all system configs (Any authenticated user)
 router.get('/', authenticateToken, configController.getConfigs);
 
@@ -15,7 +18,7 @@ router.post('/propose', authenticateToken, requireRole(['admin']), configControl
 // Review (Approve/Reject) config request (Owner only - Checker)
 router.patch('/requests/:id/review', authenticateToken, requireRole(['owner']), configController.reviewConfigRequest);
 
-// Direct update fallback (Admin & Owner)
-router.put('/', authenticateToken, requireRole(['admin', 'owner']), configController.updateConfigs);
+// Direct update fallback disabled to enforce Maker - Checker (Admin proposes -> Owner approves)
+router.put('/', authenticateToken, configController.updateConfigs);
 
 module.exports = router;
