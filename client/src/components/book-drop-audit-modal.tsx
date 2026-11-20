@@ -10,6 +10,8 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import api from "@/services/api";
+import { useConfirm } from "@/hooks/use-confirm";
+import { ReturnSlipModal, type ReturnSlipData } from "@/components/return-slip-modal";
 
 interface BookDropAuditModalProps {
   open: boolean;
@@ -18,6 +20,7 @@ interface BookDropAuditModalProps {
 }
 
 export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAuditModalProps) {
+  const { confirm, ConfirmDialogComponent } = useConfirm();
   const [dropItems, setDropItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -30,6 +33,8 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
   const [remediationAction, setRemediationAction] = useState("Khắc phục / Phục hồi nguyên trạng sách dưới sự hướng dẫn của thủ thư");
   const [submittingAction, setSubmittingAction] = useState(false);
   const [previewProofImg, setPreviewProofImg] = useState<{ url: string; title: string; reader: string; time?: string } | null>(null);
+  const [issuedReturnSlip, setIssuedReturnSlip] = useState<ReturnSlipData | null>(null);
+  const [returnSlipOpen, setReturnSlipOpen] = useState(false);
 
   const fetchDropItems = async () => {
     setLoading(true);
@@ -70,6 +75,10 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
       fetchDropItems();
       setDamageDialogOpen(false);
       setSelectedRecord(null);
+      if (res.data?.returnSlip) {
+        setIssuedReturnSlip(res.data.returnSlip);
+        setReturnSlipOpen(true);
+      }
       if (onSuccess) onSuccess();
     } catch (error: any) {
       toast.error(error.response?.data?.message || "Lỗi khi đối soát");
@@ -178,7 +187,7 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
                       <div className="text-right shrink-0 space-y-1">
                         <div className="inline-flex items-center gap-1.5 text-xs text-slate-600 font-mono">
                           <Clock className="w-3.5 h-3.5 text-sky-600" />
-                          Thả hòm: {item.drop_box_at ? new Date(item.drop_box_at).toLocaleString("vi-VN") : "N/A"}
+                          Tiếp nhận (hòm 24/7): {item.drop_box_at ? new Date(item.drop_box_at).toLocaleString("vi-VN") : "N/A"}
                         </div>
                         <div>
                           {item.overdueDays > 0 ? (
@@ -256,9 +265,14 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
                         className="h-8 text-xs gap-1.5"
                         disabled={submittingAction}
                         onClick={() => {
-                          if (confirm(`Xác nhận báo KHÔNG TÌM THẤY cuốn "${item.book_title}" trong hòm? Phiếu mượn sẽ hoàn tác về ĐANG MƯỢN để điều tra camera.`)) {
-                            handleAuditAction(item.record_id, "report_missing");
-                          }
+                          confirm({
+                            title: "Xác nhận thiếu sách trong hòm 24/7",
+                            description: `Xác nhận báo KHÔNG TÌM THẤY cuốn "${item.book_title}" trong hòm? Phiếu mượn sẽ hoàn tác về ĐANG MƯỢN để đối chiếu camera.`,
+                            confirmText: "Xác nhận hoàn tác",
+                            cancelText: "Hủy",
+                            variant: "destructive",
+                            onConfirm: () => handleAuditAction(item.record_id, "report_missing"),
+                          });
                         }}
                       >
                         <XCircle className="w-3.5 h-3.5" />
@@ -409,6 +423,12 @@ export function BookDropAuditModal({ open, onOpenChange, onSuccess }: BookDropAu
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      <ReturnSlipModal
+        open={returnSlipOpen}
+        onOpenChange={setReturnSlipOpen}
+        slipData={issuedReturnSlip}
+      />
+      {ConfirmDialogComponent}
     </>
   );
 }

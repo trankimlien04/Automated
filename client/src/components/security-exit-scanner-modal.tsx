@@ -171,10 +171,10 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
             </div>
             <div>
               <DialogTitle className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                Bộ Đối Soát Phiếu Mượn & Kiểm Soát Ra Cổng
+                Tra Cứu & Đối Soát Minh Chứng Phiếu Mượn
               </DialogTitle>
               <DialogDescription className="text-slate-400 text-xs mt-0.5">
-                Kiểm tra & đối soát nhanh Phiếu mượn chính thức (PM-BRW-...) hoặc Thẻ độc giả khi ra cổng
+                Kiểm tra & đối soát nhanh Phiếu mượn chính thức (PM-BRW-...) hoặc Thẻ độc giả khi cần xác minh giao dịch
               </DialogDescription>
             </div>
           </div>
@@ -301,14 +301,16 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
                   </div>
 
                   {/* Action button */}
-                  <Button
-                    onClick={handleClearPass}
-                    disabled={isSubmittingClear}
-                    className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md gap-2"
-                  >
-                    <UserCheck className="w-5 h-5" />
-                    {isSubmittingClear ? "Đang xác nhận..." : "XÁC NHẬN ĐỐI SOÁT HOÀN TẤT"}
-                  </Button>
+                  {verifyResult.status !== "used" && (
+                    <Button
+                      onClick={handleClearPass}
+                      disabled={isSubmittingClear}
+                      className="w-full h-12 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-md gap-2"
+                    >
+                      <UserCheck className="w-5 h-5" />
+                      {isSubmittingClear ? "Đang ghi nhận..." : "GHI NHẬN ĐÃ KIỂM TRA ĐỐI SOÁT"}
+                    </Button>
+                  )}
                 </div>
               ) : (
                 /* INVALID / USED / EXPIRED RECEIPT CARD */
@@ -390,20 +392,20 @@ export function SecurityExitScannerModal({ open, onOpenChange, onSuccess }: Secu
 
                     <div className="flex items-center gap-2">
                       {p.status === "used" ? (
-                        <Badge variant="secondary" className="bg-slate-100 text-slate-600 text-[10px]">
+                        <Badge variant="secondary" className="bg-blue-50 text-blue-700 border border-blue-200 text-[10px]">
                           Đã đối soát
                         </Badge>
                       ) : p.status === "expired" ? (
                         <Badge variant="destructive" className="text-[10px]">
-                          Hết hạn
+                          Quá hạn
                         </Badge>
                       ) : (
-                        <Badge className="bg-emerald-600 text-white text-[10px] animate-pulse">
-                          Còn {p.minutesLeft}p
+                        <Badge className="bg-emerald-600 text-white text-[10px]">
+                          Đang lưu thông
                         </Badge>
                       )}
 
-                      {p.status === "active" && (
+                      {(p.status === "active" || p.status === "used") && (
                         <Button
                           size="sm"
                           variant="ghost"

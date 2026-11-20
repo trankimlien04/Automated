@@ -17,8 +17,8 @@ export default function BorrowPage() {
   }
 
   // 2. DÀNH CHO CHỦ THƯ VIỆN / GIÁM ĐỐC (OWNER)
-  // Ban Giám đốc giám sát kiểm toán sổ lưu thông & toàn bộ lịch sử mượn trả
-  if (user?.role === "owner" && mode !== "kiosk") {
+  // Ban Giám đốc luôn ở chế độ giám sát sổ lưu thông & toàn bộ lịch sử mượn trả
+  if (user?.role === "owner") {
     return <CirculationHistoryView />;
   }
 

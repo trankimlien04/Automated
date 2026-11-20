@@ -7,6 +7,8 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthProvider, useAuth } from "@/contexts/AuthContext";
 import { ErrorBoundary } from "@/components/error-boundary";
+import { Button } from "@/components/ui/button";
+import { CheckCircle2, Unlock, X } from "lucide-react";
 
 // Import pages
 import LoginPage from "./pages/login";
@@ -26,6 +28,7 @@ import AuthorsPage from "./pages/authors";
 import PublishersPage from "./pages/publishers";
 import ActivityLogsPage from "./pages/activity-logs";
 import ProfilePage from "./pages/profile";
+import BookRequestsPage from "./pages/book-requests";
 
 const queryClient = new QueryClient();
 
@@ -33,6 +36,7 @@ const ROUTE_META: Record<string, { title: string; subtitle: string }> = {
   "/": { title: "Tổng quan", subtitle: "Bức tranh hoạt động thư viện hôm nay" },
   "/profile": { title: "Thông tin cá nhân & Thẻ định danh", subtitle: "Hồ sơ tài khoản, mã thẻ QR và bảo mật" },
   "/books": { title: "Danh mục Sách & Bản sao (QR)", subtitle: "Biên mục tài liệu, định danh mã QR và trạng thái lưu thông" },
+  "/book-requests": { title: "Đề xuất & Phê duyệt Kho sách", subtitle: "Kiểm soát tài sản kho hai cấp Maker–Checker" },
   "/readers": { title: "Quản lý độc giả", subtitle: "Thẻ thư viện và hồ sơ cá nhân" },
   "/accounts": { title: "Quản lý tài khoản", subtitle: "Phân quyền và tài khoản mặc định hệ thống" },
   "/borrow": { title: "Mượn / Trả qua QR", subtitle: "Giao dịch lưu thông tự động qua mã thẻ & mã sách" },
@@ -45,12 +49,13 @@ const ROUTE_META: Record<string, { title: string; subtitle: string }> = {
   "/categories": { title: "Thể loại & Phân loại", subtitle: "Cấu trúc phân loại tài nguyên tri thức trong thư viện" },
   "/authors": { title: "Tác giả", subtitle: "Hồ sơ và tác phẩm của tác giả" },
   "/publishers": { title: "Nhà xuất bản", subtitle: "Thông tin các đơn vị xuất bản ấn phẩm" },
-  "/activity-logs": { title: "Nhật ký hoạt động (Audit Trail)", subtitle: "Lịch sử thao tác và kiểm toán hệ thống" },
+  "/activity-logs": { title: "Nhật ký hoạt động", subtitle: "Lịch sử thao tác và theo dõi vận hành hệ thống" },
 };
 
 function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const meta = ROUTE_META[location.pathname] ?? { title: "Athenaeum", subtitle: "" };
+  const { accountNotice, dismissAccountNotice } = useAuth();
 
   return (
     <SidebarProvider>
@@ -58,7 +63,53 @@ function Layout({ children }: { children: React.ReactNode }) {
         <AppSidebar />
         <div className="flex flex-1 flex-col min-w-0">
           <TopBar title={meta.title} subtitle={meta.subtitle} />
-          <main className="flex-1 p-4 md:p-6 lg:p-8">
+          <main className="flex-1 p-4 md:p-6 lg:p-8 space-y-5">
+            {accountNotice && (
+              <div
+                className={`rounded-xl border p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm ${
+                  accountNotice.kind === "unlocked"
+                    ? "border-sky-300 bg-sky-50/90 text-sky-950 dark:bg-sky-950/35 dark:border-sky-700 dark:text-sky-100"
+                    : "border-emerald-300 bg-emerald-50/90 text-emerald-950 dark:bg-emerald-950/35 dark:border-emerald-700 dark:text-emerald-100"
+                }`}
+              >
+                <div className="flex items-start gap-3 min-w-0">
+                  <div
+                    className={`p-2 rounded-lg shrink-0 ${
+                      accountNotice.kind === "unlocked"
+                        ? "bg-sky-500/15 text-sky-600 dark:text-sky-400"
+                        : "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+                    }`}
+                  >
+                    {accountNotice.kind === "unlocked" ? (
+                      <Unlock className="h-5 w-5" />
+                    ) : (
+                      <CheckCircle2 className="h-5 w-5" />
+                    )}
+                  </div>
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-bold text-sm leading-snug">{accountNotice.title}</p>
+                      {accountNotice.cardNumber && (
+                        <span className="font-mono text-xs font-semibold px-2 py-0.5 rounded bg-white/80 dark:bg-slate-900/70 border border-current/20">
+                          {accountNotice.cardNumber}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs leading-relaxed opacity-90">{accountNotice.message}</p>
+                  </div>
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={dismissAccountNotice}
+                  className="shrink-0 h-8 text-xs gap-1.5 bg-white/80 dark:bg-slate-900/70"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Đã hiểu
+                </Button>
+              </div>
+            )}
             {children}
           </main>
         </div>
@@ -113,38 +164,48 @@ function App() {
                 <Route path="/profile" element={<ProtectedRoute><ProfilePage /></ProtectedRoute>} />
                 <Route path="/books" element={<ProtectedRoute><BooksPage /></ProtectedRoute>} />
                 <Route path="/borrow" element={<ProtectedRoute><BorrowPage /></ProtectedRoute>} />
-                <Route path="/reservations" element={<ProtectedRoute><ReservationsPage /></ProtectedRoute>} />
+                <Route path="/reservations" element={
+                  <ProtectedRoute allowedRoles={["reader", "admin", "librarian"]}>
+                    <ReservationsPage />
+                  </ProtectedRoute>
+                } />
                 <Route path="/fines" element={<ProtectedRoute><FinesPage /></ProtectedRoute>} />
                 <Route path="/notifications" element={<ProtectedRoute><NotificationsPage /></ProtectedRoute>} />
                 <Route path="/recommendations" element={<ProtectedRoute><RecommendationsPage /></ProtectedRoute>} />
                 
-                {/* Readers Page - Librarians, Admins and Owner */}
+                {/* Readers Page - Librarians and Admins */}
                 <Route path="/readers" element={
-                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                  <ProtectedRoute allowedRoles={["admin", "librarian"]}>
                     <ReadersPage />
                   </ProtectedRoute>
                 } />
 
                 <Route path="/categories" element={
-                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                  <ProtectedRoute allowedRoles={["admin", "librarian"]}>
                     <CategoriesPage />
                   </ProtectedRoute>
                 } />
 
                 <Route path="/authors" element={
-                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                  <ProtectedRoute allowedRoles={["admin", "librarian"]}>
                     <AuthorsPage />
                   </ProtectedRoute>
                 } />
 
                 <Route path="/publishers" element={
-                  <ProtectedRoute allowedRoles={["admin", "librarian", "owner"]}>
+                  <ProtectedRoute allowedRoles={["admin", "librarian"]}>
                     <PublishersPage />
                   </ProtectedRoute>
                 } />
 
+                <Route path="/book-requests" element={
+                  <ProtectedRoute allowedRoles={["librarian", "admin", "owner"]}>
+                    <BookRequestsPage />
+                  </ProtectedRoute>
+                } />
+
                 <Route path="/activity-logs" element={
-                  <ProtectedRoute allowedRoles={["admin", "owner"]}>
+                  <ProtectedRoute allowedRoles={["admin", "owner", "librarian"]}>
                     <ActivityLogsPage />
                   </ProtectedRoute>
                 } />
@@ -180,6 +241,7 @@ function App() {
                 } />
               </Routes>
             </BrowserRouter>
+            <Toaster richColors position="top-right" closeButton />
           </AuthProvider>
         </TooltipProvider>
       </QueryClientProvider>

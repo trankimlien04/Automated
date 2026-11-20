@@ -35,7 +35,7 @@ fi
 # 2. Check or create .env file
 if [ ! -f .env ]; then
     echo -e "${YELLOW}[NOTICE] .env not found. Copying from .env.example...${NC}"
-    cp .env.example .env
+    tr -d '\r' < .env.example > .env
     echo -e "${GREEN}[OK] Created .env file. Please review and update secrets if needed.${NC}"
 fi
 
@@ -55,10 +55,30 @@ docker compose up -d
 
 # 5. Verify service health
 echo -e "${BLUE}[STEP 4/4] Verifying health status of services...${NC}"
-echo "Waiting for services to become healthy (up to 40 seconds)..."
+echo "Waiting for services to become healthy (up to 90 seconds)..."
 
-sleep 10
+HEALTH_DEADLINE=$((SECONDS + 90))
+while [ "$SECONDS" -lt "$HEALTH_DEADLINE" ]; do
+    DB_STATUS=$(docker inspect -f '{{.State.Health.Status}}' smart_library_db 2>/dev/null || echo "starting")
+    SERVER_STATUS=$(docker inspect -f '{{.State.Health.Status}}' smart_library_server 2>/dev/null || echo "starting")
+    CLIENT_STATUS=$(docker inspect -f '{{.State.Health.Status}}' smart_library_client 2>/dev/null || echo "starting")
+
+    if [ "$DB_STATUS" = "healthy" ] && [ "$SERVER_STATUS" = "healthy" ] && [ "$CLIENT_STATUS" = "healthy" ]; then
+        echo -e "${GREEN}[OK] All containers (MySQL, Server, Client) are healthy!${NC}"
+        break
+    fi
+
+    echo "Current health -> db: $DB_STATUS | server: $SERVER_STATUS | client: $CLIENT_STATUS"
+    sleep 5
+done
+
 docker compose ps
+
+if [ "$DB_STATUS" != "healthy" ] || [ "$SERVER_STATUS" != "healthy" ] || [ "$CLIENT_STATUS" != "healthy" ]; then
+    echo -e "${RED}[ERROR] Services did not become healthy within 90 seconds.${NC}"
+    docker compose logs --tail=60
+    exit 1
+fi
 
 echo -e "${GREEN}========================================================${NC}"
 echo -e "${GREEN}  🎉 SMART LIBRARY 4.0 DEPLOYED SUCCESSFULLY!            ${NC}"

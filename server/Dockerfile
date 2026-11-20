@@ -5,8 +5,8 @@
 
 FROM node:20-alpine AS base
 
-# Install build dependencies for native packages (bcrypt)
-RUN apk add --no-cache python3 make g++ wget
+# Install build dependencies for native packages (bcrypt) + timezone data
+RUN apk add --no-cache python3 make g++ wget tzdata
 
 WORKDIR /app
 
@@ -25,10 +25,12 @@ EXPOSE 5000
 # Set environment
 ENV NODE_ENV=production
 ENV PORT=5000
+ENV TZ=Asia/Ho_Chi_Minh
+ENV LIBRARY_TIMEZONE=Asia/Ho_Chi_Minh
 
 # Docker Healthcheck
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:5000/api/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:5000/api/health || exit 1
 
 # Start production server
 CMD ["node", "index.js"]

@@ -7,7 +7,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Search, Mail, Phone, Lock, Unlock, Plus, UserPlus, ShieldAlert, Crown } from "lucide-react";
+import { Search, Mail, Phone, Lock, Unlock, Plus, UserPlus, ShieldAlert, Crown, CheckCircle, XCircle } from "lucide-react";
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
@@ -72,9 +72,18 @@ export default function AccountsPage() {
     fetchUsers();
   }, []);
 
-  const handleUpdateStatus = (id: number, fullName: string, newStatus: string) => {
-    const actionName = newStatus === "active" ? "mở khóa" : "khóa";
-    const title = newStatus === "active" ? "Xác nhận mở khóa tài khoản" : "Xác nhận khóa tài khoản";
+  const handleUpdateStatus = (
+    id: number,
+    fullName: string,
+    newStatus: string,
+    isPendingAction = false
+  ) => {
+    const actionName = isPendingAction
+      ? (newStatus === "active" ? "phê duyệt tài khoản" : "từ chối hồ sơ đăng ký")
+      : (newStatus === "active" ? "mở khóa" : "khóa");
+    const title = isPendingAction
+      ? (newStatus === "active" ? "Xác nhận duyệt tài khoản" : "Xác nhận từ chối hồ sơ đăng ký")
+      : (newStatus === "active" ? "Xác nhận mở khóa tài khoản" : "Xác nhận khóa tài khoản");
 
     confirm({
       title: title,
@@ -84,8 +93,8 @@ export default function AccountsPage() {
       variant: newStatus === "locked" ? "destructive" : "default",
       onConfirm: async () => {
         try {
-          await api.put(`/users/${id}/status`, { status: newStatus });
-          toast.success("Cập nhật trạng thái tài khoản thành công!");
+          const res = await api.put(`/users/${id}/status`, { status: newStatus });
+          toast.success(res.data?.message || "Cập nhật trạng thái tài khoản thành công!");
           fetchUsers();
         } catch (error) {
           console.error("Lỗi khi cập nhật trạng thái:", error);
@@ -316,6 +325,25 @@ export default function AccountsPage() {
                       <div className="flex items-center justify-end gap-2">
                         {r.id !== user?.id && (user?.role === "owner" ? r.role !== "owner" : r.role !== "admin" && r.role !== "owner") ? (
                           <>
+                            {r.status === "pending" && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  className="bg-success text-success-foreground hover:bg-success/90 h-8 gap-1"
+                                  onClick={() => handleUpdateStatus(r.id, r.full_name, "active", true)}
+                                >
+                                  <CheckCircle className="h-3.5 w-3.5" /> Duyệt
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="border-destructive hover:bg-destructive/10 text-destructive h-8 gap-1"
+                                  onClick={() => handleUpdateStatus(r.id, r.full_name, "locked", true)}
+                                >
+                                  <XCircle className="h-3.5 w-3.5" /> Từ chối
+                                </Button>
+                              </>
+                            )}
                             {r.status === "active" && (
                               <Button
                                 size="sm"

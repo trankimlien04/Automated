@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Mail, Phone, Lock, Unlock, CheckCircle } from "lucide-react";
+import { Search, Mail, Phone, Lock, Unlock, CheckCircle, XCircle } from "lucide-react";
 import api from "@/services/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
@@ -38,6 +38,7 @@ export default function ReadersPage() {
   const [q, setQ] = useState("");
   const [loading, setLoading] = useState(true);
   const { user } = useAuth();
+  const canManage = user?.role === "admin" || user?.role === "librarian";
   const { confirm, ConfirmDialogComponent } = useConfirm();
 
   const fetchReaders = async () => {
@@ -59,20 +60,33 @@ export default function ReadersPage() {
     fetchReaders();
   }, []);
 
-  const handleUpdateStatus = (id: number, fullName: string, newStatus: string) => {
-    const actionName = newStatus === "active" ? "mở khóa / duyệt cấp thẻ" : "khóa thẻ";
-    const title = newStatus === "active" ? "Xác nhận duyệt/mở khóa thẻ" : "Xác nhận khóa thẻ";
+  const handleUpdateStatus = (
+    id: number,
+    fullName: string,
+    newStatus: string,
+    isPendingRejection = false
+  ) => {
+    const actionName = newStatus === "active"
+      ? "mở khóa / duyệt cấp thẻ"
+      : isPendingRejection
+        ? "từ chối hồ sơ đăng ký"
+        : "khóa thẻ";
+    const title = newStatus === "active"
+      ? "Xác nhận duyệt/mở khóa thẻ"
+      : isPendingRejection
+        ? "Xác nhận từ chối hồ sơ đăng ký"
+        : "Xác nhận khóa thẻ";
     
     confirm({
       title: title,
-      description: `Bạn có đồng ý chấp nhận ${actionName} cho độc giả "${fullName}" không?`,
+      description: `Bạn có đồng ý chấp nhận ${actionName} cho độc giả "${fullName}" không? Hệ thống sẽ gửi email thông báo tự động tới độc giả.`,
       confirmText: "Đồng ý",
       cancelText: "Hủy",
       variant: newStatus === "locked" ? "destructive" : "default",
       onConfirm: async () => {
         try {
-          await api.put(`/users/${id}/status`, { status: newStatus });
-          toast.success("Cập nhật trạng thái độc giả thành công!");
+          const res = await api.put(`/users/${id}/status`, { status: newStatus });
+          toast.success(res.data?.message || "Cập nhật trạng thái độc giả thành công!");
           fetchReaders();
         } catch (error) {
           console.error("Lỗi khi cập nhật trạng thái:", error);
@@ -181,37 +195,51 @@ export default function ReadersPage() {
                       </div>
                     </TableCell>
                     <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        {r.status === "pending" && (
-                          <Button
-                            size="sm"
-                            className="bg-success text-success-foreground hover:bg-success/90 h-8 gap-1"
-                            onClick={() => handleUpdateStatus(r.id, r.full_name, "active")}
-                          >
-                            <CheckCircle className="h-3.5 w-3.5" /> Duyệt cấp thẻ
-                          </Button>
-                        )}
-                        {r.status === "active" && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="border-destructive hover:bg-destructive/10 text-destructive h-8 gap-1"
-                            onClick={() => handleUpdateStatus(r.id, r.full_name, "locked")}
-                          >
-                            <Lock className="h-3.5 w-3.5" /> Khóa thẻ
-                          </Button>
-                        )}
-                        {r.status === "locked" && (
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="border-success hover:bg-success/10 text-success h-8 gap-1"
-                            onClick={() => handleUpdateStatus(r.id, r.full_name, "active")}
-                          >
-                            <Unlock className="h-3.5 w-3.5" /> Mở khóa thẻ
-                          </Button>
-                        )}
-                      </div>
+                      {canManage ? (
+                        <div className="flex items-center justify-end gap-2">
+                          {r.status === "pending" && (
+                            <>
+                              <Button
+                                size="sm"
+                                className="bg-success text-success-foreground hover:bg-success/90 h-8 gap-1"
+                                onClick={() => handleUpdateStatus(r.id, r.full_name, "active")}
+                              >
+                                <CheckCircle className="h-3.5 w-3.5" /> Duyệt cấp thẻ
+                              </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="border-destructive hover:bg-destructive/10 text-destructive h-8 gap-1"
+                                onClick={() => handleUpdateStatus(r.id, r.full_name, "locked", true)}
+                              >
+                                <XCircle className="h-3.5 w-3.5" /> Từ chối
+                              </Button>
+                            </>
+                          )}
+                          {r.status === "active" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-destructive hover:bg-destructive/10 text-destructive h-8 gap-1"
+                              onClick={() => handleUpdateStatus(r.id, r.full_name, "locked")}
+                            >
+                              <Lock className="h-3.5 w-3.5" /> Khóa thẻ
+                            </Button>
+                          )}
+                          {r.status === "locked" && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-success hover:bg-success/10 text-success h-8 gap-1"
+                              onClick={() => handleUpdateStatus(r.id, r.full_name, "active")}
+                            >
+                              <Unlock className="h-3.5 w-3.5" /> Mở khóa thẻ
+                            </Button>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">Chỉ xem</span>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}

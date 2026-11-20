@@ -184,41 +184,43 @@ export default function ReportsPage() {
   }];
 
   return (
-    <div className="space-y-6">
-      {/* Header controls with Period Filter Tabs */}
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between bg-card p-4 rounded-2xl border shadow-xs">
-        <div className="space-y-1">
-          <h2 className="text-xl font-bold font-display tracking-tight flex items-center gap-2">
-            <TrendingUp className="h-5 w-5 text-primary" /> Báo Cáo Hoạt Động & Phân Tích
-          </h2>
-          <p className="text-xs text-muted-foreground">
-            Dữ liệu thống kê thời gian thực theo khoảng thời gian đã chọn: <strong className="text-primary">{periodTitle}</strong>
-          </p>
-        </div>
+    <div>
+      {/* On-screen Dashboard View (Hidden during printing) */}
+      <div className="space-y-6 print:hidden">
+        {/* Header controls with Period Filter Tabs */}
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between bg-card p-4 rounded-2xl border shadow-xs">
+          <div className="space-y-1">
+            <h2 className="text-xl font-bold font-display tracking-tight flex items-center gap-2">
+              <TrendingUp className="h-5 w-5 text-primary" /> Báo Cáo Hoạt Động & Phân Tích
+            </h2>
+            <p className="text-xs text-muted-foreground">
+              Dữ liệu thống kê thời gian thực theo khoảng thời gian đã chọn: <strong className="text-primary">{periodTitle}</strong>
+            </p>
+          </div>
 
-        <div className="flex flex-wrap items-center gap-3">
-          <Tabs value={period} onValueChange={handlePeriodChange}>
-            <TabsList className="grid grid-cols-4 bg-muted/80 p-1">
-              <TabsTrigger value="day" className="text-xs font-semibold">Hôm nay</TabsTrigger>
-              <TabsTrigger value="week" className="text-xs">Tuần</TabsTrigger>
-              <TabsTrigger value="month" className="text-xs">Tháng</TabsTrigger>
-              <TabsTrigger value="year" className="text-xs">Năm</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <div className="flex flex-wrap items-center gap-3">
+            <Tabs value={period} onValueChange={handlePeriodChange}>
+              <TabsList className="grid grid-cols-4 bg-muted/80 p-1">
+                <TabsTrigger value="day" className="text-xs font-semibold">Hôm nay</TabsTrigger>
+                <TabsTrigger value="week" className="text-xs">Tuần</TabsTrigger>
+                <TabsTrigger value="month" className="text-xs">Tháng</TabsTrigger>
+                <TabsTrigger value="year" className="text-xs">Năm</TabsTrigger>
+              </TabsList>
+            </Tabs>
 
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => fetchAnalytics(period)} className="gap-1.5 text-xs h-9">
-              <RefreshCw className="h-3.5 w-3.5" /> Làm mới
-            </Button>
-            <Button variant="outline" size="sm" onClick={handlePrint} className="gap-1.5 text-xs h-9">
-              <Printer className="h-3.5 w-3.5" /> In
-            </Button>
-            <Button size="sm" onClick={handleExportExcel} className="gap-1.5 text-xs h-9 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs">
-              <Download className="h-3.5 w-3.5" /> Xuất Excel
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={() => fetchAnalytics(period)} className="gap-1.5 text-xs h-9 cursor-pointer">
+                <RefreshCw className="h-3.5 w-3.5" /> Làm mới
+              </Button>
+              <Button variant="outline" size="sm" onClick={handlePrint} className="gap-1.5 text-xs h-9 cursor-pointer font-medium">
+                <Printer className="h-3.5 w-3.5" /> In Biên bản hành chính (A4)
+              </Button>
+              <Button size="sm" onClick={handleExportExcel} className="gap-1.5 text-xs h-9 bg-emerald-600 hover:bg-emerald-700 text-white shadow-xs cursor-pointer">
+                <Download className="h-3.5 w-3.5" /> Xuất Excel
+              </Button>
+            </div>
           </div>
         </div>
-      </div>
 
       {/* Summary Stat Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -581,6 +583,151 @@ export default function ReportsPage() {
           </div>
         </div>
       )}
+      </div>
+
+      {/* ======================================================== */}
+      {/* OFFICIAL ADMINISTRATIVE REPORT PRINT TEMPLATE (A4)       */}
+      {/* Hidden on screen (hidden), Visible on print (print:block)*/}
+      {/* ======================================================== */}
+      <div className="hidden print:block text-black bg-white p-6 space-y-5 font-serif text-xs leading-normal">
+        {/* Header: National Motto & Institution */}
+        <div className="flex justify-between items-start border-b border-black pb-3">
+          <div className="text-center w-1/2">
+            <p className="font-bold uppercase text-[11px] tracking-wider">CƠ QUAN CHỦ QUẢN: THƯ VIỆN ĐẠI HỌC</p>
+            <p className="font-extrabold uppercase text-xs mt-0.5">THƯ VIỆN THÔNG MINH ATHENAEUM</p>
+            <p className="text-[10px] text-gray-700 mt-0.5">Số: {new Date().getFullYear()}/BB-TVTM</p>
+          </div>
+          <div className="text-center w-1/2">
+            <p className="font-bold uppercase text-[11px] tracking-wider">CỘNG HÒA XÃ HỘI CHỦ NGHĨA VIỆT NAM</p>
+            <p className="font-bold text-[11px] underline underline-offset-4 mt-0.5">Độc lập - Tự do - Hạnh phúc</p>
+            <p className="text-[10px] italic text-gray-700 mt-1">
+              Hà Nội, ngày {new Date().getDate()} tháng {new Date().getMonth() + 1} năm {new Date().getFullYear()}
+            </p>
+          </div>
+        </div>
+
+        {/* Title */}
+        <div className="text-center space-y-1 pt-1">
+          <h2 className="text-base font-extrabold uppercase tracking-wide">
+            BIÊN BẢN TỔNG KẾT KIỂM KÊ TÀI SẢN &amp; LƯU THÔNG THƯ VIỆN
+          </h2>
+          <p className="text-[11px] italic text-gray-700">
+            (Kỳ đối soát: {periodTitle} — Dữ liệu kết xuất từ hệ thống Smart Library Athenaeum theo thời gian thực)
+          </p>
+        </div>
+
+        {/* Circumstance & Personnel */}
+        <div className="text-[11px] leading-relaxed space-y-1">
+          <p>Hôm nay, vào lúc {new Date().getHours()} giờ {String(new Date().getMinutes()).padStart(2, "0")} phút, ngày {new Date().getDate()}/{new Date().getMonth() + 1}/{new Date().getFullYear()}, tại Văn phòng Thư viện Thông minh Athenaeum.</p>
+          <p><strong>Thành phần Hội đồng đối soát kiểm kê gồm có:</strong></p>
+          <ul className="list-disc pl-5 space-y-0.5 text-[11px]">
+            <li>Đại diện Ban Giám Đốc Thư viện: Trưởng ban Điều hành &amp; Giám sát hệ thống.</li>
+            <li>Đại diện Bộ phận Nghiệp vụ Lưu thông: Thủ thư phụ trách ca trực đối soát.</li>
+            <li>Đại diện Bộ phận Kỹ thuật: Quản trị viên cơ sở dữ liệu và vận hành hệ thống.</li>
+          </ul>
+        </div>
+
+        {/* Circulation Statistics Table */}
+        <div className="space-y-1.5">
+          <p className="text-[11px] font-bold uppercase tracking-wide">I. BẢNG TỔNG HỢP CHỈ TIÊU ĐỐI SOÁT LƯU THÔNG</p>
+          <table className="w-full text-[11px] border-collapse border border-black">
+            <thead>
+              <tr className="bg-gray-100 font-bold">
+                <th className="border border-black px-2.5 py-1 text-center w-10">STT</th>
+                <th className="border border-black px-2.5 py-1 text-left">Chỉ tiêu lưu thông &amp; kiểm kê kho</th>
+                <th className="border border-black px-2.5 py-1 text-center w-28">Số lượng ghi nhận</th>
+                <th className="border border-black px-2.5 py-1 text-left w-52">Ghi chú nghiệp vụ</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">1</td>
+                <td className="border border-black px-2.5 py-1 font-medium">Tổng số lượt mượn sách phát sinh trong kỳ</td>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">{data?.summary?.totalBorrows ?? 0} lượt</td>
+                <td className="border border-black px-2.5 py-1 text-gray-700">Bao gồm mượn tại quầy &amp; mượn online</td>
+              </tr>
+              <tr>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">2</td>
+                <td className="border border-black px-2.5 py-1 font-medium">Tổng số lượt sách hoàn trả kho thư viện</td>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">{data?.summary?.totalReturns ?? 0} lượt</td>
+                <td className="border border-black px-2.5 py-1 text-gray-700">Qua quầy trực tiếp và Hòm trả sách 24/7</td>
+              </tr>
+              <tr>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">3</td>
+                <td className="border border-black px-2.5 py-1 font-medium">Tỷ lệ độc giả hoàn trả sách đúng hạn</td>
+                <td className="border border-black px-2.5 py-1 text-center font-bold text-emerald-800">{data?.onTimeRate?.percentage ?? 100}%</td>
+                <td className="border border-black px-2.5 py-1 text-gray-700">{data?.onTimeRate?.onTimeCount ?? 0}/{data?.onTimeRate?.totalReturned ?? 0} lượt trả đúng hạn</td>
+              </tr>
+              <tr>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">4</td>
+                <td className="border border-black px-2.5 py-1 font-medium">Số sách quá hạn hiện đang đôn đốc thu hồi</td>
+                <td className="border border-black px-2.5 py-1 text-center font-bold text-red-700">{data?.summary?.activeOverdueCount ?? 0} cuốn</td>
+                <td className="border border-black px-2.5 py-1 text-gray-700">Hệ thống đã tự động gửi cảnh báo</td>
+              </tr>
+              <tr>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">5</td>
+                <td className="border border-black px-2.5 py-1 font-medium">Số thẻ độc giả bị tạm ngưng mượn (đình chỉ)</td>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">{data?.summary?.suspendedReadersCount ?? 0} độc giả</td>
+                <td className="border border-black px-2.5 py-1 text-gray-700">Áp dụng chế tài kỷ luật phi tiền mặt</td>
+              </tr>
+              <tr>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">6</td>
+                <td className="border border-black px-2.5 py-1 font-medium">Biên bản sách hư hỏng / mất qua kiểm kê chờ xử lý</td>
+                <td className="border border-black px-2.5 py-1 text-center font-bold">{data?.summary?.pendingRemediationsCount ?? 0} vụ</td>
+                <td className="border border-black px-2.5 py-1 text-gray-700">Đang thực hiện quy trình khắc phục</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* Top Books Table */}
+        {data?.topBooks && data.topBooks.length > 0 && (
+          <div className="space-y-1.5">
+            <p className="text-[11px] font-bold uppercase tracking-wide">II. ĐẦU SÁCH CÓ TẦN SUẤT LƯU THÔNG CAO NHẤT TRONG KỲ</p>
+            <table className="w-full text-[11px] border-collapse border border-black">
+              <thead>
+                <tr className="bg-gray-100 font-bold">
+                  <th className="border border-black px-2 py-1 text-center w-12">Hạng</th>
+                  <th className="border border-black px-2 py-1 text-left">Tên đầu sách</th>
+                  <th className="border border-black px-2 py-1 text-left">Tác giả</th>
+                  <th className="border border-black px-2 py-1 text-center w-24">Số lượt mượn</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.topBooks.slice(0, 5).map((b, idx) => (
+                  <tr key={b.id || idx}>
+                    <td className="border border-black px-2 py-1 text-center font-bold">#{idx + 1}</td>
+                    <td className="border border-black px-2 py-1 font-medium">{b.title}</td>
+                    <td className="border border-black px-2 py-1">{b.author_name}</td>
+                    <td className="border border-black px-2 py-1 text-center font-bold">{b.borrows} lượt</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Conclusion & Legal Statement */}
+        <div className="text-[11px] leading-relaxed space-y-1">
+          <p><strong>Kết luận kiểm kê:</strong> Toàn bộ số liệu trên được đối soát đối chiếu tự động với cơ sở dữ liệu thời gian thực của Thư viện Athenaeum. Biên bản được lập thành 03 bản có giá trị pháp lý như nhau để lưu trữ hồ sơ và báo cáo Ban Giám Đốc.</p>
+        </div>
+
+        {/* Signatures */}
+        <div className="grid grid-cols-3 gap-4 pt-4 text-center text-[11px]">
+          <div className="space-y-14">
+            <p className="font-bold uppercase">NGƯỜI LẬP BIỂU</p>
+            <p className="italic text-gray-500">(Ký và ghi rõ họ tên)</p>
+          </div>
+          <div className="space-y-14">
+            <p className="font-bold uppercase">THỦ THƯ KIỂM KÊ</p>
+            <p className="italic text-gray-500">(Ký và ghi rõ họ tên)</p>
+          </div>
+          <div className="space-y-14">
+            <p className="font-bold uppercase">BAN GIÁM ĐỐC / CHỦ THƯ VIỆN</p>
+            <p className="italic text-gray-500">(Ký duyệt và đóng dấu)</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

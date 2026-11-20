@@ -1,5 +1,5 @@
 const db = require('../config/db');
-const { notifyUser, notifyRoles, notifyAllStaff } = require('../services/notificationService');
+const { notifyUser, notifyRoles, notifyAllStaff, dispatchReservationReadyNotification } = require('../services/notificationService');
 const { computeSmartWaitPrediction } = require('../utils/waitTimePredictor');
 const { syncOverdueFines, getReaderCirculationStatus } = require('../services/fineSyncService');
 
@@ -123,14 +123,13 @@ async function syncWaitingReservationsWithStock() {
                         WHERE id = ?
                     `, [w.id]);
 
-                    await db.execute(
-                        `INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, 'reminder')`,
-                        [
-                            w.user_id,
-                            '🎉 Sách bạn đặt trước đã có mặt tại thư viện!',
-                            `Cuốn sách "${wb.book_title}" bạn đặt trước hiện đã có bản sao sẵn sàng tại thư viện và đang được giữ ưu tiên cho bạn trong 48 giờ. Hãy vào mục "Đặt trước sách" để bấm [Đồng ý mượn & Tạo Phiếu nháp 24h] nhé!`
-                        ]
-                    );
+                    await dispatchReservationReadyNotification({
+                        userId: w.user_id,
+                        reservationId: w.id,
+                        bookTitle: wb.book_title,
+                        expiresAt: new Date(Date.now() + 48 * 3600 * 1000),
+                        inAppMessage: `Cuốn sách "${wb.book_title}" bạn đặt trước hiện đã có bản sao sẵn sàng tại thư viện và đang được giữ ưu tiên cho bạn trong 48 giờ. Hãy vào mục "Đặt trước sách" để bấm [Đồng ý mượn & Tạo Phiếu nháp 24h] nhé!`,
+                    });
                     activeHoldCount++;
                 }
             }
@@ -164,8 +163,11 @@ exports.createReservation = async (req, res) => {
         }
         const user = users[0];
 
-        // Check book exists
-        const [books] = await db.execute('SELECT title, available_copies, total_copies FROM books WHERE id = ?', [bookId]);
+        // Check book exists and is active
+        const [books] = await db.execute(
+            "SELECT title, available_copies, total_copies FROM books WHERE id = ? AND COALESCE(status, 'active') = 'active'",
+            [bookId]
+        );
         if (books.length === 0) {
             return res.status(404).json({ message: 'Không tìm thấy đầu sách này' });
         }
@@ -496,8 +498,10 @@ exports.respondReservation = async (req, res) => {
                     [resv.book_real_id]
                 );
 
+                let nextPromotedReservation = null;
                 if (nextWaiters.length > 0) {
                     const nextUser = nextWaiters[0];
+                    const nextExpiresAt = new Date(Date.now() + 48 * 3600 * 1000);
                     await connection.execute(
                         'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
                         [nextUser.id]
@@ -519,6 +523,13 @@ exports.respondReservation = async (req, res) => {
                         `Độc giả ${resv.reader_name} đã nhường lượt cuốn "${resv.book_title}". Quyền giữ sách 48h đã được tự động chuyển cho độc giả tiếp theo: ${nextUser.full_name} (${nextUser.card_number}).`,
                         'info'
                     );
+
+                    nextPromotedReservation = {
+                        userId: nextUser.user_id,
+                        reservationId: nextUser.id,
+                        bookTitle: resv.book_title,
+                        expiresAt: nextExpiresAt,
+                    };
                 } else {
                     // Không có ai chờ -> nhả sách về kho chung
                     await connection.execute(
@@ -534,6 +545,12 @@ exports.respondReservation = async (req, res) => {
                 }
 
                 await connection.commit();
+                if (nextPromotedReservation) {
+                    dispatchReservationReadyNotification({
+                        ...nextPromotedReservation,
+                        skipInApp: true,
+                    }).catch(() => {});
+                }
                 return res.status(200).json({
                     message: `Bạn đã hủy đặt trước cuốn "${resv.book_title}". Quyền ưu tiên mượn đã được nhường lại cho bạn đọc tiếp theo trong hàng đợi!`
                 });
@@ -606,6 +623,7 @@ exports.cancelReservation = async (req, res) => {
             }
 
             // Nếu phiếu này đang giữ sách ('notified', 'ready', 'accepted'), chuyển lượt cho người tiếp theo hoặc trả sách về kho
+            let nextPromotedReservation = null;
             if (['notified', 'ready', 'accepted'].includes(resv.status)) {
                 const [nextWaiters] = await connection.execute(
                     'SELECT r.id, r.user_id, u.full_name, u.card_number FROM reservations r JOIN users u ON r.user_id = u.id WHERE r.book_id = ? AND r.status IN ("waiting", "pending") ORDER BY r.reservation_date ASC LIMIT 1',
@@ -614,6 +632,7 @@ exports.cancelReservation = async (req, res) => {
 
                 if (nextWaiters.length > 0) {
                     const nextUser = nextWaiters[0];
+                    const nextExpiresAt = new Date(Date.now() + 48 * 3600 * 1000);
                     await connection.execute(
                         'UPDATE reservations SET status = "notified", notified_at = NOW(), expires_at = DATE_ADD(NOW(), INTERVAL 48 HOUR) WHERE id = ?',
                         [nextUser.id]
@@ -627,6 +646,12 @@ exports.cancelReservation = async (req, res) => {
                             `Cuốn sách "${resv.book_title}" bạn đặt trước vừa có sẵn tại thư viện. Thư viện đang giữ sách ưu tiên cho bạn trong vòng 48 giờ. Bạn có muốn mượn cuốn sách này không? Hãy vào mục "Đặt trước sách" để xác nhận nhé!`
                         ]
                     );
+                    nextPromotedReservation = {
+                        userId: nextUser.user_id,
+                        reservationId: nextUser.id,
+                        bookTitle: resv.book_title,
+                        expiresAt: nextExpiresAt,
+                    };
                 } else {
                     await connection.execute(
                         'UPDATE books SET available_copies = available_copies + 1 WHERE id = ?',
@@ -646,6 +671,12 @@ exports.cancelReservation = async (req, res) => {
             );
 
             await connection.commit();
+            if (nextPromotedReservation) {
+                dispatchReservationReadyNotification({
+                    ...nextPromotedReservation,
+                    skipInApp: true,
+                }).catch(() => {});
+            }
             res.status(200).json({ message: 'Đã hủy phiếu đặt trước thành công' });
         } catch (err) {
             await connection.rollback();

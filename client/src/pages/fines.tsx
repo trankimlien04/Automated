@@ -530,14 +530,20 @@ export default function FinesPage() {
                             <Badge variant="destructive" className="text-[10px]">
                               OVERDUE • Khóa mượn
                             </Badge>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-6 text-[10px] px-2 border-primary/30 text-primary hover:bg-primary/10"
-                              onClick={() => navigate("/borrow")}
-                            >
-                              {isReader ? "Đi tới trả sách →" : "Mở Quầy nhận trả →"}
-                            </Button>
+                            {isReader || canManageRemediation ? (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-6 text-[10px] px-2 border-primary/30 text-primary hover:bg-primary/10"
+                                onClick={() => navigate("/borrow")}
+                              >
+                                {isReader ? "Đi tới trả sách →" : "Mở Quầy nhận trả →"}
+                              </Button>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground">
+                                Chờ độc giả hoàn trả tại Quầy / Hòm 24/7
+                              </span>
+                            )}
                           </div>
                         ) : isPendingRem ? (
                           <div className="flex flex-col items-end gap-1">
@@ -555,7 +561,7 @@ export default function FinesPage() {
                               </Button>
                             ) : (
                               <span className="text-[10px] text-muted-foreground">
-                                Liên hệ Thủ thư tại quầy
+                                {isReader ? "Liên hệ Thủ thư tại quầy" : "Chờ Thủ thư xác nhận khắc phục"}
                               </span>
                             )}
                           </div>

@@ -7,7 +7,8 @@ import { Progress } from "@/components/ui/progress";
 import {
   BookOpen, Users, ArrowRightLeft, AlertTriangle, TrendingUp, Sparkles,
   ArrowUpRight, ArrowDownRight, QrCode, Clock, BookMarked, Wallet, Award,
-  Shield, BarChart3, Crown, RefreshCw, Activity, ShieldCheck, Zap
+  Shield, BarChart3, Crown, RefreshCw, Activity, ShieldCheck, Zap, ClipboardCheck,
+  CheckCircle2
 } from "lucide-react";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -138,60 +139,113 @@ export default function Dashboard() {
   if (isStaffOrOwner && data) {
     const { stats, popularBooks, borrowTrends, recentTransactions } = data;
 
+    const rolePastel = isOwner
+      ? {
+          cardBg: "from-[#FFF9ED] via-[#FFFDF8] to-[#FDF3E3] border-[#F5E2B8] dark:from-[#2C2114] dark:via-[#241B10] dark:to-[#1E160D] dark:border-[#4B371E]",
+          topLine: "from-amber-400 via-yellow-500 to-amber-300",
+          badgeCls: "bg-amber-500/15 text-[#92400E] dark:text-amber-300 border-amber-400/40",
+          titleAccent: "text-[#B45309] dark:text-amber-400",
+          descColor: "text-[#78350F]/85 dark:text-amber-100/80",
+          primaryBtn: "bg-[#B45309] hover:bg-[#92400E] text-white shadow-xs",
+          outlineBtn: "bg-white/80 hover:bg-white text-[#92400E] border-[#F5E2B8] dark:bg-amber-950/40 dark:border-amber-800 dark:text-amber-200",
+          watermarkCls: "text-amber-600/[0.07]",
+          label: "👑 Trung tâm Điều hành Ban Giám đốc",
+        }
+      : user?.role === "admin"
+      ? {
+          cardBg: "from-[#F2F1FD] via-[#F8F7FE] to-[#E9E7FA] border-[#D5D2F6] dark:from-[#1E1B2E] dark:via-[#181625] dark:to-[#141220] dark:border-[#383353]",
+          topLine: "from-indigo-400 via-purple-500 to-indigo-300",
+          badgeCls: "bg-indigo-500/15 text-[#3730A3] dark:text-indigo-300 border-indigo-400/40",
+          titleAccent: "text-[#4338CA] dark:text-indigo-400",
+          descColor: "text-[#312E81]/85 dark:text-indigo-100/80",
+          primaryBtn: "bg-[#4338CA] hover:bg-[#3730A3] text-white shadow-xs",
+          outlineBtn: "bg-white/80 hover:bg-white text-[#3730A3] border-[#D5D2F6] dark:bg-indigo-950/40 dark:border-indigo-800 dark:text-indigo-200",
+          watermarkCls: "text-indigo-600/[0.07]",
+          label: "🛡️ Quản trị IT & An ninh Hệ thống",
+        }
+      : {
+          cardBg: "from-[#EDF7F2] via-[#F5FAF7] to-[#E2F2E9] border-[#C3E6D2] dark:from-[#132A1F] dark:via-[#162F23] dark:to-[#0F2219] dark:border-[#1E4332]",
+          topLine: "from-emerald-400 via-teal-500 to-emerald-300",
+          badgeCls: "bg-emerald-600/15 text-[#14532D] dark:text-emerald-300 border-emerald-400/40",
+          titleAccent: "text-[#14532D] dark:text-emerald-400",
+          descColor: "text-[#164E2E]/85 dark:text-emerald-100/80",
+          primaryBtn: "bg-[#1E5739] hover:bg-[#143D27] text-white shadow-xs",
+          outlineBtn: "bg-white/80 hover:bg-white text-[#14532D] border-[#C3E6D2] dark:bg-emerald-950/40 dark:border-emerald-800 dark:text-emerald-200",
+          watermarkCls: "text-emerald-600/[0.07]",
+          label: "📖 Nghiệp vụ Bàn Lưu thông Thủ thư",
+        };
+
     return (
       <div className="space-y-6">
         {/* Hero strip */}
-        <Card className="overflow-hidden border-primary/20 bg-gradient-to-br from-primary via-primary/95 to-primary/80 text-primary-foreground shadow-md">
-          <CardContent className="flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between">
-            <div>
-              <Badge className="bg-primary-foreground/15 text-primary-foreground hover:bg-primary-foreground/20 border-0">
-                <Sparkles className="mr-1 h-3 w-3 animate-pulse" />
-                {isOwner
-                  ? "👑 Trung tâm Điều hành Giám đốc"
-                  : user?.role === "admin"
-                    ? "🛡️ Quản trị IT & An ninh Hệ thống"
-                    : "📖 Nghiệp vụ Bàn Lưu thông Thủ thư"}
+        <Card className={`overflow-hidden border bg-gradient-to-br ${rolePastel.cardBg} text-foreground shadow-xs relative rounded-2xl`}>
+          {/* Subtle Luxury Top Accent Line */}
+          <div className={`h-1 w-full bg-gradient-to-r ${rolePastel.topLine}`} />
+
+          {/* Faint Decorative Background Watermark */}
+          <Sparkles className={`pointer-events-none absolute -right-6 -bottom-6 h-44 w-44 ${rolePastel.watermarkCls} select-none -rotate-12`} />
+
+          <CardContent className="relative flex flex-col gap-4 p-5 sm:p-6 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-2">
+              <Badge
+                variant="outline"
+                className={`font-semibold text-xs px-2.5 py-0.5 rounded-full shadow-2xs gap-1.5 ${rolePastel.badgeCls}`}
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                {rolePastel.label}
               </Badge>
-              <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight md:text-4xl">
-                {isOwner
-                  ? `${getTimeBasedGreeting()}, Giám đốc ${user?.fullName}`
-                  : user?.role === "admin"
-                    ? `${getTimeBasedGreeting()}, Quản trị viên ${user?.fullName}`
-                    : `${getTimeBasedGreeting()}, Thủ thư ${user?.fullName}`}
+
+              <h2 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-foreground leading-snug">
+                {getTimeBasedGreeting()},{" "}
+                <span className={`${rolePastel.titleAccent} font-bold`}>
+                  {isOwner
+                    ? `Giám đốc ${user?.fullName}`
+                    : user?.role === "admin"
+                    ? `Quản trị viên ${user?.fullName}`
+                    : `Thủ thư ${user?.fullName}`}
+                </span>!
               </h2>
-              <p className="mt-1 max-w-xl text-sm text-primary-foreground/80">
+
+              <p className={`max-w-2xl text-xs sm:text-sm ${rolePastel.descColor} leading-relaxed`}>
                 {isOwner
                   ? `Tổng quan toàn diện: ${stats.totalCopies} cuốn sách, ${stats.activeReaders} độc giả, ${stats.currentlyBorrowing} lượt đang lưu thông, ${stats.overdueCount} quá hạn, ${stats.suspendedReadersCount || 0} thẻ tạm ngưng và ${stats.pendingRemediationCount || 0} sách chờ khắc phục.`
                   : user?.role === "admin"
-                    ? `Hạ tầng IT vận hành ổn định: ${stats.totalBooks} đầu sách (${stats.totalCopies} bản sao), ${stats.activeReaders} tài khoản độc giả và toàn bộ nhật ký audit được ghi nhận an toàn.`
+                    ? `Hạ tầng IT vận hành ổn định: ${stats.totalBooks} đầu sách (${stats.totalCopies} bản sao), ${stats.activeReaders} tài khoản độc giả và toàn bộ nhật ký hoạt động được ghi nhận an toàn.`
                     : `Bàn lưu thông hôm nay ghi nhận đang có ${stats.currentlyBorrowing} lượt mượn sách hoạt động, ${stats.overdueCount} lượt quá hạn và ${stats.pendingRemediationCount || 0} hồ sơ chờ khắc phục.`}
               </p>
             </div>
-            <div className="flex flex-wrap gap-2">
+
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0 pt-1 md:pt-0">
               {isOwner ? (
                 <>
-                  <Button size="lg" variant="secondary" onClick={() => navigate("/settings")} className="gap-2 shadow-sm font-semibold">
+                  <Button size="default" onClick={() => navigate("/book-requests")} className={`gap-2 shadow-xs font-semibold ${rolePastel.primaryBtn} h-9 sm:h-10 px-4`}>
+                    <ClipboardCheck className="h-4 w-4" /> Duyệt Phiếu Kho
+                  </Button>
+                  <Button size="default" variant="outline" onClick={() => navigate("/settings")} className={`gap-2 border hover:bg-muted font-medium ${rolePastel.outlineBtn} h-9 sm:h-10 px-4`}>
                     <Shield className="h-4 w-4" /> Phê duyệt Quy chế
                   </Button>
-                  <Button size="lg" variant="outline" onClick={() => navigate("/reports")} className="gap-2 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/20 border-primary-foreground/30">
+                  <Button size="default" variant="outline" onClick={() => navigate("/reports")} className={`gap-2 border hover:bg-muted font-medium ${rolePastel.outlineBtn} h-9 sm:h-10 px-4`}>
                     <BarChart3 className="h-4 w-4" /> Báo cáo quản trị
                   </Button>
                 </>
               ) : user?.role === "admin" ? (
                 <>
-                  <Button size="lg" variant="secondary" onClick={() => navigate("/accounts")} className="gap-2 shadow-sm font-semibold">
+                  <Button size="default" onClick={() => navigate("/accounts")} className={`gap-2 shadow-xs font-semibold ${rolePastel.primaryBtn} h-9 sm:h-10 px-4`}>
                     <ShieldCheck className="h-4 w-4" /> Quản lý tài khoản
                   </Button>
-                  <Button size="lg" variant="outline" onClick={() => navigate("/activity-logs")} className="gap-2 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/20 border-primary-foreground/30">
-                    <Activity className="h-4 w-4" /> Nhật ký an ninh (Audit)
+                  <Button size="default" variant="outline" onClick={() => navigate("/book-requests")} className={`gap-2 border hover:bg-muted font-medium ${rolePastel.outlineBtn} h-9 sm:h-10 px-4`}>
+                    <ClipboardCheck className="h-4 w-4" /> Giám sát Kho sách
+                  </Button>
+                  <Button size="default" variant="outline" onClick={() => navigate("/activity-logs")} className={`gap-2 border hover:bg-muted font-medium ${rolePastel.outlineBtn} h-9 sm:h-10 px-4`}>
+                    <Activity className="h-4 w-4" /> Nhật ký hoạt động
                   </Button>
                 </>
               ) : (
                 <>
-                  <Button size="lg" variant="secondary" onClick={() => navigate("/borrow")} className="gap-2 shadow-sm font-semibold">
+                  <Button size="default" onClick={() => navigate("/borrow")} className={`gap-2 shadow-xs font-semibold ${rolePastel.primaryBtn} h-9 sm:h-10 px-4`}>
                     <Zap className="h-4 w-4" /> Quầy Đa Năng Mượn / Trả
                   </Button>
-                  <Button size="lg" variant="outline" onClick={() => navigate("/books")} className="gap-2 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/20 border-primary-foreground/30">
+                  <Button size="default" variant="outline" onClick={() => navigate("/books")} className={`gap-2 border hover:bg-muted font-medium ${rolePastel.outlineBtn} h-9 sm:h-10 px-4`}>
                     <BookOpen className="h-4 w-4" /> Kho Sách & Mã QR
                   </Button>
                 </>
@@ -226,8 +280,8 @@ export default function Dashboard() {
           ))}
         </div>
 
-        {/* Dự Báo Nhu Cầu & Cảnh Báo Nhập Sách Bằng AI (Smart Restock & Demand Forecasting) */}
-        <SmartDemandForecastPanel />
+        {/* Dự Báo Nhu Cầu & Cảnh Báo Nhập Sách Bằng AI (Thủ thư vận hành kho; Chủ thư viện giám sát) */}
+        {user?.role !== "admin" && <SmartDemandForecastPanel />}
 
         {/* Charts & Popular */}
         <div className="grid gap-6 lg:grid-cols-3">
@@ -412,29 +466,86 @@ export default function Dashboard() {
 
   const activeReservationsCount = readerReservations.filter(r => r.status === 'pending' || r.status === 'ready').length;
 
+  const readerPastel = {
+    cardBg: "from-[#FFF2E8] via-[#FFF8F2] to-[#FFE7D6] border-[#FCD8BD] dark:from-[#2B1B14] dark:via-[#241711] dark:to-[#1F130E] dark:border-[#4A2B1D]",
+    topLine: "from-orange-400 via-amber-500 to-orange-300",
+    badgeCls: "bg-orange-500/15 text-[#9C4B00] dark:text-orange-300 border-orange-400/35",
+    titleAccent: "text-[#C05621] dark:text-orange-400",
+    descColor: "text-[#7C3A18]/85 dark:text-orange-100/80",
+    primaryBtn: "bg-[#C05621] hover:bg-[#9C4215] text-white shadow-xs",
+    outlineBtn: "bg-white/80 hover:bg-white text-[#9C4B00] border-[#FCD8BD] dark:bg-orange-950/40 dark:border-orange-800 dark:text-orange-200",
+    watermarkCls: "text-orange-600/[0.07]",
+  };
+
   return (
     <div className="space-y-6">
       {/* Hero Strip for Reader */}
-      <Card className="overflow-hidden border-primary/20 bg-gradient-to-br from-terracotta to-terracotta/80 text-white shadow-md">
-        <CardContent className="flex flex-col gap-4 p-6 md:flex-row md:items-center md:justify-between">
-          <div>
-            <Badge className="bg-white/15 text-white hover:bg-white/20 border-0">
-              <Award className="mr-1 h-3.5 w-3.5 text-gold animate-bounce" /> Thẻ độc giả Athenaeum
-            </Badge>
-            <h2 className="mt-3 font-display text-3xl font-semibold tracking-tight md:text-4xl">
-              {getTimeBasedGreeting()}, {user?.fullName}!
+      <Card className={`overflow-hidden border bg-gradient-to-br ${readerPastel.cardBg} text-foreground shadow-xs relative rounded-2xl`}>
+        {/* Subtle Luxury Top Accent Line */}
+        <div className={`h-1 w-full bg-gradient-to-r ${readerPastel.topLine}`} />
+
+        {/* Faint Decorative Background Watermark */}
+        <BookOpen className={`pointer-events-none absolute -right-6 -bottom-6 h-44 w-44 ${readerPastel.watermarkCls} select-none -rotate-12`} />
+
+        <CardContent className="relative flex flex-col gap-4 p-5 sm:p-6 md:flex-row md:items-center md:justify-between">
+          <div className="space-y-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="outline" className={`font-semibold text-xs px-2.5 py-0.5 rounded-full shadow-2xs gap-1.5 ${readerPastel.badgeCls}`}>
+                <BookOpen className="h-3.5 w-3.5" />
+                <span>Thẻ độc giả Athenaeum</span>
+              </Badge>
+              {readerCirculationStatus?.eligibleToBorrow && (
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-800 dark:text-emerald-300 bg-emerald-500/15 px-2 py-0.5 rounded-full border border-emerald-500/30">
+                  <CheckCircle2 className="h-3 w-3" /> Thẻ kích hoạt
+                </span>
+              )}
+            </div>
+
+            <h2 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-foreground leading-snug">
+              {getTimeBasedGreeting()},{" "}
+              <span className={`${readerPastel.titleAccent} font-bold`}>{user?.fullName || "Bạn"}</span>!
             </h2>
-            <p className="mt-1 max-w-2xl text-sm text-white/85 leading-relaxed">
-              Chúc bạn có những giờ phút đọc sách thú vị. Bạn đang giữ <strong>{activeBorrows.length}</strong> cuốn sách đang mượn và có{" "}
-              <strong>{overdueActiveBorrows.length}</strong> cuốn sách quá hạn cần hoàn trả.
+
+            <p className={`max-w-2xl text-xs sm:text-sm ${readerPastel.descColor} leading-relaxed`}>
+              Chúc bạn có những giờ phút đọc sách thú vị. Bạn đang giữ{" "}
+              <strong className="text-foreground font-semibold underline decoration-orange-400/50 underline-offset-2">
+                {activeBorrows.length} cuốn sách
+              </strong>{" "}
+              đang mượn
+              {overdueActiveBorrows.length > 0 ? (
+                <>
+                  {" "}và có{" "}
+                  <strong className="text-destructive font-semibold">
+                    {overdueActiveBorrows.length} cuốn quá hạn
+                  </strong>{" "}
+                  cần hoàn trả.
+                </>
+              ) : (
+                " và không có cuốn sách nào bị quá hạn."
+              )}
               {readerCirculationStatus && !readerCirculationStatus.eligibleToBorrow && (
-                <span> {readerCirculationStatus.blockReason}.</span>
+                <span className="text-destructive font-medium block mt-1">
+                  ⚠️ {readerCirculationStatus.blockReason}.
+                </span>
               )}
             </p>
           </div>
-          <div className="flex gap-2">
-            <Button size="lg" variant="secondary" onClick={() => navigate("/books")} className="gap-2 shadow-sm text-terracotta hover:text-terracotta/90 bg-white">
-              <BookOpen className="h-4 w-4" /> Khám phá kho sách
+
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0 pt-1 md:pt-0">
+            <Button
+              onClick={() => navigate("/books")}
+              className={`gap-2 shadow-xs font-semibold ${readerPastel.primaryBtn} h-9 sm:h-10 px-4`}
+            >
+              <BookOpen className="h-4 w-4" />
+              <span>Khám phá kho sách</span>
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => navigate("/borrow")}
+              className={`gap-2 border hover:bg-muted font-medium ${readerPastel.outlineBtn} h-9 sm:h-10 px-4`}
+            >
+              <QrCode className="h-4 w-4" />
+              <span>Phiếu mượn & Thẻ đọc</span>
             </Button>
           </div>
         </CardContent>
@@ -471,7 +582,7 @@ export default function Dashboard() {
                   : `${overdueActiveBorrows.length} quá hạn`
                 : "Đủ điều kiện",
             icon: AlertTriangle,
-            accent: "var(--chart-2)",
+            accent: readerCirculationStatus?.eligibleToBorrow === false ? "var(--destructive)" : "var(--success)",
             desc:
               readerCirculationStatus?.eligibleToBorrow === false
                 ? readerCirculationStatus.blockReason || "Quyền mượn tạm ngưng theo quy chế"

@@ -5,8 +5,8 @@ const { authenticateToken, requireRole } = require('../middlewares/authMiddlewar
 
 router.get('/', authorController.getAllAuthors);
 router.get('/:id', authorController.getAuthorById);
-router.post('/', authenticateToken, requireRole(['admin', 'librarian', 'owner']), authorController.createAuthor);
-router.put('/:id', authenticateToken, requireRole(['admin', 'librarian', 'owner']), authorController.updateAuthor);
-router.delete('/:id', authenticateToken, requireRole(['admin', 'librarian', 'owner']), authorController.deleteAuthor);
+router.post('/', authenticateToken, requireRole(['admin', 'librarian']), authorController.createAuthor);
+router.put('/:id', authenticateToken, requireRole(['admin', 'librarian']), authorController.updateAuthor);
+router.delete('/:id', authenticateToken, requireRole(['admin', 'librarian']), authorController.deleteAuthor);
 
 module.exports = router;

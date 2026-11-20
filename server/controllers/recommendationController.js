@@ -155,6 +155,7 @@ exports.getRecommendations = async (req, res) => {
             LEFT JOIN categories c ON b.category_id = c.id
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN publishers p ON b.publisher_id = p.id
+            WHERE COALESCE(b.status, 'active') = 'active'
         `);
 
         // Tìm số lượt mượn cao nhất để chuẩn hóa độ phổ biến
@@ -548,6 +549,7 @@ exports.getTrendingInsights = async (req, res) => {
             LEFT JOIN authors a ON b.author_id = a.id
             JOIN book_copies bc ON bc.book_id = b.id
             JOIN borrow_records br ON br.book_copy_id = bc.id
+            WHERE COALESCE(b.status, 'active') = 'active'
             GROUP BY b.id, b.title, b.cover_image, b.available_copies, b.total_copies, b.avg_rating, c.name, a.name
             ORDER BY borrow_count DESC
             LIMIT 4

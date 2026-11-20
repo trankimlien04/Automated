@@ -1,5 +1,5 @@
 import js from "@eslint/js";
-import eslintPluginPrettier from "eslint-plugin-prettier/recommended";
+import eslintConfigPrettier from "eslint-config-prettier/flat";
 import globals from "globals";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
@@ -32,9 +32,12 @@ export default tseslint.config(
           ],
         },
       ],
+      "no-empty": ["error", { allowEmptyCatch: true }],
       "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
+      // Surface explicit `any` as warnings so CI blocks real bugs while legacy UI pages are incrementally typed
+      "@typescript-eslint/no-explicit-any": "warn",
       "@typescript-eslint/no-unused-vars": "off",
     },
   },
-  eslintPluginPrettier,
+  eslintConfigPrettier,
 );

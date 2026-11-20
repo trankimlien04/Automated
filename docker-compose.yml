@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     command: --default-authentication-plugin=mysql_native_password --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     environment:
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
       MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-rootpassword}
       MYSQL_DATABASE: ${DB_NAME:-smart_library}
     ports:
@@ -43,10 +44,21 @@ services:
       DB_PORT: 3306
       JWT_SECRET: ${JWT_SECRET:-smart_library_secret_key_2026_super_secure}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+      LIBRARY_TIMEZONE: ${LIBRARY_TIMEZONE:-Asia/Ho_Chi_Minh}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:8088}
       EMAIL_HOST: ${EMAIL_HOST:-smtp.gmail.com}
       EMAIL_PORT: ${EMAIL_PORT:-587}
+      EMAIL_SECURE: ${EMAIL_SECURE:-false}
       EMAIL_USER: ${EMAIL_USER:-}
       EMAIL_PASS: ${EMAIL_PASS:-}
+      EMAIL_FROM: ${EMAIL_FROM:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-}
+      SMTP_SECURE: ${SMTP_SECURE:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
     ports:
       - "${BACKEND_PORT:-5000}:5000"
     depends_on:
