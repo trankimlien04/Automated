@@ -132,7 +132,7 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
       case "admin":
         return "Tìm tài khoản, phân quyền, cấu hình quy chế, nhật ký… (Ctrl+K)";
       case "owner":
-        return "Tìm đề xuất duyệt, nhân sự, kiểm toán, kho sách… (Ctrl+K)";
+        return "Tìm đề xuất duyệt, nhân sự, nhật ký hoạt động, kho sách… (Ctrl+K)";
       case "reader":
       default:
         return "Tìm sách thư viện, phiếu mượn, mã đặt trước… (Ctrl+K)";
@@ -286,16 +286,16 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
     (results.logs && results.logs.length > 0);
 
   return (
-    <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b border-border bg-background/90 px-4 backdrop-blur-md md:px-6">
-      <SidebarTrigger />
-      <div className="hidden md:block">
-        <h1 className="font-display text-xl font-semibold leading-none">{title}</h1>
-        {subtitle && <p className="mt-1 text-xs text-muted-foreground">{subtitle}</p>}
+    <header className="sticky top-0 z-30 flex h-16 items-center gap-2 sm:gap-4 border-b border-border bg-background/90 px-3 sm:px-4 backdrop-blur-md md:px-6">
+      <SidebarTrigger className="shrink-0" />
+      <div className="hidden md:block min-w-0">
+        <h1 className="font-display text-xl font-semibold leading-none truncate">{title}</h1>
+        {subtitle && <p className="mt-1 text-xs text-muted-foreground truncate">{subtitle}</p>}
       </div>
 
-      <div className="ml-auto flex items-center gap-2">
+      <div className="ml-auto flex flex-1 md:flex-initial items-center justify-end gap-1.5 sm:gap-2 min-w-0">
         {/* Global Live Search Bar */}
-        <div ref={searchContainerRef} className="relative w-64 sm:w-80 md:w-[420px]">
+        <div ref={searchContainerRef} className="relative flex-1 min-w-0 sm:flex-initial sm:w-72 md:w-[380px] lg:w-[420px]">
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -323,7 +323,7 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
 
           {/* Search Result Dropdown Menu */}
           {isOpen && query.trim().length > 0 && (
-            <div className="absolute left-0 right-0 top-full mt-1.5 max-h-[480px] overflow-y-auto rounded-xl border border-border/80 bg-popover/95 p-2 shadow-2xl backdrop-blur-md z-50 animate-in fade-in-50 zoom-in-95">
+            <div className="absolute right-[-88px] w-[calc(100vw-1.5rem)] sm:w-auto sm:left-0 sm:right-0 top-full mt-1.5 max-h-[75dvh] sm:max-h-[480px] overflow-y-auto rounded-xl border border-border/80 bg-popover/95 p-2 shadow-2xl backdrop-blur-md z-50 animate-in fade-in-50 zoom-in-95">
               {loading ? (
                 <div className="flex items-center justify-center py-8 text-xs text-muted-foreground gap-2">
                   <Loader2 className="h-4 w-4 animate-spin text-primary" />
@@ -652,12 +652,12 @@ export function TopBar({ title, subtitle }: { title: string; subtitle?: string }
                     </div>
                   )}
 
-                  {/* NHẬT KÝ KIỂM TOÁN HOẠT ĐỘNG (ADMIN, OWNER) */}
+                  {/* NHẬT KÝ HOẠT ĐỘNG HỆ THỐNG (ADMIN, OWNER) */}
                   {(role === "admin" || role === "owner") && results.logs && results.logs.length > 0 && (
                     <div>
                       <div className="flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold text-muted-foreground uppercase tracking-wider border-t border-border/50 pt-2">
                         <ShieldAlert className="h-3.5 w-3.5 text-rose-500" />
-                        <span>Nhật ký kiểm toán ({results.logs.length})</span>
+                        <span>Nhật ký hoạt động ({results.logs.length})</span>
                       </div>
                       <div className="space-y-1 mt-1">
                         {results.logs.map((l) => (

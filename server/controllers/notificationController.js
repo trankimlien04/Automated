@@ -174,26 +174,26 @@ exports.getNotifications = async (req, res) => {
                     daysDiff < 0
                         ? 'overdue'
                         : daysDiff === 0
-                        ? 'due_today'
-                        : daysDiff <= 3
-                        ? 'upcoming_2d'
-                        : smartLevel;
+                            ? 'due_today'
+                            : daysDiff <= 3
+                                ? 'upcoming_2d'
+                                : smartLevel;
 
                 return {
                     ...noti,
                     smart_reminder: effectiveLevel
                         ? {
-                              level: effectiveLevel,
-                              borrow_record_id: matchedBorrow.borrow_record_id,
-                              book_id: matchedBorrow.book_id,
-                              book_title: matchedBorrow.book_title,
-                              copy_qr: matchedBorrow.copy_qr,
-                              due_date: matchedBorrow.due_date,
-                              days_diff: daysDiff,
-                              renewal_count: renewalCount,
-                              waiting_reservations: waitingRes,
-                              can_quick_renew: canQuickRenew
-                          }
+                            level: effectiveLevel,
+                            borrow_record_id: matchedBorrow.borrow_record_id,
+                            book_id: matchedBorrow.book_id,
+                            book_title: matchedBorrow.book_title,
+                            copy_qr: matchedBorrow.copy_qr,
+                            due_date: matchedBorrow.due_date,
+                            days_diff: daysDiff,
+                            renewal_count: renewalCount,
+                            waiting_reservations: waitingRes,
+                            can_quick_renew: canQuickRenew
+                        }
                         : null
                 };
             }
@@ -202,17 +202,17 @@ exports.getNotifications = async (req, res) => {
                 ...noti,
                 smart_reminder: smartLevel
                     ? {
-                          level: smartLevel,
-                          borrow_record_id: null,
-                          book_id: null,
-                          book_title: null,
-                          copy_qr: null,
-                          due_date: null,
-                          days_diff: smartLevel === 'overdue' ? -1 : smartLevel === 'due_today' ? 0 : 2,
-                          renewal_count: 0,
-                          waiting_reservations: 0,
-                          can_quick_renew: false
-                      }
+                        level: smartLevel,
+                        borrow_record_id: null,
+                        book_id: null,
+                        book_title: null,
+                        copy_qr: null,
+                        due_date: null,
+                        days_diff: smartLevel === 'overdue' ? -1 : smartLevel === 'due_today' ? 0 : 2,
+                        renewal_count: 0,
+                        waiting_reservations: 0,
+                        can_quick_renew: false
+                    }
                     : null
             };
         });
@@ -431,167 +431,50 @@ exports.broadcastNotification = async (req, res) => {
 // Kích hoạt quét nghiệp vụ & gửi thông báo nhắc hạn / quá hạn đa kênh (In-app + Email)
 exports.triggerManualReminders = async (req, res) => {
     const emailService = require('../services/emailService');
+    const { runDueDateRemindersSweep } = require('../services/dueReminderService');
 
     try {
-        const today = new Date();
-        const todayStr = today.toISOString().slice(0, 10);
-        let inAppCount = 0;
-        let emailCount = 0;
-
-        // 1. Nhắc sách sắp đến hạn trong 2 ngày (T - 2 ngày)
-        const inTwoDays = new Date();
-        inTwoDays.setDate(today.getDate() + 2);
-        const inTwoDaysStr = inTwoDays.toISOString().slice(0, 10);
-
-        const [dueSoon] = await db.execute(`
-            SELECT br.user_id, br.due_date, bc.qr_code as copy_qr, b.title,
-                   u.full_name, u.email, u.card_number
-            FROM borrow_records br
-            JOIN book_copies bc ON br.book_copy_id = bc.id
-            JOIN books b ON bc.book_id = b.id
-            JOIN users u ON br.user_id = u.id
-            WHERE br.status = 'borrowing' AND br.due_date = ?
-        `, [inTwoDaysStr]);
-
-        for (const item of dueSoon) {
-            await db.execute(
-                'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
-                [
-                    item.user_id,
-                    'Nhắc nhở trả sách sắp đến hạn (còn 2 ngày)',
-                    `Cuốn sách "${item.title}" của bạn sẽ đến hạn trả vào ngày ${new Date(item.due_date).toLocaleDateString('vi-VN')}. Vui lòng sắp xếp hoàn trả hoặc gia hạn trực tuyến.`
-                ]
-            );
-            inAppCount++;
-
-            if (item.email) {
-                await emailService.sendDueReminderEmail({
-                    to: item.email,
-                    userId: item.user_id,
-                    fullName: item.full_name,
-                    cardNumber: item.card_number,
-                    bookTitle: item.title,
-                    copyQr: item.copy_qr,
-                    dueDate: item.due_date,
-                    daysLeft: 2
-                });
-                emailCount++;
-            }
-        }
-
-        // 2. Hạn chót trả sách hôm nay (T - 0 ngày)
-        const [dueToday] = await db.execute(`
-            SELECT br.user_id, br.due_date, bc.qr_code as copy_qr, b.title,
-                   u.full_name, u.email, u.card_number
-            FROM borrow_records br
-            JOIN book_copies bc ON br.book_copy_id = bc.id
-            JOIN books b ON bc.book_id = b.id
-            JOIN users u ON br.user_id = u.id
-            WHERE br.status = 'borrowing' AND br.due_date = ?
-        `, [todayStr]);
-
-        for (const item of dueToday) {
-            await db.execute(
-                'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
-                [
-                    item.user_id,
-                    '⚠️ HẠN CHÓT: Sách đến hạn trả hôm nay',
-                    `Hôm nay là ngày cuối cùng hoàn trả cuốn "${item.title}". Bạn có thể trả tại quầy hoặc thả vào Hòm trả sách tự động 24/7 để tránh bị phạt.`
-                ]
-            );
-            inAppCount++;
-
-            if (item.email) {
-                await emailService.sendDueTodayEmail({
-                    to: item.email,
-                    userId: item.user_id,
-                    fullName: item.full_name,
-                    cardNumber: item.card_number,
-                    bookTitle: item.title,
-                    copyQr: item.copy_qr,
-                    dueDate: item.due_date
-                });
-                emailCount++;
-            }
-        }
-
-        // 3. Cảnh báo sách quá hạn & tạm khóa mượn mới (T + 1 hoặc lâu hơn)
-        const [overdue] = await db.execute(`
-            SELECT br.user_id, br.due_date, bc.qr_code as copy_qr, b.title,
-                   u.full_name, u.email, u.card_number
-            FROM borrow_records br
-            JOIN book_copies bc ON br.book_copy_id = bc.id
-            JOIN books b ON bc.book_id = b.id
-            JOIN users u ON br.user_id = u.id
-            WHERE br.status = 'borrowing' AND br.due_date < ?
-        `, [todayStr]);
-
-        for (const item of overdue) {
-            const dueDate = new Date(item.due_date);
-            const diffTime = Math.abs(today - dueDate);
-            const overdueDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-            await db.execute(
-                'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "warning")',
-                [
-                    item.user_id,
-                    `🔴 Quá hạn ${overdueDays} ngày & Tạm khóa mượn mới: «${item.title}»`,
-                    `Cuốn sách "${item.title}" [${item.copy_qr}] đã quá hạn trả ${overdueDays} ngày. Hệ thống đã tạm khóa quyền mượn sách mới của thẻ. Vui lòng hoàn trả sách tại Quầy hoặc Hòm 24/7 để mở khóa thẻ ngay!`
-                ]
-            );
-            inAppCount++;
-
-            if (item.email) {
-                await emailService.sendOverdueWarningEmail({
-                    to: item.email,
-                    userId: item.user_id,
-                    fullName: item.full_name,
-                    cardNumber: item.card_number,
-                    bookTitle: item.title,
-                    copyQr: item.copy_qr,
-                    dueDate: item.due_date,
-                    overdueDays
-                });
-                emailCount++;
-            }
-        }
-
-        // 4. Cảnh báo thẻ độc giả sắp hết hạn (trong 15 ngày)
-        const in15Days = new Date();
-        in15Days.setDate(today.getDate() + 15);
-        const in15DaysStr = in15Days.toISOString().slice(0, 10);
-
-        const [expiringUsers] = await db.execute(`
-            SELECT id, full_name, email, card_number, card_expiry
-            FROM users
-            WHERE role = 'reader' AND status = 'active' AND card_expiry BETWEEN ? AND ?
-        `, [todayStr, in15DaysStr]);
-
-        for (const u of expiringUsers) {
-            await db.execute(
-                'INSERT INTO notifications (user_id, title, message, type) VALUES (?, ?, ?, "reminder")',
-                [
-                    u.id,
-                    'Thẻ thư viện sắp hết hạn',
-                    `Thẻ thư viện ${u.card_number} của bạn sẽ hết hạn vào ngày ${new Date(u.card_expiry).toLocaleDateString('vi-VN')}. Vui lòng liên hệ quầy thủ thư để gia hạn thẻ.`
-                ]
-            );
-            inAppCount++;
-        }
+        const [stats, smtpStatus] = await Promise.all([
+            runDueDateRemindersSweep({
+                source: 'manual',
+                deduplicateToday: false,
+                includeAllOverdue: true,
+                cardExpiryWindowDays: 15,
+            }),
+            emailService.getSmtpStatus(),
+        ]);
 
         // Thông báo cho toàn bộ ban quản lý
         const { notifyAllStaff } = require('../services/notificationService');
+        const emailBreakdown = smtpStatus.configured
+            ? `${stats.realEmailCount} email gửi thật thành công${stats.failedEmailCount > 0 ? `, ${stats.failedEmailCount} thất bại` : ''}`
+            : `${stats.simulatedEmailCount} lượt ghi nhận mô phỏng (chưa bật SMTP thực tế)`;
+
         await notifyAllStaff(
             'Báo cáo tự động: Quét cảnh báo nhắc hạn đa kênh',
-            `Quá trình quét tự động hoàn tất: Đã phát hành ${inAppCount} thông báo hệ thống và ${emailCount} lượt email nhắc hạn/quá hạn chủ động.`,
-            'info'
+            `Quá trình quét hoàn tất: Đã phát hành ${stats.inAppCount} thông báo In-app và ${emailBreakdown}.`,
+            stats.failedEmailCount > 0 ? 'warning' : 'info'
         );
 
+        let message = `Đã hoàn tất quét: ${stats.inAppCount} thông báo in-app`;
+        if (stats.emailCount === 0) {
+            message += ' (không có độc giả nào sắp đến hạn/quá hạn cần gửi email hôm nay).';
+        } else if (smtpStatus.configured) {
+            message += `, gửi thực tế ${stats.realEmailCount}/${stats.emailCount} email${stats.failedEmailCount > 0 ? ` (${stats.failedEmailCount} lỗi gửi SMTP)` : ''}!`;
+        } else {
+            message += ` và ghi nhận ${stats.simulatedEmailCount} lượt ở chế độ Mô phỏng (chưa cấu hình SMTP thực tế).`;
+        }
+
         res.status(200).json({
-            message: `Đã hoàn tất quét và phát hành ${inAppCount} thông báo in-app và ${emailCount} email nhắc hạn chủ động!`,
-            count: inAppCount + emailCount,
-            inAppCount,
-            emailCount
+            message,
+            count: stats.inAppCount + stats.emailCount,
+            inAppCount: stats.inAppCount,
+            emailCount: stats.emailCount,
+            realEmailCount: stats.realEmailCount,
+            simulatedEmailCount: stats.simulatedEmailCount,
+            failedEmailCount: stats.failedEmailCount,
+            smtpMode: smtpStatus.mode,
+            stats,
         });
     } catch (error) {
         console.error('Lỗi khi quét thông báo nghiệp vụ đa kênh:', error);
@@ -625,11 +508,16 @@ exports.getDispatchHistory = async (req, res) => {
     }
 };
 
-// Gửi thử nghiệm một email cảnh báo mẫu
+// Gửi email cảnh báo theo kịch bản mẫu (gửi thật qua SMTP nếu đã cấu hình)
 exports.testSendEmail = async (req, res) => {
     const { targetEmail, templateType = 'due_reminder_t2' } = req.body;
-    const recipient = targetEmail || req.user.email;
+    const recipient = String(targetEmail || req.user.email || '').trim();
     const emailService = require('../services/emailService');
+    const { isValidEmail } = require('../utils/validators');
+
+    if (!isValidEmail(recipient)) {
+        return res.status(400).json({ message: 'Địa chỉ email người nhận không hợp lệ' });
+    }
 
     try {
         let result;
@@ -669,6 +557,29 @@ exports.testSendEmail = async (req, res) => {
                 copyQr: sampleQr,
                 droppedAt: new Date()
             });
+        } else if (templateType === 'account_suspended') {
+            const suspendedUntil = new Date(Date.now() + 5 * 86400000);
+            result = await emailService.sendSuspensionNoticeEmail({
+                to: recipient,
+                userId: req.user.id,
+                fullName: req.user.full_name,
+                cardNumber: req.user.card_number || 'LIB-RD-000001',
+                suspendedUntil,
+                suspendedDaysAdded: 5,
+                overdueDays: 5,
+                bookTitle: sampleBook,
+            });
+        } else if (templateType === 'reservation_ready') {
+            result = await emailService.sendReservationReadyEmail({
+                to: recipient,
+                userId: req.user.id,
+                fullName: req.user.full_name,
+                cardNumber: req.user.card_number || 'LIB-RD-000001',
+                bookTitle: sampleBook,
+                location: 'Phòng 01 - Kệ 01 - Ngăn 02',
+                ticketCode: 'TICKET-RES-SAMPLE',
+                expiresAt: new Date(Date.now() + 48 * 3600000),
+            });
         } else {
             result = await emailService.sendDueReminderEmail({
                 to: recipient,
@@ -682,13 +593,157 @@ exports.testSendEmail = async (req, res) => {
             });
         }
 
+        if (!result?.success) {
+            return res.status(502).json({
+                message: result?.error || result?.message || 'Gửi email SMTP thất bại',
+                simulated: false,
+                details: result
+            });
+        }
+
+        if (result.mode === 'simulated') {
+            return res.status(200).json({
+                message: `Chưa cấu hình SMTP thực tế — email tới ${recipient} mới được ghi nhận ở chế độ Mô phỏng. Vui lòng thiết lập SMTP ở tab "Cấu hình SMTP" hoặc file .env để gửi email thật.`,
+                simulated: true,
+                details: result
+            });
+        }
+
         res.status(200).json({
-            message: `Đã phát hành email thử nghiệm thành công tới ${recipient}!`,
+            message: `Đã gửi email thực tế thành công tới ${recipient}!`,
+            simulated: false,
             details: result
         });
     } catch (error) {
-        console.error('Lỗi khi gửi email thử nghiệm:', error);
-        res.status(500).json({ message: 'Lỗi server khi gửi email thử nghiệm' });
+        console.error('Lỗi khi gửi email:', error);
+        res.status(500).json({ message: 'Lỗi server khi gửi email' });
+    }
+};
+
+// Lấy trạng thái cấu hình SMTP hiện tại (không trả về mật khẩu) + thông tin Cron 08:00 tự động
+exports.getSmtpStatus = async (req, res) => {
+    const emailService = require('../services/emailService');
+    const cronJobs = require('../services/cronJobs');
+    try {
+        const [status, cron] = await Promise.all([
+            emailService.getSmtpStatus(),
+            typeof cronJobs.getCronRuntimeInfo === 'function' ? cronJobs.getCronRuntimeInfo() : Promise.resolve(null),
+        ]);
+        res.status(200).json({ ...status, cron });
+    } catch (error) {
+        console.error('Lỗi khi kiểm tra trạng thái SMTP:', error);
+        res.status(500).json({ message: 'Lỗi server khi kiểm tra trạng thái SMTP' });
+    }
+};
+
+// Kiểm tra kết nối SMTP thực tế
+exports.verifySmtpConnection = async (req, res) => {
+    const emailService = require('../services/emailService');
+    try {
+        const check = await emailService.verifySmtpConnection();
+        if (!check.ok) {
+            return res.status(400).json({
+                ok: false,
+                message: check.error || 'Không thể kết nối tới máy chủ SMTP',
+                ...check,
+            });
+        }
+        res.status(200).json({
+            ok: true,
+            message: `Kết nối SMTP (${check.host}:${check.port}) hoạt động bình thường!`,
+            ...check,
+        });
+    } catch (error) {
+        console.error('Lỗi khi xác thực SMTP:', error);
+        res.status(500).json({ ok: false, message: 'Lỗi server khi kiểm tra kết nối SMTP' });
+    }
+};
+
+// Lưu cấu hình SMTP thực tế (Admin / Chủ thư viện) - verify trước khi lưu
+exports.updateSmtpConfig = async (req, res) => {
+    const emailService = require('../services/emailService');
+    try {
+        const result = await emailService.saveSmtpConfig({
+            host: req.body?.host,
+            port: req.body?.port,
+            secure: req.body?.secure,
+            user: req.body?.user,
+            pass: req.body?.pass,
+            fromAddress: req.body?.fromAddress,
+            updatedBy: req.user.id,
+        });
+
+        if (!result.success) {
+            return res.status(result.status || 400).json({ message: result.message });
+        }
+
+        await db.execute(
+            'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, "UPDATE_SMTP_CONFIG", "email_settings", NULL, ?)',
+            [req.user.id, `Cập nhật và xác thực cấu hình SMTP thực tế (${result.smtpStatus?.host}:${result.smtpStatus?.port})`]
+        ).catch(() => {});
+
+        res.status(200).json(result);
+    } catch (error) {
+        console.error('Lỗi khi lưu cấu hình SMTP:', error);
+        res.status(500).json({ message: 'Lỗi server khi lưu cấu hình SMTP' });
+    }
+};
+
+// Xóa cấu hình SMTP lưu trong DB (quay về biến môi trường .env)
+exports.resetSmtpConfig = async (req, res) => {
+    const emailService = require('../services/emailService');
+    try {
+        const smtpStatus = await emailService.clearSmtpConfig();
+        await db.execute(
+            'INSERT INTO activity_logs (user_id, action, target_type, target_id, details) VALUES (?, "RESET_SMTP_CONFIG", "email_settings", NULL, ?)',
+            [req.user.id, 'Gỡ cấu hình SMTP trong DB, quay về biến môi trường .env']
+        ).catch(() => {});
+
+        res.status(200).json({
+            message: smtpStatus.configured
+                ? 'Đã gỡ cấu hình SMTP trong DB — hệ thống đang dùng cấu hình từ file .env.'
+                : 'Đã gỡ cấu hình SMTP trong DB — hệ thống chuyển về chế độ Mô phỏng cho đến khi cấu hình lại.',
+            smtpStatus,
+        });
+    } catch (error) {
+        console.error('Lỗi khi gỡ cấu hình SMTP:', error);
+        res.status(500).json({ message: 'Lỗi server khi gỡ cấu hình SMTP' });
+    }
+};
+
+// Lấy tùy chọn nhận email biên lai giao dịch tại quầy & ma trận kênh thông báo
+exports.getNotificationPreferences = async (req, res) => {
+    try {
+        const {
+            getUserNotificationPreferences,
+            NOTIFICATION_POLICIES,
+        } = require('../services/notificationService');
+        const prefs = await getUserNotificationPreferences(req.user.id);
+        res.status(200).json({
+            emailReceipts: prefs.emailReceipts,
+            policies: NOTIFICATION_POLICIES,
+        });
+    } catch (error) {
+        console.error('Lỗi khi lấy tùy chọn thông báo:', error);
+        res.status(500).json({ message: 'Lỗi server khi lấy tùy chọn thông báo' });
+    }
+};
+
+// Cập nhật tùy chọn nhận Email biên lai mượn / trả tại quầy (Nhóm 2 - Tùy chọn)
+exports.updateNotificationPreferences = async (req, res) => {
+    try {
+        const { updateUserNotificationPreferences } = require('../services/notificationService');
+        const emailReceipts = Boolean(req.body?.emailReceipts);
+        const updated = await updateUserNotificationPreferences(req.user.id, { emailReceipts });
+        res.status(200).json({
+            message: updated.emailReceipts
+                ? 'Đã bật nhận biên lai Mượn / Trả tại quầy qua Email.'
+                : 'Đã tắt nhận biên lai Mượn / Trả tại quầy qua Email (vẫn luôn lưu đầy đủ trên In-app).',
+            emailReceipts: updated.emailReceipts,
+        });
+    } catch (error) {
+        console.error('Lỗi khi cập nhật tùy chọn thông báo:', error);
+        res.status(500).json({ message: 'Lỗi server khi cập nhật tùy chọn thông báo' });
     }
 };
 

@@ -45,3 +45,5 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+# Database backups - do not commit
+backup_*.sql

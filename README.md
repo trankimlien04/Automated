@@ -17,7 +17,7 @@ Smart Library là một ứng dụng quản lý thư viện toàn diện (Fullst
 - **Core:** Node.js, Express.js
 - **Database:** MySQL (Sử dụng `mysql2`)
 - **Authentication & Security:** JSON Web Token (JWT), bcrypt (Mã hóa mật khẩu), CORS
-- **Tiện ích:** Dotenv, Node-cron (Chạy các tác vụ tự động như cập nhật tiền phạt, trạng thái sách)
+- **Tiện ích:** Dotenv, Node-cron (Chạy các tác vụ tự động như kiểm tra trạng thái quá hạn, tạm ngưng mượn, giữ chỗ và nhắc nhở)
 
 ---
 
@@ -88,11 +88,11 @@ Hệ thống cung cấp sẵn 4 tài khoản chuẩn hóa đại diện cho 4 va
 ## 🌟 Chức năng chính
 
 1. **Quản lý hệ thống & Phân quyền RBAC 4 vai trò:** Quản trị viên (Admin), Thủ thư (Librarian), Độc giả (Reader), Chủ thư viện / Giám đốc (Owner).
-2. **Cơ chế Đề xuất & Phê duyệt 2 cấp (Maker - Checker):** Admin gửi đề xuất thay đổi chính sách vận hành (phí phạt, hạn mượn, giới hạn sách) và Chủ thư viện độc quyền phê duyệt/bác bỏ.
+2. **Cơ chế Đề xuất & Phê duyệt 2 cấp (Maker - Checker):** Admin gửi đề xuất thay đổi chính sách vận hành (kỷ luật mượn, hạn mượn, giới hạn sách) và Chủ thư viện độc quyền phê duyệt/bác bỏ.
 2. **Quản lý Kho tài liệu:** Quản lý Sách, Bản sao sách (Book Copies), Thể loại (Categories), Tác giả (Authors), Nhà xuất bản (Publishers). Hỗ trợ QR Code cho từng bản sao sách.
 3. **Quản lý Mượn/Trả sách:** Giao diện tối ưu cho mượn/trả sách; quét mã QR Thẻ độc giả và Mã QR sách để tự động điền thông tin.
 4. **Quản lý Đặt trước (Reservations):** Độc giả có thể đặt trước các cuốn sách đang được mượn.
-5. **Quản lý Tiền phạt (Fines):** Tự động tính toán và cập nhật tiền phạt nếu độc giả trả sách trễ hạn (thông qua Cron Job).
+5. **Quản lý Vi phạm & Kỷ luật mượn (Không thu tiền phạt):** Tự động khóa mượn khi giữ sách quá hạn, áp dụng tạm ngưng quyền mượn theo quy chế và ghi nhận biên bản khắc phục sách hư hỏng/mất.
 6. **Thông báo (Notifications):** Gửi thông báo đến độc giả về việc quá hạn, sách đặt trước đã sẵn sàng,...
 7. **Thống kê & Báo cáo (Reports):** Xem chi tiết lịch sử hoạt động, biểu đồ mượn sách, thống kê sách được yêu thích.
 8. **Nhật ký hoạt động (Activity Logs):** Theo dõi mọi thao tác trên hệ thống để dễ dàng quản lý.
@@ -149,18 +149,19 @@ docker compose down -v
 
 ## 🔄 Tự động hóa CI/CD với GitHub Actions
 
-Tệp quy trình [`.github/workflows/ci-cd.yml`](file:///.github/workflows/ci-cd.yml) tự động thực hiện 4 giai đoạn khi có commit hoặc Pull Request:
+Tệp quy trình [`.github/workflows/ci-cd.yml`](file:///.github/workflows/ci-cd.yml) tự động thực hiện 4 giai đoạn khi có commit (`main`, `master`, `develop`, `feature/**`) hoặc Pull Request (`main`, `master`, `develop`):
 
-1. **`server-ci`**: Kiểm tra cú pháp, cài đặt dependencies và kiểm tra tính toàn vẹn của mã nguồn Backend trên Node.js 20.
-2. **`client-ci`**: Kiểm tra TypeScript và đóng gói bản phát hành Vite Frontend (`npm run build`).
-3. **`docker-build`**: Thiết lập Docker Buildx, kiểm tra tính hợp lệ của `docker-compose.yml` và build thử nghiệm 2 Docker images (`client` & `server`).
-4. **`deploy`**: Tự động SSH vào máy chủ VPS (khi đẩy code lên nhánh `main`/`master`) và cập nhật container không gián đoạn (Zero-Downtime Deployment).
+1. **`server-ci`**: Kiểm tra cú pháp toàn bộ file `.js` của Backend (`npm run lint:syntax`) và chạy bộ kiểm thử tự động Node.js (`npm test` bằng `node --test`: validators, smart search, dự báo thời gian chờ, kỷ luật mượn & RBAC API smoke tests).
+2. **`client-ci`**: Chạy kiểm tra kiểu TypeScript (`npm run typecheck`), phân tích mã nguồn ESLint (`npm run lint`) và đóng gói bản phát hành Vite Frontend (`npm run build`).
+3. **`docker-ci`**: Kiểm tra cấu hình `docker-compose.yml` + `docker-compose.prod.yml`, build 2 Docker images (`server` & `client`), khởi chạy full stack (MySQL 8.0 + Express + Nginx) để smoke-test E2E (`/api/health`, `/api/auth/login`, `/api/books`), và đẩy image lên **GitHub Container Registry (GHCR)** khi merge vào `main`/`master`.
+4. **`deploy`**: Khi pushing lên `main`/`master` và đã cấu hình đủ Secrets VPS, tự động SSH vào server để `pull` image mới nhất từ GHCR (`docker-compose.prod.yml`), khởi động lại container ít gián đoạn và kiểm tra `/api/health` sau triển khai (nếu chưa gắn VPS, job sẽ ghi nhận rõ thông tin image GHCR trong Step Summary).
 
-*Các biến Secrets cần cấu hình trên GitHub Repository (nếu kích hoạt auto deploy VPS):*
+*Các biến Secrets cần cấu hình trên GitHub Repository (khi kích hoạt auto deploy VPS):*
 - `SERVER_HOST`: IP hoặc tên miền máy chủ VPS.
 - `SERVER_USER`: Tên người dùng SSH (ví dụ: `ubuntu` hoặc `root`).
 - `SERVER_SSH_KEY`: Khóa SSH Private Key.
-- `SERVER_PORT`: Cổng SSH (mặc định 22).
+- `SERVER_PORT`: *(Tùy chọn)* Cổng SSH (mặc định `22`).
+- `DEPLOY_PATH`: *(Tùy chọn)* Thư mục dự án trên VPS (mặc định tự dò `/opt/smart-library` hoặc `~/smart-library`).
 
 ---
 

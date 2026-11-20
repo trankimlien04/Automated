@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "lint:syntax": "node scripts/check-syntax.js",
+    "test": "node --test tests/*.test.js"
   },
   "keywords": [],
   "author": "",
@@ -20,7 +21,8 @@
     "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.22.3",
     "node-cron": "^4.6.0",
-    "nodemailer": "^10.2.1"
+    "nodemailer": "^10.2.1",
+    "puppeteer-core": "^25.17.0"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

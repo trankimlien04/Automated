@@ -10,8 +10,8 @@ import {
   QrCode, BookOpen, Clock, AlertTriangle, CheckCircle2,
   Inbox, RefreshCw, FileSpreadsheet, Sparkles, ExternalLink,
   ChevronRight, Calendar, BookmarkCheck, ArrowRight, Download,
-  BookMarked, ShieldAlert, Info, Camera, Upload, Check, Zap, X, MapPin, Copy, Scan,
-  RotateCcw, Trash2, Eye, Image as ImageIcon
+  BookMarked, ShieldAlert, Info, Camera, Upload, Zap, X, MapPin, Copy, Scan,
+  RotateCcw, Trash2, Eye, Image as ImageIcon, Search, HelpCircle
 } from "lucide-react";
 import { QRCodeCanvas } from "qrcode.react";
 import api from "@/services/api";
@@ -19,8 +19,14 @@ import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { useConfirm } from "@/hooks/use-confirm";
 import { ExitPassModal } from "@/components/exit-pass-modal";
+import { ReturnSlipModal, type ReturnSlipData } from "@/components/return-slip-modal";
 import { SmartBookDropModal } from "@/components/smart-book-drop-modal";
 import { LibraryMiniMapModal } from "@/components/library-mini-map-modal";
+import {
+  DEFAULT_READER_RULES,
+  LibraryRulesDialog,
+  type PublicReaderRules,
+} from "@/components/library-rules-content";
 import { optimizeMultiBookPickPath } from "@/lib/pick-path";
 import { Link, useSearchParams } from "react-router-dom";
 import { Html5Qrcode } from "html5-qrcode";
@@ -35,6 +41,11 @@ interface BorrowRecord {
   book_title: string;
   cover_image?: string;
   qr_code: string;
+  pass_code?: string | null;
+  return_slip_id?: number | null;
+  return_slip_code?: string | null;
+  return_condition?: "normal" | "damaged" | "lost" | string | null;
+  return_condition_note?: string | null;
   location?: string;
   fine_amount?: number;
   fine_already_paid?: boolean;
@@ -55,16 +66,25 @@ export function ReaderBorrowView() {
   const [records, setRecords] = useState<BorrowRecord[]>([]);
   const [circulationStatus, setCirculationStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<"borrowing" | "history">("borrowing");
+  const [activeTab, setActiveTab] = useState<"borrowing" | "history" | "borrow_slips" | "return_slips" | "drop_box">("borrowing");
   
   // Modals & State
   const [searchParams] = useSearchParams();
   const [exitPassModalOpen, setExitPassModalOpen] = useState(false);
   const [myExitPassData, setMyExitPassData] = useState<any>(null);
   const [exitPassHistory, setExitPassHistory] = useState<any[]>([]);
+  const [returnSlipHistory, setReturnSlipHistory] = useState<ReturnSlipData[]>([]);
+  const [selectedReturnSlip, setSelectedReturnSlip] = useState<ReturnSlipData | null>(null);
+  const [returnSlipModalOpen, setReturnSlipModalOpen] = useState(false);
   const [myActiveDraft, setMyActiveDraft] = useState<any>(null);
   const [smartBookDropOpen, setSmartBookDropOpen] = useState(false);
   const [rulesDialogOpen, setRulesDialogOpen] = useState(false);
+  const [qrCardModalOpen, setQrCardModalOpen] = useState(false);
+  const [returnGuideOpen, setReturnGuideOpen] = useState(false);
+  const [dropBoxSearch, setDropBoxSearch] = useState("");
+  const [borrowSlipSearch, setBorrowSlipSearch] = useState("");
+  const [returnSlipSearch, setReturnSlipSearch] = useState("");
+  const [readerRules, setReaderRules] = useState<PublicReaderRules>(DEFAULT_READER_RULES);
   const [renewingId, setRenewingId] = useState<number | null>(null);
   const [previewProofImg, setPreviewProofImg] = useState<{ url: string; title: string; time?: string; statusLabel?: string; auditor?: string; note?: string } | null>(null);
 
@@ -80,14 +100,19 @@ export function ReaderBorrowView() {
   const fetchMyData = async () => {
     try {
       setLoading(true);
-      const [recordsRes, exitPassRes, profileRes, draftRes, historyRes, circStatusRes] = await Promise.allSettled([
+      const [recordsRes, exitPassRes, profileRes, draftRes, historyRes, returnSlipsRes, circStatusRes, rulesRes] = await Promise.allSettled([
         api.get("/borrow/records"),
         api.get("/borrow/exit-passes/my-active"),
         api.get("/users/profile/me"),
         api.get("/borrow/drafts/my-active"),
         api.get("/borrow/exit-passes/my-history"),
-        api.get("/fines/circulation-status")
+        api.get("/borrow/return-slips/my-history"),
+        api.get("/fines/circulation-status"),
+        api.get("/configs/public-rules")
       ]);
+      if (rulesRes.status === "fulfilled" && rulesRes.value.data) {
+        setReaderRules({ ...DEFAULT_READER_RULES, ...rulesRes.value.data });
+      }
 
       if (recordsRes.status === "fulfilled" && Array.isArray(recordsRes.value.data)) {
         const seen = new Set<number>();
@@ -108,6 +133,9 @@ export function ReaderBorrowView() {
       }
       if (historyRes.status === "fulfilled") {
         setExitPassHistory(historyRes.value.data || []);
+      }
+      if (returnSlipsRes.status === "fulfilled") {
+        setReturnSlipHistory(Array.isArray(returnSlipsRes.value.data) ? returnSlipsRes.value.data : []);
       }
       if (profileRes.status === "fulfilled" && profileRes.value.data?.user) {
         setProfile(profileRes.value.data.user);
@@ -136,6 +164,66 @@ export function ReaderBorrowView() {
       console.error("Lỗi khi tải dữ liệu độc giả:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleOpenBorrowSlipCode = (passCode: string, fallbackRecord?: BorrowRecord) => {
+    const normalized = String(passCode || "").replace(/^PASS-EXP-/i, "PM-BRW-");
+    const matched = exitPassHistory.find(
+      (ep) => String(ep.pass_code || "").replace(/^PASS-EXP-/i, "PM-BRW-") === normalized
+    );
+    if (matched) {
+      setMyExitPassData({
+        ...matched,
+        reader_name: matched.reader_name || profile?.full_name || user?.full_name,
+        card_number: matched.card_number || profile?.card_number || cardNumber,
+        reader_phone: matched.reader_phone || profile?.phone,
+        reader_status: matched.reader_status || profile?.status || "active",
+      });
+      setExitPassModalOpen(true);
+      return;
+    }
+    if (fallbackRecord) {
+      setMyExitPassData({
+        pass_code: normalized,
+        reader_name: profile?.full_name || user?.full_name,
+        card_number: profile?.card_number || cardNumber,
+        reader_phone: profile?.phone,
+        reader_status: profile?.status || "active",
+        created_at: fallbackRecord.borrow_date,
+        borrowDate: new Date(fallbackRecord.borrow_date).toLocaleDateString("vi-VN"),
+        dueDate: new Date(fallbackRecord.due_date).toLocaleDateString("vi-VN"),
+        book_count: 1,
+        items: [
+          {
+            title: fallbackRecord.book_title,
+            copyQr: fallbackRecord.qr_code,
+            borrowDate: new Date(fallbackRecord.borrow_date).toLocaleDateString("vi-VN"),
+            dueDate: new Date(fallbackRecord.due_date).toLocaleDateString("vi-VN"),
+          },
+        ],
+      });
+      setExitPassModalOpen(true);
+    } else {
+      toast.info(`Không tìm thấy Phiếu mượn ${normalized}`);
+    }
+  };
+
+  const handleOpenReturnSlipCode = async (returnCode: string) => {
+    const cached = returnSlipHistory.find((s) => s.return_code === returnCode || s.returnCode === returnCode);
+    if (cached) {
+      setSelectedReturnSlip(cached);
+      setReturnSlipModalOpen(true);
+      return;
+    }
+    try {
+      const res = await api.get(`/borrow/return-slips/${encodeURIComponent(returnCode)}`);
+      if (res.data) {
+        setSelectedReturnSlip(res.data);
+        setReturnSlipModalOpen(true);
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || `Không tìm thấy Phiếu trả ${returnCode}`);
     }
   };
 
@@ -371,22 +459,19 @@ export function ReaderBorrowView() {
   const pendingDropBoxLoans = records.filter(
     r => r.status === "returned_drop_box" || (Boolean(r.is_drop_box) && r.drop_box_status === "pending_audit")
   );
-  const auditedDropBoxLoans = records.filter(
+  const allDropBoxLoans = records.filter(
     r =>
-      (Boolean(r.is_drop_box) || (r.drop_box_status && r.drop_box_status !== "none")) &&
-      r.drop_box_status &&
-      r.drop_box_status !== "none" &&
-      r.drop_box_status !== "pending_audit"
-  ).slice(0, 4);
+      r.status === "returned_drop_box" ||
+      Boolean(r.is_drop_box) ||
+      (r.drop_box_status && r.drop_box_status !== "none") ||
+      r.return_method === "drop_box"
+  );
   const activeLoans = records.filter(
     r => r.status === "borrowing" && !pendingDropBoxLoans.some(p => p.id === r.id)
   );
   const returnedHistory = records.filter(
     r => r.status === "returned" || r.status === "returned_drop_box" || Boolean(r.is_drop_box)
   );
-
-  // Độc giả chỉ có Phiếu mượn chính thức đang lưu thông khi đang thực sự có sách mượn (activeLoans > 0)
-  const hasActiveOfficialPass = activeLoans.length > 0 && Boolean(myExitPassData) && !myExitPassData?.isExpired;
 
   const formatDraftTimeLeft = (expiresAtStr?: string, fallbackHours?: number) => {
     if (!expiresAtStr) return fallbackHours ? `còn ${fallbackHours}h` : "còn 24h";
@@ -399,34 +484,6 @@ export function ReaderBorrowView() {
       return `còn ${hours}h ${minutes}p`;
     }
     return `còn ${minutes} phút`;
-  };
-
-  // Handler to open official borrow slip modal (from confirmed borrow slip or active borrowing books)
-  const handleOpenDigitalReceipt = () => {
-    if (myExitPassData) {
-      setExitPassModalOpen(true);
-      return;
-    }
-    if (activeLoans.length > 0) {
-      setMyExitPassData({
-        pass_code: `PM-BRW-RD-${user?.id || 1}-${Date.now().toString().slice(-4)}`,
-        reader_name: profile?.full_name || user?.full_name || "Bạn đọc",
-        card_number: cardNumber,
-        book_count: activeLoans.length,
-        items: activeLoans.map(l => ({
-          title: l.book_title,
-          copyQr: l.qr_code,
-          coverImage: l.cover_image,
-          dueDate: l.due_date ? new Date(l.due_date).toLocaleDateString("vi-VN") : undefined,
-          borrowDate: l.borrow_date ? new Date(l.borrow_date).toLocaleDateString("vi-VN") : undefined
-        })),
-        status: "active",
-        expires_at: new Date(Date.now() + 14 * 24 * 3600 * 1000).toISOString()
-      });
-      setExitPassModalOpen(true);
-      return;
-    }
-    toast.info("Hiện bạn chưa có Phiếu mượn chính thức nào đã được Thủ thư xác nhận");
   };
 
   const getDueDetails = (dueDateStr: string, _fineAlreadyPaid?: boolean) => {
@@ -471,304 +528,263 @@ export function ReaderBorrowView() {
     };
   };
 
-  const formattedPassCode = (myExitPassData?.pass_code || myExitPassData?.passCode || "")
-    .replace(/^PASS-EXP-/i, "PM-BRW-");
+  const overdueLoansCount = activeLoans.filter((l) => getDueDetails(l.due_date).isOverdue).length;
+  const dueSoonCount = activeLoans.filter((l) => {
+    const d = getDueDetails(l.due_date);
+    return !d.isOverdue && d.days <= 3;
+  }).length;
+  const readerFullName = profile?.full_name || user?.fullName || user?.full_name || "Độc giả";
+  const readerInitials = readerFullName
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(-2)
+    .map((w: string) => w[0]?.toUpperCase() || "")
+    .join("") || "ĐG";
+  const isCardRestricted = Boolean(
+    (circulationStatus && !circulationStatus.eligibleToBorrow) ||
+    profile?.status === "suspended" ||
+    profile?.status === "locked"
+  );
+
+  const normalizedDropBoxQuery = dropBoxSearch.trim().toLowerCase();
+  const filteredDropBoxLoans = !normalizedDropBoxQuery
+    ? allDropBoxLoans
+    : allDropBoxLoans.filter((d) => {
+        const title = String(d.book_title || "").toLowerCase();
+        const qr = String(d.qr_code || "").toLowerCase();
+        const pass = String(d.pass_code || "").toLowerCase();
+        const ret = String(d.return_slip_code || "").toLowerCase();
+        const auditor = String(d.drop_box_audited_by_name || "").toLowerCase();
+        return title.includes(normalizedDropBoxQuery) || qr.includes(normalizedDropBoxQuery) || pass.includes(normalizedDropBoxQuery) || ret.includes(normalizedDropBoxQuery) || auditor.includes(normalizedDropBoxQuery);
+      });
+
+  const normalizedReturnQuery = returnSlipSearch.trim().toLowerCase();
+  const filteredReturnSlips = !normalizedReturnQuery
+    ? returnSlipHistory
+    : returnSlipHistory.filter((rs) => {
+        const code = String(rs.return_code || rs.returnCode || "").toLowerCase();
+        const librarian = String(rs.librarian_name || rs.librarianName || "").toLowerCase();
+        const linked = Array.isArray(rs.borrow_slip_codes) ? rs.borrow_slip_codes.join(" ").toLowerCase() : "";
+        const itemsTxt = Array.isArray(rs.items)
+          ? rs.items.map((it: any) => `${it.title || it.book_title || ""} ${it.copyQr || it.qr_code || ""}`).join(" ").toLowerCase()
+          : "";
+        return code.includes(normalizedReturnQuery) || librarian.includes(normalizedReturnQuery) || linked.includes(normalizedReturnQuery) || itemsTxt.includes(normalizedReturnQuery);
+      });
+  const normalizedBorrowQuery = borrowSlipSearch.trim().toLowerCase();
+  const filteredExitPasses = !normalizedBorrowQuery
+    ? exitPassHistory
+    : exitPassHistory.filter((ep) => {
+        const code = String(ep.pass_code || ep.passCode || "").replace(/^PASS-EXP-/i, "PM-BRW-").toLowerCase();
+        const itemsTxt = Array.isArray(ep.items)
+          ? ep.items.map((it: any) => `${it.title || it.book_title || ""} ${it.copyQr || it.qr_code || ""}`).join(" ").toLowerCase()
+          : "";
+        return code.includes(normalizedBorrowQuery) || itemsTxt.includes(normalizedBorrowQuery);
+      });
 
   return (
-    <div className="space-y-5 max-w-7xl mx-auto">
-      {/* Top Section: Digital Library Card (Left) + Stats & Unified Borrow Slip Hub (Right) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-stretch">
-        {/* Digital Membership Pass (Col 1 - 4 cols) */}
-        <Card className="lg:col-span-4 border-primary/20 bg-gradient-to-br from-primary/5 via-card to-background shadow-xs overflow-hidden flex flex-col justify-between">
-          <CardHeader className="p-4 pb-3 border-b border-border/60 bg-muted/20">
-            <div className="flex items-center justify-between">
-              <Badge variant="outline" className="text-xs border-primary/30 text-primary font-semibold">
-                Thẻ Thư Viện Số
-              </Badge>
-              <span className="text-[11px] text-muted-foreground flex items-center gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse"></span>
-                {profile?.status === "active" ? "Đang hoạt động" : "Chờ kích hoạt"}
-              </span>
-            </div>
-            <div className="flex items-baseline justify-between gap-2 mt-1.5">
-              <CardTitle className="text-base sm:text-lg font-bold text-foreground truncate">
-                {profile?.full_name || user?.fullName || "Độc giả"}
-              </CardTitle>
-              {cardExpiry && (
-                <span className="text-[11px] text-muted-foreground shrink-0">
-                  Hạn: <strong className="text-foreground font-medium">{cardExpiry}</strong>
+    <div className="space-y-4 max-w-6xl mx-auto">
+      {/* Top Row: Compact Reader Profile (Left) + Minimal Circulation Summary & Utilities (Right) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch">
+        {/* Compact Reader Profile Card (5 cols) */}
+        <Card className="lg:col-span-5 border-border/80 bg-card shadow-none rounded-2xl flex flex-col justify-between">
+          <CardContent className="p-4 sm:p-5 flex flex-col justify-between gap-4 h-full">
+            <div className="space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Hồ sơ độc giả
                 </span>
-              )}
-            </div>
-            <CardDescription className="text-xs font-mono mt-0.5">
-              Mã thẻ: <span className="font-bold text-primary text-sm">{cardNumber}</span>
-            </CardDescription>
-          </CardHeader>
+                {isCardRestricted ? (
+                  <Badge variant="outline" className="text-[11px] font-semibold border-destructive/30 bg-destructive/10 text-destructive gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-destructive" />
+                    {profile?.status === "suspended" ? "Thẻ tạm khóa" : "Hạn chế lưu thông"}
+                  </Badge>
+                ) : profile?.status === "active" ? (
+                  <Badge variant="outline" className="text-[11px] font-semibold border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                    Đang hoạt động
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="text-[11px] font-semibold border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400 gap-1.5">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                    Chờ kích hoạt
+                  </Badge>
+                )}
+              </div>
 
-          <CardContent className="p-4 flex flex-col items-center justify-center space-y-2.5 flex-1">
-            <div className="p-2 rounded-xl bg-white shadow-xs border border-border">
-              <QRCodeCanvas
-                id="reader-card-qr-canvas"
-                value={cardNumber}
-                size={125}
-                level="H"
-                includeMargin={true}
-              />
+              <div className="flex items-center gap-3.5">
+                <div className="h-12 w-12 rounded-2xl bg-primary text-primary-foreground font-display font-bold text-base flex items-center justify-center shrink-0">
+                  {readerInitials}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h2 className="font-display text-base sm:text-lg font-bold text-foreground truncate">
+                    {readerFullName}
+                  </h2>
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-muted-foreground mt-0.5">
+                    <span className="font-mono font-semibold text-primary">{cardNumber}</span>
+                    {cardExpiry && (
+                      <>
+                        <span>•</span>
+                        <span>Hạn thẻ: {cardExpiry}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
-            <p className="text-[11px] text-center text-muted-foreground max-w-[230px] leading-snug">
-              Đưa mã này cho Thủ thư tại quầy hoặc máy quét để mượn và trả sách tức thì.
-            </p>
 
-            {/* Download QR Code Image Button */}
-            <Button
-              onClick={handleDownloadQr}
-              variant="outline"
-              size="sm"
-              className="w-full max-w-[210px] gap-1.5 h-8 text-xs font-semibold border-primary/30 text-primary hover:bg-primary/10 cursor-pointer shadow-2xs"
-            >
-              <Download className="h-3.5 w-3.5" />
-              <span>Tải Ảnh QR Thẻ</span>
-            </Button>
+            <div className="pt-3 border-t border-border/60 flex items-center justify-between gap-2.5">
+              <div className="text-xs">
+                {isCardRestricted ? (
+                  <Link to="/fines" className="text-destructive font-medium hover:underline inline-flex items-center gap-1">
+                    <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                    <span>Kiểm tra vi phạm</span>
+                  </Link>
+                ) : (
+                  <span className="text-muted-foreground inline-flex items-center gap-1.5">
+                    <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                    <span>Quyền mượn hợp lệ</span>
+                  </span>
+                )}
+              </div>
+
+              <Button
+                onClick={() => setQrCardModalOpen(true)}
+                variant="outline"
+                size="sm"
+                className="h-8 px-3 text-xs font-semibold gap-1.5 border-primary/30 text-primary hover:bg-primary/10 cursor-pointer shrink-0"
+              >
+                <QrCode className="h-3.5 w-3.5" />
+                <span>Mã QR thẻ</span>
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
-        {/* Right Column (8 cols): 3 Stat Cards + Unified Official Borrow Slip & Quick Tools Card */}
-        <div className="lg:col-span-8 flex flex-col justify-between gap-4">
-          {/* 3 Summary Stat Cards */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-            <Card className="border-border shadow-2xs">
-              <CardContent className="p-4 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 rounded-xl bg-primary/10 text-primary flex items-center justify-center shrink-0">
-                    <BookOpen className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground font-medium">Đang mượn</p>
-                    <p className="text-2xl font-bold text-foreground">
-                      {activeLoans.length}{" "}
-                      <span className="text-xs font-normal text-muted-foreground">/ 5 cuốn</span>
-                    </p>
-                  </div>
+        {/* Right Column (7 cols): Compact Circulation Overview + Recent Slip & Utilities */}
+        <div className="lg:col-span-7 flex flex-col justify-between gap-3.5">
+          {/* 3 Minimal Stat Cards */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5 sm:gap-3">
+            <Card className="border-border/80 shadow-none rounded-2xl">
+              <CardContent className="p-3.5 sm:p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground font-medium">Đang mượn</span>
+                  <BookOpen className="h-4 w-4 text-primary shrink-0" />
                 </div>
-                <Badge variant="secondary" className="text-[10px] font-medium">
-                  Còn {Math.max(0, 5 - activeLoans.length)} suất
-                </Badge>
+                <p className="text-xl sm:text-2xl font-bold text-foreground mt-1.5 tabular-nums">
+                  {activeLoans.length}
+                  <span className="text-xs font-normal text-muted-foreground ml-1">/ 5</span>
+                </p>
+                <p className="text-[11px] text-muted-foreground mt-0.5">
+                  {dueSoonCount > 0 ? (
+                    <span className="text-amber-600 dark:text-amber-400 font-medium">{dueSoonCount} cuốn sắp đến hạn</span>
+                  ) : (
+                    <span>Còn {Math.max(0, 5 - activeLoans.length)} suất</span>
+                  )}
+                </p>
               </CardContent>
             </Card>
 
-            <Card className="border-border shadow-2xs">
-              <CardContent className="p-4 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="h-10 w-10 rounded-xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center shrink-0">
-                    <BookmarkCheck className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground font-medium">Đã hoàn trả</p>
-                    <p className="text-2xl font-bold text-foreground">
-                      {returnedHistory.length}{" "}
-                      <span className="text-xs font-normal text-muted-foreground">lượt</span>
-                    </p>
-                  </div>
+            <Card className="border-border/80 shadow-none rounded-2xl">
+              <CardContent className="p-3.5 sm:p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground font-medium">Đã hoàn trả</span>
+                  <BookmarkCheck className="h-4 w-4 text-emerald-600 shrink-0" />
                 </div>
-                <Badge variant="outline" className="text-[10px] border-emerald-500/30 text-emerald-700 dark:text-emerald-400 bg-emerald-500/5">
+                <p className="text-xl sm:text-2xl font-bold text-foreground mt-1.5 tabular-nums">
+                  {returnedHistory.length}
+                </p>
+                <p className="text-[11px] text-emerald-700 dark:text-emerald-400 mt-0.5 font-medium">
                   Lưu thông tốt
-                </Badge>
+                </p>
               </CardContent>
             </Card>
 
-            <Card className="border-border shadow-2xs">
-              <CardContent className="p-4 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className={`h-10 w-10 rounded-xl flex items-center justify-center shrink-0 ${
-                    activeLoans.filter(l => getDueDetails(l.due_date).isOverdue).length > 0
-                      ? "bg-destructive/10 text-destructive"
-                      : "bg-muted text-muted-foreground"
-                  }`}>
-                    <AlertTriangle className="h-5 w-5" />
-                  </div>
-                  <div>
-                    <p className="text-xs text-muted-foreground font-medium">Sách quá hạn</p>
-                    <div className="flex items-baseline gap-1.5">
-                      <p className={`text-2xl font-bold ${
-                        activeLoans.filter(l => getDueDetails(l.due_date).isOverdue).length > 0
-                          ? "text-destructive"
-                          : "text-foreground"
-                      }`}>
-                        {activeLoans.filter(l => getDueDetails(l.due_date).isOverdue).length}
-                      </p>
-                    </div>
-                  </div>
+            <Card className={`col-span-2 sm:col-span-1 shadow-none rounded-2xl ${overdueLoansCount > 0 ? "border-destructive/40 bg-destructive/[0.04]" : "border-border/80"}`}>
+              <CardContent className="p-3.5 sm:p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground font-medium">Quá hạn</span>
+                  <AlertTriangle className={`h-4 w-4 shrink-0 ${overdueLoansCount > 0 ? "text-destructive" : "text-muted-foreground/70"}`} />
                 </div>
-                {activeLoans.filter(l => getDueDetails(l.due_date).isOverdue).length > 0 ? (
-                  <Badge variant="destructive" className="text-[10px]">
-                    Cần trả sách
-                  </Badge>
-                ) : (
-                  <Badge variant="outline" className="text-[10px]">
-                    Đúng hạn
-                  </Badge>
-                )}
+                <p className={`text-xl sm:text-2xl font-bold mt-1.5 tabular-nums ${overdueLoansCount > 0 ? "text-destructive" : "text-foreground"}`}>
+                  {overdueLoansCount}
+                </p>
+                <p className={`text-[11px] mt-0.5 ${overdueLoansCount > 0 ? "text-destructive font-semibold" : "text-muted-foreground"}`}>
+                  {overdueLoansCount > 0 ? "Cần hoàn trả ngay" : "Đúng hạn"}
+                </p>
               </CardContent>
             </Card>
           </div>
 
-          {/* Unified Official Borrow Slip & Quick Circulation Tools Card (Fills middle + bottom cleanly) */}
-          <Card className="flex-1 border-emerald-500/30 bg-gradient-to-br from-emerald-500/[0.06] via-card to-teal-500/[0.04] shadow-xs flex flex-col justify-between overflow-hidden rounded-2xl">
-            {/* Top half: Confirmed Official Borrow Slip Status */}
-            <div className="p-4 sm:p-5 flex-1 flex flex-col justify-between gap-3 border-b border-border/60">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                <div className="flex items-start sm:items-center gap-3.5">
-                  <div className="h-11 w-11 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-                    <FileSpreadsheet className="h-5 w-5" />
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="font-display text-sm sm:text-base font-bold text-emerald-800 dark:text-emerald-300">
-                        Phiếu Mượn Chính Thức (Đối Soát & Kiểm Tra Ra Cổng)
-                      </h3>
-                      {hasActiveOfficialPass && (
-                        <code className="px-2 py-0.5 bg-background rounded-md border border-emerald-500/30 text-xs font-mono font-bold text-foreground">
-                          {formattedPassCode}
-                        </code>
-                      )}
-                      {hasActiveOfficialPass ? (
-                        myExitPassData?.displayStatus === "used" ? (
-                          <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-300 text-[11px] gap-1 font-semibold">
-                            <CheckCircle2 className="h-3 w-3 text-blue-600" /> Đã đối soát qua cổng
-                          </Badge>
-                        ) : (
-                          <Badge variant="outline" className="bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30 font-semibold text-[11px] gap-1">
-                            <CheckCircle2 className="h-3 w-3 text-emerald-600" /> Đã được Thủ thư xác nhận
-                          </Badge>
-                        )
-                      ) : (
-                        <Badge variant="outline" className="text-[11px] text-muted-foreground">
-                          Chưa phát sinh
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="text-xs text-muted-foreground leading-relaxed">
-                      {hasActiveOfficialPass
-                        ? `Thủ thư đã quét xác nhận cho mượn ${myExitPassData?.book_count || myExitPassData?.bookCount || myExitPassData?.items?.length || 1} cuốn sách (chuyển đổi từ Phiếu mượn nháp). Dùng Phiếu mượn này khi cần đối soát mượn trả hoặc xuất trình khi ra cổng nếu được hỏi.`
-                        : "Hiện tại bạn chưa có sách nào đang mượn lưu thông. Khi bạn hoàn tất mượn sách tại quầy Thủ thư, phiếu mượn chính thức kèm mã QR xuất trình ra cổng sẽ tự động hiển thị tại đây."}
-                    </p>
-                  </div>
+          {/* Compact Self-Service Utilities Card */}
+          <Card className="border-border/80 shadow-none rounded-2xl flex-1 flex flex-col justify-center">
+            <CardContent className="p-3.5 sm:p-4">
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <span className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wider">
+                  Tiện ích lưu thông
+                </span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <Button
+                    onClick={() => {
+                      setSimulatedQrCode("");
+                      setIsScannerOpen(true);
+                    }}
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-3 text-xs font-medium gap-1.5 cursor-pointer"
+                  >
+                    <Camera className="h-3.5 w-3.5 text-primary" />
+                    <span>Quét tem tại kệ</span>
+                  </Button>
+
+                  <Button
+                    onClick={() => setSmartBookDropOpen(true)}
+                    size="sm"
+                    variant="outline"
+                    className="h-8 px-3 text-xs font-medium gap-1.5 cursor-pointer"
+                  >
+                    <Inbox className="h-3.5 w-3.5 text-primary" />
+                    <span>Hòm trả 24/7</span>
+                  </Button>
+
+                  <Button
+                    onClick={() => setReturnGuideOpen(true)}
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 px-2.5 text-xs font-medium gap-1 text-muted-foreground hover:text-foreground cursor-pointer"
+                  >
+                    <HelpCircle className="h-3.5 w-3.5" />
+                    <span>Hướng dẫn trả</span>
+                  </Button>
+
+                  <Button
+                    onClick={() => setRulesDialogOpen(true)}
+                    size="sm"
+                    variant="ghost"
+                    className="h-8 px-2.5 text-xs font-medium gap-1 text-muted-foreground hover:text-foreground cursor-pointer"
+                  >
+                    <BookMarked className="h-3.5 w-3.5" />
+                    <span>Nội quy</span>
+                  </Button>
                 </div>
-
-                <Button
-                  onClick={handleOpenDigitalReceipt}
-                  disabled={!hasActiveOfficialPass}
-                  className={`font-bold text-xs gap-1.5 h-9 px-4 shadow-xs shrink-0 ${
-                    hasActiveOfficialPass 
-                      ? "cursor-pointer text-white bg-emerald-600 hover:bg-emerald-700" 
-                      : "cursor-not-allowed opacity-60 text-muted-foreground bg-muted"
-                  }`}
-                >
-                  <QrCode className="h-4 w-4" />
-                  <span>Mở QR Phiếu Mượn</span>
-                </Button>
               </div>
-
-              {hasActiveOfficialPass && myExitPassData && Array.isArray(myExitPassData.items) && myExitPassData.items.length > 0 && (() => {
-                const createdDate = myExitPassData.created_at ? new Date(myExitPassData.created_at) : new Date();
-                const due14 = new Date(createdDate.getTime());
-                due14.setDate(due14.getDate() + 14);
-                const firstItem = myExitPassData.items[0];
-                const matchedRec = records.find(r =>
-                  (firstItem?.copyQr && r.qr_code === firstItem.copyQr) ||
-                  (firstItem?.title && r.book_title === firstItem.title)
-                );
-                const borrowDateStr = matchedRec?.borrow_date
-                  ? new Date(matchedRec.borrow_date).toLocaleDateString("vi-VN")
-                  : createdDate.toLocaleDateString("vi-VN");
-                const dueDateStr = matchedRec?.due_date
-                  ? new Date(matchedRec.due_date).toLocaleDateString("vi-VN")
-                  : due14.toLocaleDateString("vi-VN");
-
-                return (
-                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-emerald-500/8 border border-emerald-500/20 text-xs">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="text-[11px] font-semibold text-emerald-800 dark:text-emerald-300">Sách trong phiếu:</span>
-                      {myExitPassData.items.slice(0, 3).map((it: any, idx: number) => (
-                        <span
-                          key={idx}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-background border border-emerald-500/25 text-[11px] font-medium text-foreground"
-                        >
-                          <BookOpen className="h-3 w-3 text-emerald-600 shrink-0" />
-                          <span className="truncate max-w-[160px]">{it.title || it.book_title}</span>
-                          {(it.copyQr || it.qr_code) && (
-                            <code className="text-[10px] font-mono font-bold text-emerald-700">({it.copyQr || it.qr_code})</code>
-                          )}
-                        </span>
-                      ))}
-                    </div>
-                    <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-                      <span>Ngày mượn: <strong className="text-foreground">{borrowDateStr}</strong></span>
-                      <span>Hạn trả (14 ngày): <strong className="text-emerald-700 dark:text-emerald-400">{dueDateStr}</strong></span>
-                    </div>
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Bottom bar: Quick Action Tools */}
-            <div className="px-4 py-3 bg-muted/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
-              <span className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
-                <Sparkles className="h-3.5 w-3.5 text-primary" />
-                Tiện ích lưu thông tự phục vụ:
-              </span>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  onClick={() => {
-                    setSimulatedQrCode("");
-                    setIsScannerOpen(true);
-                  }}
-                  size="sm"
-                  variant="outline"
-                  className="h-8 text-xs font-semibold gap-1.5 border-emerald-500/40 text-emerald-700 dark:text-emerald-300 bg-background hover:bg-emerald-50 dark:hover:bg-emerald-950/40 cursor-pointer shadow-2xs"
-                >
-                  <Camera className="h-3.5 w-3.5 text-emerald-600" />
-                  <span>Quét Tem Sách Tại Kệ</span>
-                </Button>
-
-                <Button
-                  onClick={() => setSmartBookDropOpen(true)}
-                  variant="outline"
-                  size="sm"
-                  className="h-8 text-xs font-semibold gap-1.5 border-sky-400/60 text-sky-700 dark:text-sky-300 bg-background hover:bg-sky-50 dark:hover:bg-sky-950/40 cursor-pointer shadow-2xs"
-                >
-                  <Inbox className="h-3.5 w-3.5 text-sky-600" />
-                  <span>Hòm Trả Sách 24/7</span>
-                </Button>
-
-                <Button
-                  onClick={() => setRulesDialogOpen(true)}
-                  variant="outline"
-                  size="sm"
-                  className="h-8 text-xs font-semibold gap-1.5 border-amber-500/40 text-amber-700 dark:text-amber-300 bg-background hover:bg-amber-50 dark:hover:bg-amber-950/40 cursor-pointer shadow-2xs"
-                >
-                  <BookMarked className="h-3.5 w-3.5 text-amber-600" />
-                  <span>Nội Quy Thư Viện</span>
-                </Button>
-              </div>
-            </div>
+            </CardContent>
           </Card>
         </div>
       </div>
 
       {/* Multi-Cause Circulation Discipline Alert Banner */}
       {circulationStatus && !circulationStatus.eligibleToBorrow && (
-        <Card className="border-destructive/40 bg-destructive/5 shadow-xs">
-          <CardContent className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="space-y-1.5">
+        <Card className="border-destructive/40 bg-destructive/[0.04] shadow-none rounded-2xl">
+          <CardContent className="p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-1">
               <div className="flex flex-wrap items-center gap-2">
                 <ShieldAlert className="h-4 w-4 text-destructive shrink-0" />
                 <span className="text-xs font-bold text-destructive uppercase tracking-wider">
-                  Tài khoản đang tạm giới hạn quyền mượn sách ({circulationStatus.primaryStatus})
+                  Tài khoản đang tạm giới hạn quyền mượn ({circulationStatus.primaryStatus})
                 </span>
                 {Array.isArray(circulationStatus.restrictions) && circulationStatus.restrictions.length > 1 && (
                   <Badge variant="destructive" className="text-[10px]">
-                    {circulationStatus.restrictions.length} lý do đồng thời
+                    {circulationStatus.restrictions.length} lý do
                   </Badge>
                 )}
               </div>
@@ -787,15 +803,15 @@ export function ReaderBorrowView() {
                   </Badge>
                 )}
                 {circulationStatus.isPendingRemediation && (
-                  <Badge variant="outline" className="text-[10px] border-orange-500/40 text-orange-700 dark:text-orange-300 bg-background">
-                    Chờ khắc phục sách hỏng/mất: {circulationStatus.pendingRemediationCount} biên bản
+                  <Badge variant="outline" className="text-[10px] border-amber-500/40 text-amber-700 dark:text-amber-300 bg-background">
+                    Chờ khắc phục: {circulationStatus.pendingRemediationCount} biên bản
                   </Badge>
                 )}
               </div>
             </div>
             <Link to="/fines" className="shrink-0">
               <Button size="sm" variant="outline" className="h-8 text-xs gap-1 border-destructive/30 text-destructive hover:bg-destructive/10">
-                Xem chi tiết kỷ luật <ArrowRight className="h-3.5 w-3.5" />
+                Xem kỷ luật <ArrowRight className="h-3.5 w-3.5" />
               </Button>
             </Link>
           </CardContent>
@@ -1095,27 +1111,36 @@ export function ReaderBorrowView() {
       })()}
 
       {/* Main Borrow Management Section */}
-      <Card className="border-border shadow-xs">
-        <CardHeader className="pb-3 border-b border-border/60">
+      <Card className="border-border/80 shadow-none rounded-2xl overflow-hidden">
+        <CardHeader className="p-4 sm:px-5 sm:py-4 border-b border-border/60">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
-              <CardTitle className="text-lg font-bold">Danh Sách Ấn Phẩm & Phiếu Mượn</CardTitle>
+              <CardTitle className="text-base sm:text-lg font-bold">Ấn phẩm &amp; Chứng từ lưu thông</CardTitle>
               <CardDescription className="text-xs">
-                Theo dõi tiến độ đọc, thời hạn mượn, gia hạn trực tuyến và tra cứu Phiếu mượn đối soát.
+                Theo dõi hạn trả, gia hạn trực tuyến và tra cứu phiếu mượn / phiếu trả đối soát.
               </CardDescription>
             </div>
 
             <div className="flex items-center gap-2">
               <Tabs value={activeTab} onValueChange={(v: any) => setActiveTab(v)}>
-                <TabsList className="h-8">
-                  <TabsTrigger value="borrowing" className="text-xs h-7 px-3">
-                    Đang giữ ({activeLoans.length}{pendingDropBoxLoans.length > 0 ? ` + ${pendingDropBoxLoans.length} chờ kiểm kê` : ""})
+                <TabsList className="h-auto flex-wrap p-0.5">
+                  <TabsTrigger value="borrowing" className="text-xs h-7 px-2.5">
+                    Đang giữ ({activeLoans.length})
                   </TabsTrigger>
-                  <TabsTrigger value="history" className="text-xs h-7 px-3">
-                    Lịch sử đã trả ({returnedHistory.length})
+                  <TabsTrigger value="history" className="text-xs h-7 px-2.5">
+                    Lịch sử trả ({returnedHistory.length})
                   </TabsTrigger>
-                  <TabsTrigger value="receipts" className="text-xs h-7 px-3">
+                  <TabsTrigger value="borrow_slips" className="text-xs h-7 px-2.5">
                     Phiếu mượn ({exitPassHistory.length})
+                  </TabsTrigger>
+                  <TabsTrigger value="return_slips" className="text-xs h-7 px-2.5">
+                    Phiếu trả ({returnSlipHistory.length})
+                  </TabsTrigger>
+                  <TabsTrigger value="drop_box" className="text-xs h-7 px-2.5 gap-1.5">
+                    <span>Hòm 24/7 ({allDropBoxLoans.length})</span>
+                    {pendingDropBoxLoans.length > 0 && (
+                      <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title={`${pendingDropBoxLoans.length} cuốn chờ kiểm kê`} />
+                    )}
                   </TabsTrigger>
                 </TabsList>
               </Tabs>
@@ -1136,7 +1161,7 @@ export function ReaderBorrowView() {
 
         <CardContent className="p-0">
           {activeTab === "borrowing" ? (
-            activeLoans.length === 0 && pendingDropBoxLoans.length === 0 && auditedDropBoxLoans.length === 0 ? (
+            activeLoans.length === 0 ? (
               <div className="py-12 text-center text-muted-foreground flex flex-col items-center justify-center space-y-3">
                 <div className="h-12 w-12 rounded-full bg-muted/60 flex items-center justify-center text-muted-foreground">
                   <BookOpen className="h-6 w-6" />
@@ -1145,223 +1170,67 @@ export function ReaderBorrowView() {
                   <p className="text-sm font-medium text-foreground">Bạn hiện không mượn cuốn sách nào</p>
                   <p className="text-xs text-muted-foreground mt-0.5">Khám phá kho sách và đặt trước cuốn bạn yêu thích ngay!</p>
                 </div>
-                <Button asChild size="sm" variant="outline" className="gap-1.5 text-xs mt-2">
-                  <Link to="/books">
-                    <span>Khám phá kho sách</span>
-                    <ArrowRight className="h-3.5 w-3.5" />
-                  </Link>
-                </Button>
+                <div className="flex flex-wrap items-center justify-center gap-2 mt-2">
+                  <Button asChild size="sm" variant="outline" className="gap-1.5 text-xs">
+                    <Link to="/books">
+                      <span>Khám phá kho sách</span>
+                      <ArrowRight className="h-3.5 w-3.5" />
+                    </Link>
+                  </Button>
+                  {pendingDropBoxLoans.length > 0 && (
+                    <Button size="sm" variant="ghost" onClick={() => setActiveTab("drop_box")} className="text-xs text-amber-700 hover:text-amber-800 gap-1">
+                      <Inbox className="h-3.5 w-3.5" />
+                      <span>{pendingDropBoxLoans.length} cuốn đang chờ kiểm kê Hòm 24/7 →</span>
+                    </Button>
+                  )}
+                </div>
               </div>
             ) : (
               <div className="divide-y divide-border">
-                {/* SÁCH ĐÃ THẢ VÀO HÒM 24/7 ĐANG CHỜ THỦ THƯ ĐỐI SOÁT KIỂM KÊ */}
+                {/* Thông báo gọn 1 dòng chỉ hiện khi có sách đang chờ Thủ thư kiểm kê Hòm 24/7 */}
                 {pendingDropBoxLoans.length > 0 && (
-                  <div className="p-3.5 bg-amber-500/10 border-b border-amber-500/30 space-y-2.5">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className="h-7 w-7 rounded-lg bg-amber-500/20 text-amber-700 dark:text-amber-400 flex items-center justify-center shrink-0">
-                          <Inbox className="h-3.5 w-3.5" />
-                        </div>
-                        <p className="font-bold text-amber-900 dark:text-amber-200 text-xs flex flex-wrap items-center gap-2">
-                          <span>Sách đã gửi Hòm trả 24/7 ({pendingDropBoxLoans.length} cuốn)</span>
-                          <Badge className="bg-amber-600 text-white text-[10px] py-0 px-1.5 font-normal">
-                            Đang chờ Thủ thư kiểm kê
-                          </Badge>
-                        </p>
-                      </div>
+                  <div className="px-4 py-2.5 bg-amber-500/[0.06] border-b border-amber-500/20 flex flex-wrap items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-2 text-amber-800 dark:text-amber-300">
+                      <Inbox className="h-3.5 w-3.5 shrink-0" />
+                      <span>
+                        Có <strong>{pendingDropBoxLoans.length} cuốn</strong> đã thả vào Hòm trả 24/7 đang chờ Thủ thư kiểm kê (đã ngưng tính hạn trả).
+                      </span>
                     </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {pendingDropBoxLoans.map(p => (
-                        <div key={p.id} className="p-2.5 rounded-xl bg-card border border-amber-300 dark:border-amber-900/60 flex items-center gap-2.5 shadow-2xs">
-                          {p.cover_image ? (
-                            <img src={p.cover_image} alt={p.book_title} className="h-10 w-8 object-cover rounded border shrink-0" />
-                          ) : (
-                            <div className="h-10 w-8 rounded bg-amber-500/10 text-amber-600 flex items-center justify-center shrink-0">
-                              <BookOpen className="h-4 w-4" />
-                            </div>
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <p className="font-semibold text-xs text-foreground truncate">{p.book_title}</p>
-                            <p className="text-[10px] text-amber-700 dark:text-amber-400 font-medium">
-                              {p.qr_code} • Thả lúc: {p.drop_box_at ? new Date(p.drop_box_at).toLocaleString("vi-VN") : "Chờ đối soát"}
-                            </p>
-                            {p.drop_box_proof_image && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setPreviewProofImg({
-                                    url: p.drop_box_proof_image!,
-                                    title: p.book_title,
-                                    time: p.drop_box_at ? new Date(p.drop_box_at).toLocaleString("vi-VN") : undefined,
-                                    statusLabel: "Đang chờ Thủ thư kiểm kê",
-                                    note: p.drop_box_audit_note
-                                  })
-                                }
-                                className="inline-flex items-center gap-1 text-[10px] font-semibold text-sky-600 hover:text-sky-800 underline mt-0.5 cursor-pointer"
-                              >
-                                <Eye className="h-3 w-3" /> Xem ảnh minh chứng
-                              </button>
-                            )}
-                          </div>
-                          <Badge variant="outline" className="border-amber-400 text-amber-700 dark:text-amber-300 text-[10px] shrink-0">
-                            Chờ kiểm kê
-                          </Badge>
-                        </div>
-                      ))}
-                    </div>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setActiveTab("drop_box")}
+                      className="h-6 px-2 text-[11px] font-semibold text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 cursor-pointer"
+                    >
+                      Xem tại Hòm 24/7 →
+                    </Button>
                   </div>
                 )}
-
-                {/* KẾT QUẢ THỦ THƯ ĐÃ XÁC NHẬN HÒM TRẢ 24/7 (COMPACT STRIP) */}
-                {auditedDropBoxLoans.length > 0 && (
-                  <div className="px-4 py-3 bg-emerald-500/[0.04] border-b border-emerald-500/20 space-y-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                        <span className="font-bold text-foreground text-xs">
-                          Kết quả Thủ thư xác nhận Hòm trả 24/7 gần nhất
-                        </span>
-                        <Badge variant="outline" className="border-emerald-500/40 text-emerald-700 dark:text-emerald-400 bg-emerald-500/10 text-[10px] py-0 px-1.5 h-4">
-                          {auditedDropBoxLoans.length} cuốn đã đối soát
-                        </Badge>
-                      </div>
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => setActiveTab("history")}
-                        className="h-6 text-[11px] text-primary hover:underline px-2 shrink-0"
-                      >
-                        Xem lịch sử trả →
-                      </Button>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                      {auditedDropBoxLoans.slice(0, 2).map(a => {
-                        const isIntact = a.drop_box_status === "verified_intact";
-                        const isDamaged = a.drop_box_status === "damaged";
-                        return (
-                          <div
-                            key={a.id}
-                            className={`px-3 py-2 rounded-xl bg-card border flex items-center justify-between gap-2.5 shadow-2xs ${
-                              isIntact
-                                ? "border-emerald-300/80 dark:border-emerald-900/60"
-                                : isDamaged
-                                ? "border-amber-400 dark:border-amber-900/60"
-                                : "border-destructive/50"
-                            }`}
-                          >
-                            <div className="flex items-center gap-2.5 min-w-0">
-                              {a.cover_image ? (
-                                <img src={a.cover_image} alt={a.book_title} className="h-9 w-7 object-cover rounded border shrink-0" />
-                              ) : (
-                                <div className="h-9 w-7 rounded bg-emerald-500/10 text-emerald-600 flex items-center justify-center shrink-0">
-                                  <BookOpen className="h-3.5 w-3.5" />
-                                </div>
-                              )}
-                              <div className="min-w-0">
-                                <p className="font-semibold text-xs text-foreground truncate">{a.book_title}</p>
-                                <p className="text-[10px] text-emerald-700 dark:text-emerald-400 truncate">
-                                  Thủ thư: <strong>{a.drop_box_audited_by_name || "Thủ thư trực ca"}</strong>
-                                  {a.drop_box_audited_at ? ` • ${new Date(a.drop_box_audited_at).toLocaleDateString("vi-VN")}` : ""}
-                                </p>
-                              </div>
-                            </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {a.drop_box_proof_image && (
-                                <Button
-                                  size="sm"
-                                  variant="ghost"
-                                  className="h-6 px-1.5 text-[10px] text-sky-600 hover:text-sky-800 gap-1"
-                                  onClick={() =>
-                                    setPreviewProofImg({
-                                      url: a.drop_box_proof_image!,
-                                      title: a.book_title,
-                                      time: a.drop_box_at ? new Date(a.drop_box_at).toLocaleString("vi-VN") : undefined,
-                                      statusLabel: isIntact ? "Đã xác nhận nguyên vẹn" : isDamaged ? "Phát hiện hư hại" : "Báo thiếu sách",
-                                      auditor: a.drop_box_audited_by_name,
-                                      note: a.drop_box_audit_note
-                                    })
-                                  }
-                                >
-                                  <Eye className="h-3 w-3" /> Ảnh
-                                </Button>
-                              )}
-                              {isIntact ? (
-                                <Badge className="bg-emerald-600 text-white text-[10px] py-0 px-1.5 h-5">
-                                  ✓ Đã xác nhận
-                                </Badge>
-                              ) : isDamaged ? (
-                                <Badge variant="outline" className="border-amber-500 text-amber-700 bg-amber-50 text-[10px] py-0 px-1.5 h-5">
-                                  ⚠️ Hư hại
-                                </Badge>
-                              ) : (
-                                <Badge variant="destructive" className="text-[10px] py-0 px-1.5 h-5">
-                                  🚨 Thiếu sách
-                                </Badge>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                )}
-
-                {/* Notice banner on how to return books */}
-                <div className="p-3.5 bg-sky-500/5 border-b border-border/80 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
-                  <div className="flex items-start gap-2.5">
-                    <div className="h-8 w-8 rounded-lg bg-sky-500/10 text-sky-600 flex items-center justify-center shrink-0 mt-0.5 sm:mt-0">
-                      <Info className="h-4 w-4" />
-                    </div>
-                    <div>
-                      <p className="font-bold text-foreground text-xs sm:text-sm">Hướng dẫn hoàn trả sách vào kho thư viện:</p>
-                      <p className="text-muted-foreground text-[11px] leading-relaxed mt-0.5">
-                        • <strong>Cách 1 (Tại Quầy):</strong> Đưa sách và Thẻ thư viện số cho Thủ thư quét nhận trả sách nhập kho.<br />
-                        • <strong>Cách 2 (Tự phục vụ):</strong> Bấm <strong>"Trả qua Hòm 24/7"</strong> (bắt buộc đính kèm ảnh chụp minh chứng khi thả sách vào hòm).
-                      </p>
-                    </div>
-                  </div>
-                  <Button
-                    onClick={() => setSmartBookDropOpen(true)}
-                    size="sm"
-                    variant="outline"
-                    className="h-8 text-xs font-bold gap-1.5 border-sky-500/40 text-sky-700 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-950/40 shrink-0 cursor-pointer shadow-2xs"
-                  >
-                    <Inbox className="h-3.5 w-3.5 text-sky-600" />
-                    <span>Mở Hòm Trả 24/7</span>
-                  </Button>
-                </div>
 
                 {activeLoans.map((loan) => {
                   const dueInfo = getDueDetails(loan.due_date, loan.fine_already_paid);
                   return (
-                    <div key={loan.id} className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4 hover:bg-muted/20 transition-colors">
+                    <div key={loan.id} className="p-4 sm:px-5 sm:py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3.5 hover:bg-muted/20 transition-colors">
                       <div className="flex items-start gap-3.5 min-w-0">
                         {loan.cover_image ? (
                           <img
                             src={loan.cover_image}
                             alt={loan.book_title}
-                            className="h-16 w-12 object-cover rounded-md border border-border shrink-0 shadow-2xs"
+                            className="h-14 w-10 object-cover rounded-md border border-border shrink-0"
                           />
                         ) : (
-                          <div className="h-16 w-12 rounded-md bg-primary/10 text-primary flex items-center justify-center shrink-0 border border-border">
-                            <BookOpen className="h-6 w-6" />
+                          <div className="h-14 w-10 rounded-md bg-primary/10 text-primary flex items-center justify-center shrink-0 border border-border">
+                            <BookOpen className="h-5 w-5" />
                           </div>
                         )}
-                        <div className="min-w-0">
-                          <p className="font-semibold text-foreground text-sm truncate">{loan.book_title}</p>
-                          <p className="text-xs text-muted-foreground font-mono mt-0.5">
-                            Mã bản sao: <span className="font-semibold text-foreground">{loan.qr_code}</span>
-                          </p>
-                          <div className="flex flex-wrap items-center gap-2 mt-2 text-xs text-muted-foreground">
-                            <span className="flex items-center gap-1">
-                              <Calendar className="h-3.5 w-3.5 text-muted-foreground" />
-                              Mượn ngày: {new Date(loan.borrow_date).toLocaleDateString("vi-VN")}
-                            </span>
+                        <div className="min-w-0 space-y-1">
+                          <p className="font-semibold text-foreground text-sm leading-snug truncate">{loan.book_title}</p>
+                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-muted-foreground">
+                            <span className="font-mono">{loan.qr_code}</span>
                             <span>•</span>
-                            <span className="flex items-center gap-1 font-medium text-foreground">
-                              <Clock className="h-3.5 w-3.5 text-primary" />
+                            <span>Mượn {new Date(loan.borrow_date).toLocaleDateString("vi-VN")}</span>
+                            <span>•</span>
+                            <span className={`font-medium ${dueInfo.isOverdue ? "text-destructive" : "text-foreground"}`}>
                               Hạn trả: {new Date(loan.due_date).toLocaleDateString("vi-VN")}
                             </span>
                           </div>
@@ -1378,45 +1247,52 @@ export function ReaderBorrowView() {
                               </p>
                             </div>
                           )}
-
-                          {/* Note if drop box return is already verified or pending audit */}
                         </div>
                       </div>
 
-                      <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2.5 shrink-0 pt-2 sm:pt-0 border-t sm:border-0 border-border/60">
-                        <div className="text-right">
-                          <Badge variant="outline" className={`text-xs font-semibold px-2.5 py-1 ${dueInfo.badgeClass}`}>
+                      <div className="flex flex-wrap items-center justify-between sm:justify-end gap-2 shrink-0 pt-2 sm:pt-0 border-t sm:border-0 border-border/50">
+                        <div className="flex items-center gap-2">
+                          <Badge variant="outline" className={`text-xs font-semibold px-2.5 py-0.5 ${dueInfo.badgeClass}`}>
                             {dueInfo.label}
                           </Badge>
-                          {dueInfo.subLabel && (
-                            <p className="text-[10px] text-muted-foreground mt-0.5">{dueInfo.subLabel}</p>
+                          {loan.pass_code && (
+                            <button
+                              type="button"
+                              onClick={() => handleOpenBorrowSlipCode(loan.pass_code!, loan)}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-muted/60 hover:bg-muted text-muted-foreground hover:text-foreground border border-border/60 font-mono text-[11px] cursor-pointer"
+                              title="Xem Phiếu mượn chính thức"
+                            >
+                              <QrCode className="h-3 w-3" />
+                              <span>Phiếu</span>
+                            </button>
                           )}
                         </div>
 
-                        {/* Return via 24/7 drop box button */}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => setSmartBookDropOpen(true)}
-                          className="h-8 text-xs font-semibold gap-1.5 border-sky-400 text-sky-700 dark:text-sky-300 hover:bg-sky-50 dark:hover:bg-sky-950/40 cursor-pointer"
-                          title="Tự hoàn trả cuốn sách này vào Hòm trả 24/7 ngoài giờ"
-                        >
-                          <Inbox className="h-3.5 w-3.5 text-sky-600" />
-                          <span>Trả qua Hòm 24/7</span>
-                        </Button>
-
-                        {!dueInfo.isOverdue && (
+                        <div className="flex items-center gap-1.5">
                           <Button
                             size="sm"
                             variant="outline"
-                            disabled={renewingId === loan.id || (loan.renewal_count || 0) >= 2}
-                            onClick={() => handleRenew(loan.id, loan.book_title)}
-                            className="h-8 text-xs font-semibold gap-1.5 border-primary/40 text-primary hover:bg-primary/10 cursor-pointer"
+                            onClick={() => setSmartBookDropOpen(true)}
+                            className="h-8 px-2.5 text-xs font-medium gap-1.5 cursor-pointer"
+                            title="Tự hoàn trả cuốn sách này vào Hòm trả 24/7 ngoài giờ"
                           >
-                            <RefreshCw className={`h-3.5 w-3.5 ${renewingId === loan.id ? "animate-spin" : ""}`} />
-                            <span>Gia hạn 7 ngày</span>
+                            <Inbox className="h-3.5 w-3.5 text-primary" />
+                            <span>Trả Hòm 24/7</span>
                           </Button>
-                        )}
+
+                          {!dueInfo.isOverdue && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={renewingId === loan.id || (loan.renewal_count || 0) >= 2}
+                              onClick={() => handleRenew(loan.id, loan.book_title)}
+                              className="h-8 px-2.5 text-xs font-medium gap-1.5 border-primary/35 text-primary hover:bg-primary/10 cursor-pointer"
+                            >
+                              <RefreshCw className={`h-3.5 w-3.5 ${renewingId === loan.id ? "animate-spin" : ""}`} />
+                              <span>Gia hạn</span>
+                            </Button>
+                          )}
+                        </div>
                       </div>
                     </div>
                   );
@@ -1434,10 +1310,10 @@ export function ReaderBorrowView() {
                   <TableHeader>
                     <TableRow className="bg-muted/40">
                       <TableHead className="text-xs">Tên ấn phẩm</TableHead>
-                      <TableHead className="text-xs">Mã bản sao</TableHead>
+                      <TableHead className="text-xs">Phiếu mượn &amp; Phiếu trả</TableHead>
                       <TableHead className="text-xs">Ngày mượn</TableHead>
-                      <TableHead className="text-xs">Hình thức & Kênh trả</TableHead>
-                      <TableHead className="text-xs text-right">Trạng thái Thủ thư xác nhận</TableHead>
+                      <TableHead className="text-xs">Hình thức &amp; Kênh trả</TableHead>
+                      <TableHead className="text-xs text-right">Trạng thái xác nhận</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1446,10 +1322,38 @@ export function ReaderBorrowView() {
                       const isPendingAudit = h.status === "returned_drop_box" || h.drop_box_status === "pending_audit";
                       return (
                         <TableRow key={h.id}>
-                          <TableCell className="font-medium text-xs text-foreground max-w-[240px] truncate">
-                            {h.book_title}
+                          <TableCell className="py-2.5">
+                            <p className="font-medium text-xs text-foreground max-w-[240px] truncate">{h.book_title}</p>
+                            <p className="text-[11px] font-mono text-muted-foreground">{h.qr_code}</p>
                           </TableCell>
-                          <TableCell className="text-xs font-mono text-muted-foreground">{h.qr_code}</TableCell>
+                          <TableCell className="py-2.5">
+                            <div className="flex flex-col items-start gap-1">
+                              {h.pass_code && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenBorrowSlipCode(h.pass_code!, h)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[10px] cursor-pointer"
+                                  title="Mở Phiếu mượn gốc"
+                                >
+                                  <QrCode className="h-2.5 w-2.5" />
+                                  PM: {h.pass_code}
+                                </button>
+                              )}
+                              {h.return_slip_code ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReturnSlipCode(h.return_slip_code!)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-500/10 hover:bg-sky-500/20 text-sky-700 dark:text-sky-300 border border-sky-500/30 font-mono font-bold text-[10px] cursor-pointer"
+                                  title="Mở Phiếu trả sách điện tử"
+                                >
+                                  <QrCode className="h-2.5 w-2.5" />
+                                  PT: {h.return_slip_code}
+                                </button>
+                              ) : isPendingAudit ? (
+                                <span className="text-[10px] text-amber-600 italic">Chờ lập phiếu trả</span>
+                              ) : null}
+                            </div>
+                          </TableCell>
                           <TableCell className="text-xs text-muted-foreground">
                             {new Date(h.borrow_date).toLocaleDateString("vi-VN")}
                           </TableCell>
@@ -1460,8 +1364,13 @@ export function ReaderBorrowView() {
                                   <Inbox className="h-3 w-3" /> Hòm trả 24/7
                                 </span>
                                 <span className="text-[10px] text-muted-foreground font-mono">
-                                  Thả: {h.drop_box_at ? new Date(h.drop_box_at).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }) : ""} {h.drop_box_at ? new Date(h.drop_box_at).toLocaleDateString("vi-VN") : (h.return_date ? new Date(h.return_date).toLocaleDateString("vi-VN") : "")}
+                                  Tiếp nhận: {h.drop_box_at ? new Date(h.drop_box_at).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" }) : ""} {h.drop_box_at ? new Date(h.drop_box_at).toLocaleDateString("vi-VN") : (h.return_date ? new Date(h.return_date).toLocaleDateString("vi-VN") : "")}
                                 </span>
+                                {h.drop_box_audited_at && (
+                                  <span className="text-[10px] text-sky-700 dark:text-sky-400 font-mono">
+                                    Xác nhận: {new Date(h.drop_box_audited_at).toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" })} {new Date(h.drop_box_audited_at).toLocaleDateString("vi-VN")}
+                                  </span>
+                                )}
                                 {h.drop_box_proof_image && (
                                   <button
                                     type="button"
@@ -1487,7 +1396,7 @@ export function ReaderBorrowView() {
                                   🏢 Tại quầy thủ thư
                                 </span>
                                 <span className="text-[10px] text-muted-foreground font-mono">
-                                  {h.return_date ? new Date(h.return_date).toLocaleDateString("vi-VN") : "—"}
+                                  {h.return_date ? new Date(h.return_date).toLocaleString("vi-VN") : "—"}
                                 </span>
                               </div>
                             )}
@@ -1544,200 +1453,613 @@ export function ReaderBorrowView() {
                 </Table>
               </div>
             )
-          ) : (
-            /* DANH SÁCH TẤT CẢ PHIẾU MƯỢN ĐÃ XÁC NHẬN */
-            exitPassHistory.length === 0 ? (
-              <div className="py-12 text-center text-muted-foreground flex flex-col items-center justify-center space-y-3">
-                <div className="h-12 w-12 rounded-full bg-muted/60 flex items-center justify-center text-muted-foreground">
-                  <FileSpreadsheet className="h-6 w-6" />
+          ) : activeTab === "borrow_slips" ? (
+            /* TAB RIÊNG: PHIẾU MƯỢN SÁCH CHÍNH THỨC */
+            <div className="space-y-0">
+              <div className="px-4 py-3 bg-emerald-500/[0.04] border-b border-border/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2">
+                  <QrCode className="h-4 w-4 text-emerald-600 shrink-0" />
+                  <span className="text-xs font-bold text-emerald-800 dark:text-emerald-300 uppercase tracking-wider">
+                    Phiếu Mượn Sách Chính Thức ({filteredExitPasses.length})
+                  </span>
                 </div>
-                <div>
-                  <p className="text-sm font-medium text-foreground">Bạn chưa có Phiếu mượn chính thức nào được lưu</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">Khi Thủ thư quét xác nhận cho mượn sách tại quầy, Phiếu mượn nháp sẽ chuyển thành Phiếu mượn chính thức và lưu tại đây để đối soát & ra cổng.</p>
+                <div className="relative w-full sm:w-72">
+                  <Search className="h-3.5 w-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <Input
+                    value={borrowSlipSearch}
+                    onChange={(e) => setBorrowSlipSearch(e.target.value)}
+                    placeholder="Tìm mã PM-BRW-..., tên sách, mã bản sao..."
+                    className="h-8 pl-8 pr-8 text-xs bg-background"
+                  />
+                  {borrowSlipSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setBorrowSlipSearch("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                      aria-label="Xóa tìm kiếm phiếu mượn"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
-            ) : (
-              <div className="overflow-x-auto">
-                <Table>
-                  <TableHeader>
-                    <TableRow className="bg-muted/30">
-                      <TableHead className="text-xs font-semibold">Mã Phiếu Mượn</TableHead>
-                      <TableHead className="text-xs font-semibold">Ngày Mượn (Xác Nhận)</TableHead>
-                      <TableHead className="text-xs font-semibold">Hạn Trả (14 Ngày)</TableHead>
-                      <TableHead className="text-xs font-semibold text-center">Số Lượng Sách</TableHead>
-                      <TableHead className="text-xs font-semibold">Trạng Thái Đối Soát</TableHead>
-                      <TableHead className="text-xs font-semibold text-right">Thao Tác</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {exitPassHistory.map((ep) => {
-                      const createdDate = ep.created_at ? new Date(ep.created_at) : new Date();
-                      const due14 = new Date(createdDate.getTime());
-                      due14.setDate(due14.getDate() + 14);
-                      const firstItem = Array.isArray(ep.items) ? ep.items[0] : null;
-                      const matchedRec = firstItem
-                        ? records.find(r =>
-                            (firstItem.copyQr && r.qr_code === firstItem.copyQr) ||
-                            (firstItem.title && r.book_title === firstItem.title)
-                          )
-                        : null;
-                      const resolvedDueStr = matchedRec?.due_date
-                        ? new Date(matchedRec.due_date).toLocaleDateString("vi-VN")
-                        : due14.toLocaleDateString("vi-VN");
 
-                      return (
-                      <TableRow key={ep.id} className="hover:bg-muted/20">
-                        <TableCell className="font-mono text-xs font-bold text-foreground">
-                          {String(ep.pass_code || "").replace(/^PASS-EXP-/i, "PM-BRW-")}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {createdDate.toLocaleDateString("vi-VN")}
-                        </TableCell>
-                        <TableCell className="text-xs font-bold text-emerald-700 dark:text-emerald-400">
-                          {resolvedDueStr}
-                        </TableCell>
-                        <TableCell className="text-xs text-center font-bold text-foreground">
-                          {ep.book_count || ep.items?.length || 1} cuốn
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {ep.displayStatus === "used" ? (
-                            <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-300 text-[11px] font-semibold gap-1">
-                              <CheckCircle2 className="h-3 w-3 text-blue-600" /> Đã đối soát qua cổng
-                            </Badge>
-                          ) : (
-                            <Badge className="bg-emerald-600 text-white text-[11px] font-semibold gap-1">
-                              <CheckCircle2 className="h-3 w-3" /> Đã xác nhận cho mượn (Sẵn sàng đối soát)
-                            </Badge>
-                          )}
-                        </TableCell>
-                        <TableCell className="text-xs text-right">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="h-7 text-xs font-semibold gap-1.5 border-emerald-500/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 cursor-pointer shadow-2xs"
-                            onClick={() => {
-                              setMyExitPassData(ep);
-                              setExitPassModalOpen(true);
-                            }}
-                          >
-                            <QrCode className="h-3.5 w-3.5 text-emerald-600" />
-                            <span>Mở Phiếu Mượn</span>
-                          </Button>
-                        </TableCell>
+              {filteredExitPasses.length === 0 ? (
+                <div className="py-12 text-center text-muted-foreground flex flex-col items-center justify-center space-y-3">
+                  <div className="h-12 w-12 rounded-full bg-muted/60 flex items-center justify-center text-muted-foreground">
+                    <FileSpreadsheet className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-foreground">
+                      {normalizedBorrowQuery
+                        ? "Không tìm thấy Phiếu mượn nào khớp từ khóa"
+                        : "Bạn chưa có Phiếu mượn chính thức nào được lưu"}
+                    </p>
+                    {!normalizedBorrowQuery && (
+                      <p className="text-xs text-muted-foreground mt-0.5 max-w-md mx-auto">
+                        Khi Thủ thư quét xác nhận cho mượn sách tại quầy, Phiếu mượn chính thức kèm mã QR đối soát sẽ lưu tại đây.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/30">
+                        <TableHead className="text-xs font-semibold">Mã Phiếu &amp; Ấn Phẩm</TableHead>
+                        <TableHead className="text-xs font-semibold">Ngày Mượn</TableHead>
+                        <TableHead className="text-xs font-semibold">Hạn Trả (14 Ngày)</TableHead>
+                        <TableHead className="text-xs font-semibold text-center">Số Sách</TableHead>
+                        <TableHead className="text-xs font-semibold">Trạng Thái</TableHead>
+                        <TableHead className="text-xs font-semibold text-right">Thao Tác</TableHead>
                       </TableRow>
-                      );
-                    })}
-                  </TableBody>
-                </Table>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredExitPasses.map((ep) => {
+                        const createdDate = ep.created_at ? new Date(ep.created_at) : new Date();
+                        const due14 = new Date(createdDate.getTime());
+                        due14.setDate(due14.getDate() + 14);
+                        const passItems = Array.isArray(ep.items) ? ep.items : [];
+                        const firstItem = passItems[0] || null;
+                        const matchedRec = firstItem
+                          ? records.find(r =>
+                              (firstItem.copyQr && r.qr_code === firstItem.copyQr) ||
+                              (firstItem.title && r.book_title === firstItem.title)
+                            )
+                          : null;
+                        const resolvedDueStr = matchedRec?.due_date
+                          ? new Date(matchedRec.due_date).toLocaleDateString("vi-VN")
+                          : due14.toLocaleDateString("vi-VN");
+                        const normalizedCode = String(ep.pass_code || "").replace(/^PASS-EXP-/i, "PM-BRW-");
+                        const previewTitles = passItems
+                          .map((it: any) => it.title || it.book_title)
+                          .filter(Boolean)
+                          .slice(0, 2)
+                          .join(", ");
+
+                        return (
+                          <TableRow key={ep.id} className="hover:bg-muted/20">
+                            <TableCell className="py-2.5">
+                              <p className="font-mono text-xs font-bold text-emerald-700 dark:text-emerald-400">
+                                {normalizedCode}
+                              </p>
+                              {previewTitles && (
+                                <p className="text-[11px] text-muted-foreground truncate max-w-[260px]" title={previewTitles}>
+                                  {previewTitles}{passItems.length > 2 ? ` (+${passItems.length - 2})` : ""}
+                                </p>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {createdDate.toLocaleDateString("vi-VN")}
+                            </TableCell>
+                            <TableCell className="text-xs font-semibold text-foreground">
+                              {resolvedDueStr}
+                            </TableCell>
+                            <TableCell className="text-xs text-center font-bold text-foreground">
+                              {ep.book_count || passItems.length || 1} cuốn
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {ep.displayStatus === "used" ? (
+                                <Badge variant="outline" className="bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/30 text-[11px] font-semibold gap-1">
+                                  <CheckCircle2 className="h-3 w-3" /> Đã kiểm tra đối soát
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className="bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/30 text-[11px] font-semibold gap-1">
+                                  <CheckCircle2 className="h-3 w-3" /> Đã xác nhận
+                                </Badge>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-xs text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs font-semibold gap-1.5 border-emerald-500/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 cursor-pointer"
+                                onClick={() => {
+                                  setMyExitPassData({
+                                    ...ep,
+                                    reader_name: ep.reader_name || profile?.full_name || user?.full_name,
+                                    card_number: ep.card_number || profile?.card_number || cardNumber,
+                                    reader_phone: ep.reader_phone || profile?.phone,
+                                    reader_status: ep.reader_status || profile?.status || "active",
+                                  });
+                                  setExitPassModalOpen(true);
+                                }}
+                              >
+                                <QrCode className="h-3.5 w-3.5 text-emerald-600" />
+                                <span>Mở Phiếu Mượn</span>
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
+          ) : activeTab === "return_slips" ? (
+            /* TAB RIÊNG: PHIẾU TRẢ SÁCH ĐIỆN TỬ */
+            <div className="space-y-0">
+              <div className="px-4 py-3 bg-sky-500/[0.04] border-b border-border/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="h-4 w-4 text-sky-600 shrink-0" />
+                  <span className="text-xs font-bold text-sky-800 dark:text-sky-300 uppercase tracking-wider">
+                    Phiếu Trả Sách Điện Tử ({filteredReturnSlips.length})
+                  </span>
+                </div>
+                <div className="relative w-full sm:w-72">
+                  <Search className="h-3.5 w-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <Input
+                    value={returnSlipSearch}
+                    onChange={(e) => setReturnSlipSearch(e.target.value)}
+                    placeholder="Tìm mã RT-..., PM-BRW-..., tên sách..."
+                    className="h-8 pl-8 pr-8 text-xs bg-background"
+                  />
+                  {returnSlipSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setReturnSlipSearch("")}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                      aria-label="Xóa tìm kiếm phiếu trả"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
-            )
+
+              {filteredReturnSlips.length === 0 ? (
+                <div className="py-12 text-center text-muted-foreground flex flex-col items-center justify-center space-y-3">
+                  <div className="h-12 w-12 rounded-full bg-muted/60 flex items-center justify-center text-muted-foreground">
+                    <FileSpreadsheet className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-foreground">
+                      {normalizedReturnQuery
+                        ? "Không tìm thấy Phiếu trả nào khớp từ khóa"
+                        : "Bạn chưa có Phiếu trả sách điện tử nào"}
+                    </p>
+                    {!normalizedReturnQuery && (
+                      <p className="text-xs text-muted-foreground mt-0.5 max-w-md mx-auto">
+                        Khi hoàn trả sách tại quầy hoặc được Thủ thư xác nhận Hòm 24/7, phiếu trả làm minh chứng hoàn trả sẽ lưu tại đây.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/30">
+                        <TableHead className="text-xs font-semibold">Mã Phiếu &amp; Sách Đã Trả</TableHead>
+                        <TableHead className="text-xs font-semibold">Phiếu Mượn Gốc</TableHead>
+                        <TableHead className="text-xs font-semibold">Phương Thức &amp; Thời Gian</TableHead>
+                        <TableHead className="text-xs font-semibold text-center">Số Sách</TableHead>
+                        <TableHead className="text-xs font-semibold">Người Xác Nhận</TableHead>
+                        <TableHead className="text-xs font-semibold text-right">Thao Tác</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredReturnSlips.map((rs) => {
+                        const isDrop = rs.return_method === "drop_box";
+                        const linkedSlips = Array.isArray(rs.borrow_slip_codes) ? rs.borrow_slip_codes : [];
+                        const slipItems = Array.isArray(rs.items) ? rs.items : [];
+                        const previewTitles = slipItems
+                          .map((it: any) => it.title || it.book_title)
+                          .filter(Boolean)
+                          .slice(0, 2)
+                          .join(", ");
+                        return (
+                          <TableRow key={rs.id || rs.return_code} className="hover:bg-muted/20">
+                            <TableCell className="py-2.5">
+                              <p className="font-mono text-xs font-bold text-sky-700 dark:text-sky-400">
+                                {rs.return_code}
+                              </p>
+                              {previewTitles && (
+                                <p className="text-[11px] text-muted-foreground truncate max-w-[240px]" title={previewTitles}>
+                                  {previewTitles}{slipItems.length > 2 ? ` (+${slipItems.length - 2})` : ""}
+                                </p>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              <div className="flex flex-wrap gap-1">
+                                {linkedSlips.length > 0 ? linkedSlips.map((code) => (
+                                  <button
+                                    key={code}
+                                    type="button"
+                                    onClick={() => handleOpenBorrowSlipCode(code)}
+                                    className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[10px] cursor-pointer"
+                                    title="Mở Phiếu mượn gốc"
+                                  >
+                                    {code}
+                                  </button>
+                                )) : <span className="text-muted-foreground">—</span>}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              <div className="space-y-0.5">
+                                <Badge variant="outline" className="text-[10px] py-0 px-1.5">
+                                  {isDrop ? "📦 Hòm 24/7" : "🏢 Tại quầy"}
+                                </Badge>
+                                {isDrop && rs.drop_box_received_at && (
+                                  <p className="text-[10px] text-amber-700 dark:text-amber-400 font-mono">
+                                    Tiếp nhận: {new Date(rs.drop_box_received_at).toLocaleString("vi-VN")}
+                                  </p>
+                                )}
+                                <p className="text-[10px] text-muted-foreground font-mono">
+                                  {isDrop ? "Xác nhận: " : "Trả lúc: "}
+                                  {rs.returned_at ? new Date(rs.returned_at).toLocaleString("vi-VN") : "—"}
+                                </p>
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs text-center font-bold">
+                              {rs.book_count || slipItems.length || 1} cuốn
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {rs.librarian_name || rs.librarianName || "Thủ thư trực quầy"}
+                            </TableCell>
+                            <TableCell className="text-xs text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs font-semibold gap-1.5 border-sky-500/40 text-sky-700 dark:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 cursor-pointer"
+                                onClick={() => {
+                                  setSelectedReturnSlip({
+                                    ...rs,
+                                    reader_name: rs.reader_name || profile?.full_name || user?.full_name,
+                                    card_number: rs.card_number || profile?.card_number || cardNumber,
+                                    reader_phone: rs.reader_phone || profile?.phone,
+                                    reader_status: rs.reader_status || profile?.status || "active",
+                                  });
+                                  setReturnSlipModalOpen(true);
+                                }}
+                              >
+                                <QrCode className="h-3.5 w-3.5 text-sky-600" />
+                                <span>Mở Phiếu Trả</span>
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
+          ) : (
+            /* TAB RIÊNG: HÒM TRẢ SÁCH 24/7 & KẾT QUẢ KIỂM KÊ */
+            <div className="space-y-0">
+              <div className="px-4 py-3 bg-emerald-500/[0.04] border-b border-border/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2">
+                  <Inbox className="h-4 w-4 text-primary shrink-0" />
+                  <span className="text-xs font-bold text-foreground uppercase tracking-wider">
+                    Hòm Trả Sách 24/7 &amp; Kiểm Kê ({filteredDropBoxLoans.length})
+                  </span>
+                  {pendingDropBoxLoans.length > 0 && (
+                    <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[10px]">
+                      {pendingDropBoxLoans.length} chờ kiểm kê
+                    </Badge>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative w-full sm:w-64">
+                    <Search className="h-3.5 w-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <Input
+                      value={dropBoxSearch}
+                      onChange={(e) => setDropBoxSearch(e.target.value)}
+                      placeholder="Tìm tên sách, mã QR, thủ thư..."
+                      className="h-8 pl-8 pr-8 text-xs bg-background"
+                    />
+                    {dropBoxSearch && (
+                      <button
+                        type="button"
+                        onClick={() => setDropBoxSearch("")}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                        aria-label="Xóa tìm kiếm hòm trả"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setSmartBookDropOpen(true)}
+                    className="h-8 px-2.5 text-xs font-semibold gap-1.5 cursor-pointer"
+                  >
+                    <Inbox className="h-3.5 w-3.5 text-primary" />
+                    <span>Gửi sách vào hòm</span>
+                  </Button>
+                </div>
+              </div>
+
+              {filteredDropBoxLoans.length === 0 ? (
+                <div className="py-12 text-center text-muted-foreground flex flex-col items-center justify-center space-y-3">
+                  <div className="h-12 w-12 rounded-full bg-muted/60 flex items-center justify-center text-muted-foreground">
+                    <Inbox className="h-6 w-6" />
+                  </div>
+                  <div>
+                    <p className="text-sm font-medium text-foreground">
+                      {normalizedDropBoxQuery
+                        ? "Không tìm thấy bản ghi Hòm 24/7 nào khớp từ khóa"
+                        : "Bạn chưa có lượt trả sách nào qua Hòm 24/7"}
+                    </p>
+                    {!normalizedDropBoxQuery && (
+                      <p className="text-xs text-muted-foreground mt-0.5 max-w-md mx-auto">
+                        Khi bạn tự trả sách ngoài giờ qua Hòm 24/7, thông tin ảnh minh chứng và kết quả kiểm kê của Thủ thư sẽ hiển thị rõ ràng tại đây.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/30">
+                        <TableHead className="text-xs font-semibold">Ấn Phẩm &amp; Mã Bản Sao</TableHead>
+                        <TableHead className="text-xs font-semibold">Tiếp Nhận Hòm 24/7</TableHead>
+                        <TableHead className="text-xs font-semibold">Thủ Thư Kiểm Kê</TableHead>
+                        <TableHead className="text-xs font-semibold">Trạng Thái Đối Soát</TableHead>
+                        <TableHead className="text-xs font-semibold text-right">Phiếu Trả / Minh Chứng</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {filteredDropBoxLoans.map((d) => {
+                        const isPending = d.status === "returned_drop_box" || d.drop_box_status === "pending_audit";
+                        const isIntact = d.drop_box_status === "verified_intact";
+                        const isDamaged = d.drop_box_status === "damaged";
+                        const isMissing = d.drop_box_status === "missing";
+                        return (
+                          <TableRow key={d.id} className="hover:bg-muted/20">
+                            <TableCell className="py-2.5">
+                              <p className="font-medium text-xs text-foreground max-w-[240px] truncate">{d.book_title}</p>
+                              <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                                <span className="text-[11px] font-mono text-muted-foreground">{d.qr_code}</span>
+                                {d.pass_code && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenBorrowSlipCode(d.pass_code!, d)}
+                                    className="inline-flex items-center px-1.5 py-0 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono text-[10px] cursor-pointer"
+                                  >
+                                    {d.pass_code}
+                                  </button>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              <div className="space-y-0.5">
+                                <p className="font-mono text-[11px] text-foreground">
+                                  {d.drop_box_at ? new Date(d.drop_box_at).toLocaleString("vi-VN") : "—"}
+                                </p>
+                                {d.drop_box_proof_image && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setPreviewProofImg({
+                                        url: d.drop_box_proof_image!,
+                                        title: d.book_title,
+                                        time: d.drop_box_at ? new Date(d.drop_box_at).toLocaleString("vi-VN") : undefined,
+                                        statusLabel: isPending
+                                          ? "Đang chờ Thủ thư kiểm kê"
+                                          : isIntact
+                                          ? "Đã xác nhận nguyên vẹn"
+                                          : isDamaged
+                                          ? "Phát hiện hư hại"
+                                          : "Báo thiếu sách",
+                                        auditor: d.drop_box_audited_by_name,
+                                        note: d.drop_box_audit_note
+                                      })
+                                    }
+                                    className="inline-flex items-center gap-1 text-[10px] font-semibold text-sky-600 hover:text-sky-800 underline cursor-pointer"
+                                  >
+                                    <Eye className="h-3 w-3" /> Xem ảnh minh chứng
+                                  </button>
+                                )}
+                              </div>
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {isPending ? (
+                                <span className="text-[11px] text-muted-foreground italic">Đang chờ trực ca kiểm kê</span>
+                              ) : (
+                                <div className="space-y-0.5">
+                                  <p className="font-medium text-foreground">{d.drop_box_audited_by_name || "Thủ thư trực ca"}</p>
+                                  {d.drop_box_audited_at && (
+                                    <p className="text-[10px] text-muted-foreground font-mono">
+                                      {new Date(d.drop_box_audited_at).toLocaleString("vi-VN")}
+                                    </p>
+                                  )}
+                                  {d.drop_box_audit_note && (
+                                    <p className="text-[10px] text-muted-foreground italic max-w-[200px] truncate" title={d.drop_box_audit_note}>
+                                      "{d.drop_box_audit_note}"
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-xs">
+                              {isPending ? (
+                                <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] font-semibold gap-1">
+                                  <Clock className="h-3 w-3" /> Chờ kiểm kê
+                                </Badge>
+                              ) : isDamaged ? (
+                                <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] font-semibold">
+                                  Hư hại
+                                </Badge>
+                              ) : isMissing ? (
+                                <Badge variant="destructive" className="text-[11px] font-semibold">
+                                  Thiếu sách
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className="border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 text-[11px] font-semibold gap-1">
+                                  <CheckCircle2 className="h-3 w-3" /> Đã xác nhận
+                                </Badge>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-xs text-right">
+                              {d.return_slip_code ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 text-xs font-semibold gap-1.5 border-sky-500/40 text-sky-700 dark:text-sky-400 hover:bg-sky-50 dark:hover:bg-sky-950/30 cursor-pointer"
+                                  onClick={() => handleOpenReturnSlipCode(d.return_slip_code!)}
+                                >
+                                  <QrCode className="h-3.5 w-3.5 text-sky-600" />
+                                  <span>{d.return_slip_code}</span>
+                                </Button>
+                              ) : isPending ? (
+                                <span className="text-[11px] text-amber-600 italic">Chờ lập phiếu trả</span>
+                              ) : (
+                                <span className="text-[11px] text-muted-foreground">—</span>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
+            </div>
           )}
         </CardContent>
       </Card>
 
-      {/* DIALOG: NỘI QUY THƯ VIỆN & QUY ĐỊNH LƯU THÔNG */}
-      <Dialog open={rulesDialogOpen} onOpenChange={setRulesDialogOpen}>
-        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+      {/* DIALOG: MÃ QR THẺ ĐỘC GIẢ SỐ */}
+      <Dialog open={qrCardModalOpen} onOpenChange={setQrCardModalOpen}>
+        <DialogContent className="max-w-sm rounded-2xl">
           <DialogHeader>
-            <div className="flex items-center gap-2 text-amber-600">
-              <BookMarked className="h-5 w-5" />
-              <DialogTitle className="text-lg font-bold text-foreground">
-                Nội Quy Thư Viện & Quy Định Lưu Thông Sách
-              </DialogTitle>
-            </div>
+            <DialogTitle className="font-display text-base flex items-center gap-2">
+              <QrCode className="h-4 w-4 text-primary" />
+              <span>Thẻ Thư Viện Số</span>
+            </DialogTitle>
             <DialogDescription className="text-xs">
-              Vui lòng nắm rõ các quy chế để đảm bảo quyền lợi mượn đọc và giữ gìn tài nguyên chung.
+              Đưa mã QR này cho Thủ thư tại quầy hoặc máy quét để mượn và trả sách tức thì.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="space-y-4 py-2 text-xs text-foreground">
-            {/* Rule 1 */}
-            <div className="p-3.5 rounded-xl bg-primary/5 border border-primary/20 space-y-1.5">
-              <p className="font-bold text-primary flex items-center gap-1.5 text-sm">
-                <Check className="h-4 w-4" /> 1. Hạn mức mượn sách & Thời gian đọc
-              </p>
-              <ul className="list-disc list-inside text-muted-foreground space-y-1 pl-1">
-                <li>Mỗi độc giả được mượn tối đa <strong>05 cuốn sách</strong> trong cùng một thời điểm.</li>
-                <li>Thời hạn mượn tiêu chuẩn là <strong>14 ngày</strong> kể từ ngày hoàn tất thủ tục xuất mượn tại quầy.</li>
-              </ul>
+          <div className="flex flex-col items-center justify-center py-3 space-y-3">
+            <div className="p-3 rounded-2xl bg-white border border-border shadow-xs">
+              <QRCodeCanvas
+                id="reader-card-qr-canvas"
+                value={cardNumber}
+                size={180}
+                level="H"
+                includeMargin={true}
+              />
             </div>
 
-            {/* Rule 2 */}
-            <div className="p-3.5 rounded-xl bg-emerald-500/5 border border-emerald-500/20 space-y-1.5">
-              <p className="font-bold text-emerald-700 dark:text-emerald-400 flex items-center gap-1.5 text-sm">
-                <RefreshCw className="h-4 w-4" /> 2. Chính sách gia hạn sách trực tuyến
-              </p>
-              <ul className="list-disc list-inside text-muted-foreground space-y-1 pl-1">
-                <li>Mỗi cuốn sách được gia hạn tối đa <strong>02 lần</strong> (mỗi lần thêm <strong>07 ngày</strong>).</li>
-                <li>Điều kiện gia hạn: Sách chưa quá hạn và chưa có độc giả khác đặt trước trong hàng đợi.</li>
-              </ul>
-            </div>
-
-            {/* Rule 3 */}
-            <div className="p-3.5 rounded-xl bg-destructive/5 border border-destructive/20 space-y-1.5">
-              <p className="font-bold text-destructive flex items-center gap-1.5 text-sm">
-                <AlertTriangle className="h-4 w-4" /> 3. Quy chế quá hạn, tạm ngưng mượn & khắc phục (Không thu tiền)
-              </p>
-              <ul className="list-disc list-inside text-muted-foreground space-y-1 pl-1">
-                <li><strong>Đang giữ sách quá hạn (OVERDUE):</strong> Tự động khóa quyền mượn mới và đặt trước cho đến khi hoàn trả sách về thư viện.</li>
-                <li><strong>Trả sách trễ hạn (SUSPENDED):</strong> Áp dụng thời gian tạm ngưng quyền mượn theo quy chế thư viện (cấu hình số ngày đình chỉ trên mỗi ngày trễ và mức trần tối đa). Hết thời hạn sẽ tự động mở khóa nếu không còn vi phạm khác.</li>
-                <li><strong>Hư hỏng / Mất sách (PENDING_REMEDIATION):</strong> Không thu tiền phạt; Thủ thư lập biên bản hiện trạng và độc giả khắc phục hoặc nộp sách thay thế tương đương theo quy chế để được xác nhận mở khóa.</li>
-              </ul>
-            </div>
-
-            {/* Rule 4 */}
-            <div className="p-3.5 rounded-xl bg-sky-500/5 border border-sky-500/20 space-y-1.5">
-              <p className="font-bold text-sky-700 dark:text-sky-400 flex items-center gap-1.5 text-sm">
-                <Inbox className="h-4 w-4" /> 4. Trả sách ngoài giờ (Hòm trả sách 24/7)
-              </p>
-              <p className="text-muted-foreground leading-relaxed pl-1">
-                Khi thư viện đóng cửa, độc giả có thể sử dụng tính năng <strong>Hòm Trả Sách 24/7</strong> và thả sách vào khe hòm ngoại tuyến tại cửa thư viện (bắt buộc kèm ảnh minh chứng). Thời điểm gửi sách sẽ được chốt làm mốc thời gian hoàn trả để không phát sinh thêm ngày trễ hạn.
-              </p>
-            </div>
-
-            {/* Rule 5 */}
-            <div className="p-3.5 rounded-xl bg-amber-500/5 border border-amber-500/20 space-y-1.5">
-              <p className="font-bold text-amber-700 dark:text-amber-400 flex items-center gap-1.5 text-sm">
-                <ShieldAlert className="h-4 w-4" /> 5. Đối soát Phiếu mượn khi ra cổng & Bảo quản tài liệu
-              </p>
-              <ul className="list-disc list-inside text-muted-foreground space-y-1 pl-1">
-                <li>Khi đăng ký giữ chỗ online 24h, hệ thống khóa giữ riêng 1 bản sao và tạo <strong>Phiếu mượn nháp</strong>. Khi Thủ thư quét xác nhận cho mượn tại quầy, phiếu sẽ chuyển thành <strong>Phiếu mượn chính thức</strong> để đối soát mượn trả và xuất trình khi ra cổng nếu được hỏi.</li>
-                <li>Không viết, vẽ, gập trang, làm rách hoặc bóc tem mã vạch QR định danh dán trên gáy sách.</li>
-              </ul>
+            <div className="text-center space-y-0.5">
+              <p className="font-semibold text-sm text-foreground">{readerFullName}</p>
+              <p className="text-xs font-mono font-bold text-primary">{cardNumber}</p>
+              {cardExpiry && (
+                <p className="text-[11px] text-muted-foreground">Hạn thẻ: {cardExpiry}</p>
+              )}
             </div>
           </div>
 
-          <DialogFooter>
-            <Button onClick={() => setRulesDialogOpen(false)} size="sm" className="font-semibold">
-              Tôi đã hiểu nội quy
+          <DialogFooter className="flex-row sm:justify-between gap-2">
+            <Button
+              onClick={handleDownloadQr}
+              variant="outline"
+              size="sm"
+              className="flex-1 gap-1.5 text-xs font-semibold border-primary/30 text-primary hover:bg-primary/10 cursor-pointer"
+            >
+              <Download className="h-3.5 w-3.5" />
+              <span>Tải Ảnh QR Thẻ</span>
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => setQrCardModalOpen(false)}
+              className="text-xs cursor-pointer"
+            >
+              Đóng
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Exit Pass Modal */}
-      {exitPassModalOpen && myExitPassData && (
-        <ExitPassModal
-          open={exitPassModalOpen}
-          onOpenChange={setExitPassModalOpen}
-          passData={myExitPassData}
-        />
-      )}
+      {/* DIALOG: HƯỚNG DẪN HOÀN TRẢ SÁCH */}
+      <Dialog open={returnGuideOpen} onOpenChange={setReturnGuideOpen}>
+        <DialogContent className="max-w-md rounded-2xl">
+          <DialogHeader>
+            <DialogTitle className="font-display text-base flex items-center gap-2">
+              <Info className="h-4 w-4 text-primary" />
+              <span>Hướng Dẫn Hoàn Trả Sách Vào Kho</span>
+            </DialogTitle>
+            <DialogDescription className="text-xs">
+              Bạn có thể chọn một trong hai cách dưới đây để trả sách đúng hạn.
+            </DialogDescription>
+          </DialogHeader>
 
-      {/* Smart Book Drop Modal */}
-      {smartBookDropOpen && (
-        <SmartBookDropModal
-          open={smartBookDropOpen}
-          onOpenChange={setSmartBookDropOpen}
-          onSuccess={fetchMyData}
-          myBorrowingBooks={activeLoans.map(l => ({
-            id: l.id,
-            book_title: l.book_title,
-            qr_code: l.qr_code,
-            due_date: l.due_date
-          }))}
-        />
-      )}
+          <div className="space-y-3 py-1 text-xs">
+            <div className="p-3 rounded-xl border border-border/80 bg-muted/20 space-y-1">
+              <p className="font-semibold text-foreground">Cách 1 — Trả trực tiếp tại Quầy Thủ thư</p>
+              <p className="text-muted-foreground leading-relaxed">
+                Mang sách và mở <strong>Mã QR thẻ</strong> cho Thủ thư quét xác nhận trả sách nhập kho. Hệ thống sẽ tạo ngay <strong>Phiếu trả sách điện tử</strong> làm minh chứng.
+              </p>
+            </div>
+
+            <div className="p-3 rounded-xl border border-border/80 bg-muted/20 space-y-1">
+              <p className="font-semibold text-foreground">Cách 2 — Tự phục vụ qua Hòm Trả Sách 24/7</p>
+              <p className="text-muted-foreground leading-relaxed">
+                Bấm nút <strong>Hòm trả 24/7</strong>, quét mã bản sao trên gáy sách và đính kèm ảnh chụp minh chứng khi thả sách vào hòm. Hệ thống sẽ chốt mốc thời gian trả tức thì để không bị tính trễ hạn, sau đó Thủ thư sẽ kiểm kê xác nhận nhập kho.
+              </p>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:justify-between">
+            <Button
+              size="sm"
+              onClick={() => {
+                setReturnGuideOpen(false);
+                setSmartBookDropOpen(true);
+              }}
+              className="gap-1.5 text-xs cursor-pointer"
+            >
+              <Inbox className="h-3.5 w-3.5" />
+              <span>Mở Hòm Trả 24/7</span>
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setReturnGuideOpen(false)}
+              className="text-xs cursor-pointer"
+            >
+              Đóng
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* DIALOG: NỘI QUY THƯ VIỆN & QUY ĐỊNH LƯU THÔNG (Đồng bộ cấu hình hệ thống) */}
+      <LibraryRulesDialog
+        open={rulesDialogOpen}
+        onOpenChange={setRulesDialogOpen}
+        rules={readerRules}
+      />
 
       {/* Reader Shelf QR Scanner Modal */}
       <Dialog open={isScannerOpen} onOpenChange={(open) => {
@@ -1765,6 +2087,22 @@ export function ReaderBorrowView() {
                   <Upload className="h-4 w-4" /> Tải ảnh mã QR từ thiết bị
                 </Button>
                 <input type="file" ref={fileInputRef} accept="image/*" className="hidden" onChange={handleFileUpload} />
+
+                {/* Helpful camera guidance on LAN / Mobile HTTP */}
+                <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.06] p-3 text-xs space-y-1.5">
+                  <p className="font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5 text-[11px]">
+                    <Sparkles className="h-3.5 w-3.5 text-amber-600 shrink-0" />
+                    Mẹo quét nhanh trên điện thoại &amp; mạng LAN:
+                  </p>
+                  <ul className="text-[11px] text-muted-foreground list-disc pl-4 space-y-1 leading-snug">
+                    <li>
+                      <strong>Cách tiện lợi nhất:</strong> Mở ứng dụng Chụp ảnh trên điện thoại để chụp rõ tem mã QR trên gáy sách, sau đó chọn <strong>&quot;Tải ảnh mã QR từ thiết bị&quot;</strong> để hệ thống nhận diện lập tức.
+                    </li>
+                    <li>
+                      Nếu truy cập qua địa chỉ IP mạng LAN (HTTP) và bị trình duyệt chặn Camera: Vào <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>, thêm IP thư viện để cấp quyền mở Camera trực tiếp.
+                    </li>
+                  </ul>
+                </div>
 
                 <div className="relative my-1">
                   <div className="absolute inset-0 flex items-center">
@@ -1882,6 +2220,17 @@ export function ReaderBorrowView() {
         onOpenChange={setExitPassModalOpen}
         passData={myExitPassData}
         borrowRecords={records}
+      />
+
+      {/* Electronic Return Slip Modal */}
+      <ReturnSlipModal
+        open={returnSlipModalOpen}
+        onOpenChange={setReturnSlipModalOpen}
+        slipData={selectedReturnSlip}
+        onOpenBorrowSlip={(code) => {
+          setReturnSlipModalOpen(false);
+          handleOpenBorrowSlipCode(code);
+        }}
       />
 
       {/* Smart Book Drop 24/7 Modal */}

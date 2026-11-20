@@ -264,7 +264,7 @@ async function seed() {
             [2, 2, 'BORROW', 'borrow_records', 1, 'Cho độc giả Nguyễn Minh A mượn sách "Mắt Biếc".', daysAgo(10)],
             [3, 2, 'RETURN', 'borrow_records', 3, 'Thủ thư nhận trả sách "Đắc Nhân Tâm" cho độc giả Nguyễn Minh A.', daysAgo(2)],
             [4, 1, 'PROPOSE_CONFIG', 'config_change_requests', 1, 'Admin gửi đề xuất tăng suspension_days_per_late_day lên 2 ngày', daysAgo(1)],
-            [5, 4, 'SYSTEM_LOGIN', 'users', 4, 'Chủ thư viện Trần Văn Chủ đăng nhập kiểm toán hệ thống.', daysAgo(0)]
+            [5, 4, 'SYSTEM_LOGIN', 'users', 4, 'Chủ thư viện Trần Văn Chủ đăng nhập giám sát hệ thống.', daysAgo(0)]
         ];
 
         for (const log of activityLogsData) {

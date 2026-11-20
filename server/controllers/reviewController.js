@@ -1,13 +1,14 @@
 const db = require('../config/db');
+const { checkProfanity } = require('../utils/contentFilter');
 
 exports.getReviewsByBook = async (req, res) => {
     try {
         const [reviews] = await db.execute(`
-            SELECT r.*, u.full_name as user_name, u.avatar_url 
+            SELECT r.*, u.full_name as user_name, u.avatar_url, COALESCE(r.is_verified_reader, 0) as is_verified_reader
             FROM reviews r
             JOIN users u ON r.user_id = u.id
             WHERE r.book_id = ?
-            ORDER BY r.created_at DESC
+            ORDER BY r.is_verified_reader DESC, r.created_at DESC
         `, [req.params.bookId]);
 
         const [avgResult] = await db.execute(
@@ -37,7 +38,24 @@ exports.addReview = async (req, res) => {
             return res.status(400).json({ message: 'Vui lòng cung cấp số sao đánh giá hợp lệ' });
         }
 
+        // Kiểm duyệt ngôn từ bình luận (Content Moderation)
+        if (comment) {
+            const modCheck = checkProfanity(comment);
+            if (modCheck.hasProfanity) {
+                return res.status(400).json({ message: modCheck.flaggedReason });
+            }
+        }
+
         const ratingNum = Math.min(5, Math.max(1, parseInt(rating)));
+
+        // Kiểm tra độc giả đã từng mượn cuốn sách này hay chưa để gắn huy hiệu Độc giả đã mượn
+        const [borrowHistory] = await db.execute(`
+            SELECT br.id FROM borrow_records br
+            JOIN book_copies bc ON br.book_copy_id = bc.id
+            WHERE br.user_id = ? AND bc.book_id = ?
+            LIMIT 1
+        `, [userId, book_id]);
+        const isVerifiedReader = borrowHistory.length > 0 ? 1 : 0;
 
         // Kiểm tra xem độc giả đã từng đánh giá sách này chưa -> nếu có thì cập nhật, nếu chưa thì thêm mới
         const [existing] = await db.execute(
@@ -49,13 +67,13 @@ exports.addReview = async (req, res) => {
         if (existing.length > 0) {
             isUpdate = true;
             await db.execute(
-                'UPDATE reviews SET rating = ?, comment = ?, created_at = NOW() WHERE id = ?',
-                [ratingNum, comment ? comment.trim() : null, existing[0].id]
+                'UPDATE reviews SET rating = ?, comment = ?, is_verified_reader = ?, created_at = NOW() WHERE id = ?',
+                [ratingNum, comment ? comment.trim() : null, isVerifiedReader, existing[0].id]
             );
         } else {
             await db.execute(
-                'INSERT INTO reviews (user_id, book_id, rating, comment) VALUES (?, ?, ?, ?)',
-                [userId, book_id, ratingNum, comment ? comment.trim() : null]
+                'INSERT INTO reviews (user_id, book_id, rating, comment, is_verified_reader) VALUES (?, ?, ?, ?, ?)',
+                [userId, book_id, ratingNum, comment ? comment.trim() : null, isVerifiedReader]
             );
         }
 
@@ -68,9 +86,10 @@ exports.addReview = async (req, res) => {
         await db.execute('UPDATE books SET avg_rating = ? WHERE id = ?', [newAvg, book_id]);
 
         res.status(200).json({ 
-            message: isUpdate ? 'Cập nhật đánh giá sách thành công!' : 'Đã gửi đánh giá sao thành công!',
+            message: isUpdate ? 'Cập nhật đánh giá sách thành công!' : 'Đã gửi đánh giá sách thành công!',
             avg_rating: parseFloat(newAvg).toFixed(1),
-            total_reviews: avgResult[0]?.count || 1
+            total_reviews: avgResult[0]?.count || 1,
+            is_verified_reader: isVerifiedReader
         });
     } catch (error) {
         console.error('Lỗi khi thêm/cập nhật đánh giá:', error);

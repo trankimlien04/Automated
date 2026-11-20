@@ -15,20 +15,26 @@ router.post('/requests', authenticateToken, borrowController.createBorrowRequest
 router.delete('/requests/:id', authenticateToken, borrowController.cancelBorrowRequest);
 router.post('/requests/:id/fulfill', authenticateToken, requireRole(['admin', 'librarian']), borrowController.fulfillBorrowRequest);
 
-// Return a book (Admin, Librarian, or Reader Self-Service)
+// Return a book (Admin, Librarian, or Reader Self-Service) & Counter Return Session
 router.post('/return', authenticateToken, borrowController.returnBook);
+router.post('/return-session', authenticateToken, requireRole(['admin', 'librarian']), borrowController.returnCounterSession);
+
+// Electronic Return Slips (Phiếu trả sách điện tử)
+router.get('/return-slips/my-history', authenticateToken, borrowController.getMyReturnSlipsHistory);
+router.get('/return-slips/list', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.getReturnSlipsList);
+router.get('/return-slips/:code', authenticateToken, borrowController.getReturnSlipByCode);
 
 // Smart Book Drop 24/7 (Hòm trả sách tự động ngoài giờ)
 router.post('/drop-box-return', authenticateToken, borrowController.dropBoxReturn);
-router.get('/drop-box-items', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.getDropBoxItems);
-router.post('/drop-box-audit', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.auditDropBoxItem);
+router.get('/drop-box-items', authenticateToken, requireRole(['admin', 'librarian']), borrowController.getDropBoxItems);
+router.post('/drop-box-audit', authenticateToken, requireRole(['admin', 'librarian']), borrowController.auditDropBoxItem);
 
-// Physical Security & Loss Prevention: Exit Passes (Vé thông hành ra cửa / Biên lai mượn)
+// Official Borrow Slips & Verification Proofs (Phiếu mượn chính thức & Đối soát chứng từ)
 router.get('/exit-passes/my-active', authenticateToken, borrowController.getMyActiveExitPass);
 router.get('/exit-passes/my-history', authenticateToken, borrowController.getMyExitPassesHistory);
-router.get('/exit-passes/active-list', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.getActiveExitPassesList);
-router.post('/exit-passes/verify', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.verifyExitPass);
-router.post('/exit-passes/clear', authenticateToken, requireRole(['admin', 'librarian', 'owner']), borrowController.clearExitPass);
+router.get('/exit-passes/active-list', authenticateToken, requireRole(['admin', 'librarian']), borrowController.getActiveExitPassesList);
+router.post('/exit-passes/verify', authenticateToken, requireRole(['admin', 'librarian']), borrowController.verifyExitPass);
+router.post('/exit-passes/clear', authenticateToken, requireRole(['admin', 'librarian']), borrowController.clearExitPass);
 
 // Batch Return Books (Librarian/Admin receives multiple books in 1 scan / 1 click)
 router.post('/batch-return-preview', authenticateToken, requireRole(['admin', 'librarian']), borrowController.previewBatchReturn);

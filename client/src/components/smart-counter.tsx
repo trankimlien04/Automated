@@ -19,6 +19,7 @@ import { toast } from "sonner";
 import { useAuth } from "@/contexts/AuthContext";
 import { Html5Qrcode } from "html5-qrcode";
 import { ExitPassModal } from "@/components/exit-pass-modal";
+import { ReturnSlipModal, type ReturnSlipData } from "@/components/return-slip-modal";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { LibraryMiniMapModal } from "@/components/library-mini-map-modal";
 import { BookDropAuditModal } from "@/components/book-drop-audit-modal";
@@ -69,6 +70,11 @@ interface BasketItem {
   location?: string;
   draftCode?: string;
   draftId?: number;
+  borrowRecordId?: number;
+  borrowSlipCode?: string | null;
+  returnCondition?: "normal" | "damaged" | "lost";
+  conditionNote?: string;
+  returnMethod?: "counter";
   borrowerName?: string;
   borrowerCardNumber?: string;
   isDropBox?: boolean;
@@ -107,6 +113,8 @@ interface ScannedReader {
   activeDraft?: any;
   activeExitPass?: any;
   exitPasses?: any[];
+  returnSlips?: ReturnSlipData[];
+  recentHistory?: any[];
   dropBoxPendingLoans?: any[];
 }
 
@@ -117,6 +125,8 @@ interface RecentTransaction {
   status: string;
   reader_name: string;
   card_number: string;
+  reader_phone?: string;
+  reader_status?: string;
   book_title: string;
   qr_code: string;
   pass_code?: string | null;
@@ -133,9 +143,11 @@ export function SmartCounter() {
   const [basket, setBasket] = useState<BasketItem[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Exit Pass Modal State
+  // Exit Pass & Return Slip Modal State
   const [exitPassModalOpen, setExitPassModalOpen] = useState(false);
   const [exitPassData, setExitPassData] = useState<any>(null);
+  const [returnSlipModalOpen, setReturnSlipModalOpen] = useState(false);
+  const [returnSlipData, setReturnSlipData] = useState<ReturnSlipData | null>(null);
 
   // Camera Dialog
   const [cameraOpen, setCameraOpen] = useState(false);
@@ -299,6 +311,8 @@ export function SmartCounter() {
           activeDraft: data.activeDraft || null,
           activeExitPass: data.activeExitPass || null,
           exitPasses: data.exitPasses || (data.activeExitPass ? [data.activeExitPass] : []),
+          returnSlips: data.returnSlips || [],
+          recentHistory: data.recentHistory || [],
           dropBoxPendingLoans: data.dropBoxPendingLoans || []
         };
 
@@ -522,6 +536,16 @@ export function SmartCounter() {
     }
   };
 
+  const resolveLoanSlipCode = (qrCode?: string | null, directSlipCode?: string | null) => {
+    if (directSlipCode) return String(directSlipCode).replace(/^PASS-EXP-/i, "PM-BRW-");
+    if (!qrCode || !currentReader?.exitPasses) return null;
+    const found = currentReader.exitPasses.find((ep: any) =>
+      Array.isArray(ep.items) &&
+      ep.items.some((it: any) => (it.copyQr || it.qr_code || it.copy_qr_code) === qrCode)
+    );
+    return found?.pass_code ? String(found.pass_code).replace(/^PASS-EXP-/i, "PM-BRW-") : null;
+  };
+
   // Add single active borrow item to Return Basket
   const addLoanToReturnBasket = (loan: any) => {
     if (basket.some(item => item.copyQr === loan.qr_code)) {
@@ -529,6 +553,7 @@ export function SmartCounter() {
       return;
     }
     const overdueDays = loan.overdue_days || 0;
+    const borrowSlipCode = resolveLoanSlipCode(loan.qr_code, loan.pass_code);
 
     const newItem: BasketItem = {
       id: `ret-${loan.qr_code}`,
@@ -541,13 +566,20 @@ export function SmartCounter() {
       dueDate: loan.due_date,
       overdueDays: overdueDays,
       location: loan.location,
+      borrowRecordId: loan.id,
+      borrowSlipCode,
+      returnCondition: "normal",
+      conditionNote: "",
+      returnMethod: "counter",
       borrowerName: currentReader?.full_name || loan.reader_name,
       borrowerCardNumber: currentReader?.card_number || loan.card_number
     };
 
     setBasket(prev => [...prev, newItem]);
     playTone("beep");
-    toast.info(`🔄 Nghiệp vụ: TRẢ SÁCH — Đã thêm vào giỏ cuốn «${newItem.bookTitle}» (${newItem.borrowerName || "bạn đọc"})`);
+    toast.info(
+      `🔄 Nghiệp vụ: TRẢ SÁCH — Đã thêm vào giỏ cuốn «${newItem.bookTitle}»${borrowSlipCode ? ` (${borrowSlipCode})` : ""}`
+    );
   };
 
   // Add all active borrows of current reader to Return Basket
@@ -559,6 +591,7 @@ export function SmartCounter() {
     for (const loan of currentReader.activeBorrows) {
       if (!basket.some(item => item.copyQr === loan.qr_code)) {
         const overdueDays = loan.overdue_days || 0;
+        const borrowSlipCode = resolveLoanSlipCode(loan.qr_code, loan.pass_code);
 
         newItems.push({
           id: `ret-${loan.qr_code}`,
@@ -571,6 +604,11 @@ export function SmartCounter() {
           dueDate: loan.due_date,
           overdueDays: overdueDays,
           location: loan.location,
+          borrowRecordId: loan.id,
+          borrowSlipCode,
+          returnCondition: "normal",
+          conditionNote: "",
+          returnMethod: "counter",
           borrowerName: currentReader.full_name,
           borrowerCardNumber: currentReader.card_number
         });
@@ -587,7 +625,7 @@ export function SmartCounter() {
     }
   };
 
-  // Tra cứu & Mở Phiếu mượn chính thức (PM-BRW-...) để đối soát tại quầy hoặc ra cổng
+  // Tra cứu & Mở Phiếu mượn chính thức (PM-BRW-...) để đối soát khi cần thiết
   const handleVerifyAndOpenBorrowSlip = async (passCode: string, fallbackTx?: RecentTransaction) => {
     try {
       const res = await api.post("/borrow/exit-passes/verify", { passCode: passCode.trim() });
@@ -611,6 +649,12 @@ export function SmartCounter() {
         pass_code: passCode,
         reader_name: fallbackTx.reader_name,
         card_number: fallbackTx.card_number,
+        reader_phone:
+          fallbackTx.reader_phone ||
+          (currentReader?.card_number === fallbackTx.card_number ? currentReader?.phone : undefined),
+        reader_status:
+          fallbackTx.reader_status ||
+          (currentReader?.card_number === fallbackTx.card_number ? currentReader?.status : undefined),
         created_at: fallbackTx.borrow_date,
         borrowDate: formatViDate(fallbackTx.borrow_date),
         dueDate: fallbackTx.due_date ? formatViDate(fallbackTx.due_date) : undefined,
@@ -635,6 +679,27 @@ export function SmartCounter() {
     return false;
   };
 
+  // Tra cứu & Mở Phiếu trả sách điện tử (RT-...) để đối soát
+  const handleOpenReturnSlipByCode = async (returnCode: string) => {
+    try {
+      const res = await api.get(`/borrow/return-slips/${encodeURIComponent(returnCode.trim())}`);
+      if (res.data) {
+        setReturnSlipData(res.data);
+        setReturnSlipModalOpen(true);
+        playTone("beep");
+        toast.success(`Đã mở Phiếu trả sách [${res.data.return_code || returnCode}]!`);
+        if (res.data.card_number && (!currentReader || currentReader.card_number !== res.data.card_number)) {
+          await loadReaderProfile(res.data.card_number, false);
+        }
+        return true;
+      }
+    } catch (err: any) {
+      playTone("error");
+      toast.error(err.response?.data?.message || `Không tìm thấy Phiếu trả sách [${returnCode}]`);
+    }
+    return false;
+  };
+
   // Main Unified Scan Processor
   const handleProcessCode = async (rawCode: string) => {
     const code = rawCode.trim();
@@ -645,6 +710,14 @@ export function SmartCounter() {
 
     try {
       const upperCode = code.toUpperCase();
+
+      // 00. Check if code is an Official Return Slip (RT-...)
+      if (upperCode.startsWith("RT-")) {
+        await handleOpenReturnSlipByCode(code);
+        setIsProcessingScan(false);
+        scanInputRef.current?.focus();
+        return;
+      }
 
       // 0a. Check if code is an Official Borrow Slip (PM-BRW-... or PASS-EXP-...)
       if (upperCode.startsWith("PM-BRW-") || upperCode.startsWith("PASS-EXP-")) {
@@ -758,6 +831,7 @@ export function SmartCounter() {
         const overdueDays = copy.due_date
           ? Math.max(0, Math.floor((new Date(new Date().setHours(0, 0, 0, 0)).getTime() - new Date(new Date(copy.due_date).setHours(0, 0, 0, 0)).getTime()) / (1000 * 60 * 60 * 24)))
           : 0;
+        const borrowSlipCode = resolveLoanSlipCode(copy.qr_code, copy.pass_code);
 
         const newItem: BasketItem = {
           id: `ret-${copy.qr_code}`,
@@ -770,6 +844,11 @@ export function SmartCounter() {
           dueDate: copy.due_date,
           overdueDays,
           location: copy.location,
+          borrowRecordId: copy.borrow_record_id || copy.active_borrow_id,
+          borrowSlipCode,
+          returnCondition: "normal",
+          conditionNote: "",
+          returnMethod: "counter",
           borrowerName: borrowerName || currentReader?.full_name,
           borrowerCardNumber: borrowerCard || currentReader?.card_number
         };
@@ -777,7 +856,7 @@ export function SmartCounter() {
         setBasket(prev => [...prev, newItem]);
         playTone("beep");
         toast.success(
-          `🔄 Nghiệp vụ: TRẢ SÁCH — Đã nhận ấn phẩm «${copy.book_title}» từ bạn đọc ${borrowerName || "độc giả"}${borrowerCard ? ` (${borrowerCard})` : ""}!${overdueDays > 0 ? ` [Trễ hạn ${overdueDays} ngày — Áp dụng quy chế tạm ngưng lưu thông nếu vượt ngưỡng]` : ""}`
+          `🔄 Nghiệp vụ: TRẢ SÁCH — Đã nhận ấn phẩm «${copy.book_title}»${borrowSlipCode ? ` (${borrowSlipCode})` : ""} từ bạn đọc ${borrowerName || "độc giả"}${borrowerCard ? ` (${borrowerCard})` : ""}!${overdueDays > 0 ? ` [Trễ hạn ${overdueDays} ngày — Áp dụng quy chế tạm ngưng lưu thông nếu vượt ngưỡng]` : ""}`
         );
         setIsProcessingScan(false);
         scanInputRef.current?.focus();
@@ -901,6 +980,26 @@ export function SmartCounter() {
     scanInputRef.current?.focus();
   };
 
+  const handleUpdateReturnCondition = (id: string, returnCondition: "normal" | "damaged" | "lost") => {
+    setBasket(prev =>
+      prev.map(item =>
+        item.id === id
+          ? {
+              ...item,
+              returnCondition,
+              conditionNote: returnCondition === "normal" ? "" : item.conditionNote || "",
+            }
+          : item
+      )
+    );
+  };
+
+  const handleUpdateConditionNote = (id: string, conditionNote: string) => {
+    setBasket(prev =>
+      prev.map(item => (item.id === id ? { ...item, conditionNote } : item))
+    );
+  };
+
   const handleResetDesk = () => {
     setCurrentReader(null);
     setBasket([]);
@@ -926,19 +1025,30 @@ export function SmartCounter() {
     setIsSubmitting(true);
     let successBorrowCount = 0;
     let successReturnCount = 0;
-    let errors: string[] = [];
+    const errors: string[] = [];
 
     try {
-      // 1. Process all RETURNS first (frees up slots & records any late suspension)
+      let generatedReturnSlip: ReturnSlipData | null = null;
+
+      // 1. Process all RETURNS in ONE unified counter return session -> produces 1 Return Slip linking all original Borrow Slips
       const returnItems = basket.filter(i => i.actionType === "return");
-      for (const item of returnItems) {
+      if (returnItems.length > 0) {
         try {
-          await api.post("/borrow/return", {
-            bookQrCode: item.copyQr
+          const retRes = await api.post("/borrow/return-session", {
+            readerCardNumber: currentReader?.card_number,
+            items: returnItems.map(item => ({
+              bookQrCode: item.copyQr,
+              borrowRecordId: item.borrowRecordId,
+              condition: item.returnCondition || "normal",
+              conditionNote: item.conditionNote || "",
+            })),
           });
-          successReturnCount++;
+          successReturnCount = retRes.data?.returnedCount || returnItems.length;
+          if (retRes.data?.returnSlip) {
+            generatedReturnSlip = retRes.data.returnSlip;
+          }
         } catch (err: any) {
-          errors.push(`Trả cuốn "${item.bookTitle}": ${err.response?.data?.message || "Lỗi xử lý"}`);
+          errors.push(`Trả sách tại quầy: ${err.response?.data?.message || "Lỗi xử lý phiên trả"}`);
         }
       }
 
@@ -998,11 +1108,17 @@ export function SmartCounter() {
       if (errors.length === 0) {
         playTone("success");
         toast.success(
-          `Giao dịch hoàn tất! (Mượn: ${successBorrowCount} cuốn, Nhận trả: ${successReturnCount} cuốn)`
+          generatedReturnSlip
+            ? `Giao dịch hoàn tất! (Mượn: ${successBorrowCount} cuốn, Nhận trả: ${successReturnCount} cuốn • Phiếu trả: ${generatedReturnSlip.return_code})`
+            : `Giao dịch hoàn tất! (Mượn: ${successBorrowCount} cuốn, Nhận trả: ${successReturnCount} cuốn)`
         );
         handleResetDesk();
         fetchRecentHistory();
         await fetchPendingDrafts();
+        if (generatedReturnSlip) {
+          setReturnSlipData(generatedReturnSlip);
+          setReturnSlipModalOpen(true);
+        }
       } else {
         playTone("error");
         toast.error(`Có lỗi xảy ra trong phiên: ${errors.join("; ")}`);
@@ -1314,10 +1430,11 @@ export function SmartCounter() {
                       {currentReader.activeBorrows.map((loan) => {
                         const inBasket = basket.some(b => b.copyQr === loan.qr_code);
                         const isOverdue = (loan.overdue_days || 0) > 0;
+                        const loanSlipCode = resolveLoanSlipCode(loan.qr_code, loan.pass_code);
                         return (
                           <div
                             key={loan.id}
-                            className={`p-2 rounded-lg border text-xs space-y-1.5 transition-colors ${
+                            className={`p-2 rounded-lg border text-xs space-y-1 transition-colors ${
                               inBasket
                                 ? "bg-amber-500/10 border-amber-500/30"
                                 : isOverdue
@@ -1338,7 +1455,7 @@ export function SmartCounter() {
                                   type="button"
                                   size="sm"
                                   variant="outline"
-                                  onClick={() => addLoanToReturnBasket(loan)}
+                                  onClick={() => addLoanToReturnBasket({ ...loan, pass_code: loanSlipCode })}
                                   className="h-5 text-[10px] px-2 py-0 border-amber-500/40 text-amber-700 dark:text-amber-300 hover:bg-amber-500/10 font-bold shrink-0 cursor-pointer"
                                 >
                                   Trả sách
@@ -1356,6 +1473,20 @@ export function SmartCounter() {
                                 <span>Hạn: {new Date(loan.due_date).toLocaleDateString("vi-VN")}</span>
                               )}
                             </div>
+
+                            {loanSlipCode && (
+                              <div className="flex items-center justify-between text-[10px] pt-0.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleVerifyAndOpenBorrowSlip(loanSlipCode)}
+                                  className="inline-flex items-center gap-1 font-mono font-semibold text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
+                                  title="Bấm để xem Phiếu mượn gốc"
+                                >
+                                  <QrCode className="h-3 w-3 shrink-0" />
+                                  <span>Phiếu: {loanSlipCode}</span>
+                                </button>
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -1473,7 +1604,13 @@ export function SmartCounter() {
                             variant="outline"
                             className="h-6 px-2 text-[10px] font-bold border-emerald-500/40 text-emerald-700 hover:bg-emerald-500/10 shrink-0 cursor-pointer"
                             onClick={() => {
-                              setExitPassData(ep);
+                              setExitPassData({
+                                ...ep,
+                                reader_name: ep.reader_name || currentReader.full_name,
+                                card_number: ep.card_number || currentReader.card_number,
+                                reader_phone: ep.reader_phone || currentReader.phone,
+                                reader_status: ep.reader_status || currentReader.status,
+                              });
                               setExitPassModalOpen(true);
                             }}
                           >
@@ -1481,6 +1618,121 @@ export function SmartCounter() {
                           </Button>
                         </div>
                       ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Phiếu trả sách điện tử (RT-...) trong hồ sơ độc giả */}
+                {currentReader.returnSlips && currentReader.returnSlips.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-border/60">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] font-bold text-sky-700 dark:text-sky-400 flex items-center gap-1 uppercase tracking-wider">
+                        <FileSpreadsheet className="h-3.5 w-3.5" /> Phiếu trả đối soát ({currentReader.returnSlips.length}):
+                      </p>
+                    </div>
+                    <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                      {currentReader.returnSlips.slice(0, 5).map((rs) => (
+                        <div
+                          key={rs.id || rs.return_code}
+                          className="p-2 rounded-lg bg-sky-500/5 border border-sky-500/25 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <p className="font-mono font-bold text-[11px] text-sky-700 dark:text-sky-400 truncate">
+                              {rs.return_code}
+                            </p>
+                            <p className="text-[10px] text-muted-foreground truncate">
+                              {rs.book_count || rs.items?.length || 1} cuốn • {rs.return_method === "drop_box" ? "Hòm 24/7" : "Tại quầy"} • {formatViDate(rs.returned_at || rs.created_at)}
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-6 px-2 text-[10px] font-bold border-sky-500/40 text-sky-700 hover:bg-sky-500/10 shrink-0 cursor-pointer"
+                            onClick={() => {
+                              setReturnSlipData({
+                                ...rs,
+                                reader_name: rs.reader_name || currentReader.full_name,
+                                card_number: rs.card_number || currentReader.card_number,
+                                reader_phone: rs.reader_phone || currentReader.phone,
+                                reader_status: rs.reader_status || currentReader.status,
+                              });
+                              setReturnSlipModalOpen(true);
+                            }}
+                          >
+                            Xem Phiếu
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Lịch sử giao dịch mượn trả trong hồ sơ độc giả */}
+                {currentReader.recentHistory && currentReader.recentHistory.length > 0 && (
+                  <div className="space-y-2 pt-2 border-t border-border/60">
+                    <div className="flex items-center justify-between">
+                      <p className="text-[11px] font-bold text-slate-700 dark:text-slate-300 flex items-center gap-1 uppercase tracking-wider">
+                        <Clock className="h-3.5 w-3.5 text-primary" /> Lịch sử giao dịch ({currentReader.recentHistory.length}):
+                      </p>
+                    </div>
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                      {currentReader.recentHistory.slice(0, 8).map((tx: any) => {
+                        const isReturned = tx.status === "returned";
+                        const isDropPending = tx.status === "returned_drop_box";
+                        return (
+                          <div
+                            key={`hist-${tx.id}`}
+                            className="p-2 rounded-lg bg-muted/30 border border-border/70 text-[11px] space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-1.5">
+                              <span className="font-semibold text-foreground truncate">{tx.book_title}</span>
+                              <Badge
+                                variant="outline"
+                                className={`text-[9px] px-1.5 py-0 shrink-0 ${
+                                  isReturned
+                                    ? "bg-sky-50 text-sky-700 border-sky-200"
+                                    : isDropPending
+                                    ? "bg-amber-50 text-amber-700 border-amber-200"
+                                    : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                }`}
+                              >
+                                {isReturned ? "Đã trả" : isDropPending ? "Chờ kiểm hòm" : "Đang mượn"}
+                              </Badge>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-muted-foreground">
+                              <span>Mượn: {formatViDate(tx.borrow_date)}</span>
+                              {isReturned ? (
+                                <span>• Trả: {formatViDate(tx.return_date)}</span>
+                              ) : (
+                                <span>• Hạn: {formatViDate(tx.due_date)}</span>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                              {tx.pass_code && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleVerifyAndOpenBorrowSlip(tx.pass_code)}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[9px] cursor-pointer"
+                                  title="Mở Phiếu mượn gốc"
+                                >
+                                  PM: {tx.pass_code}
+                                </button>
+                              )}
+                              {tx.return_slip_code && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReturnSlipByCode(tx.return_slip_code)}
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-500/10 hover:bg-sky-500/20 text-sky-700 dark:text-sky-300 border border-sky-500/30 font-mono font-bold text-[9px] cursor-pointer"
+                                  title="Mở Phiếu trả điện tử"
+                                >
+                                  PT: {tx.return_slip_code}
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 )}
@@ -1646,33 +1898,36 @@ export function SmartCounter() {
                 )}
               </div>
             ) : (
-              <div className="divide-y divide-border flex-1 max-h-[460px] overflow-y-auto">
-                {basket.map((item) => (
-                  <div key={item.id} className="p-3.5 flex items-center justify-between gap-3 hover:bg-muted/20 transition-colors">
-                    <div className="flex items-center gap-3 min-w-0">
+              <div className="divide-y divide-border flex-1 max-h-[520px] overflow-y-auto">
+                {basket.map((item) => {
+                  const actualReturnDateStr = new Date().toLocaleDateString("vi-VN");
+                  const resolvedCondition = item.returnCondition || "normal";
+                  return (
+                  <div key={item.id} className="p-3.5 flex items-start justify-between gap-3 hover:bg-muted/20 transition-colors">
+                    <div className="flex items-start gap-3 min-w-0 flex-1">
                       {item.actionType === "borrow" && (
-                        <div className="h-9 w-9 rounded-xl bg-emerald-500/15 text-emerald-600 flex items-center justify-center shrink-0 shadow-2xs" title="Nghiệp vụ Mượn mới">
+                        <div className="h-9 w-9 rounded-xl bg-emerald-500/15 text-emerald-600 flex items-center justify-center shrink-0 shadow-2xs mt-0.5" title="Nghiệp vụ Mượn mới">
                           <ArrowRightLeft className="h-4 w-4" />
                         </div>
                       )}
                       {item.actionType === "draft" && (
-                        <div className="h-9 w-9 rounded-xl bg-indigo-500/15 text-indigo-600 flex items-center justify-center shrink-0 shadow-2xs" title="Nghiệp vụ Mượn online">
+                        <div className="h-9 w-9 rounded-xl bg-indigo-500/15 text-indigo-600 flex items-center justify-center shrink-0 shadow-2xs mt-0.5" title="Nghiệp vụ Mượn online">
                           <Zap className="h-4 w-4" />
                         </div>
                       )}
                       {item.actionType === "return" && (
-                        <div className="h-9 w-9 rounded-xl bg-amber-500/15 text-amber-600 flex items-center justify-center shrink-0 shadow-2xs" title="Nghiệp vụ Trả sách">
+                        <div className="h-9 w-9 rounded-xl bg-amber-500/15 text-amber-600 flex items-center justify-center shrink-0 shadow-2xs mt-0.5" title="Nghiệp vụ Trả sách tại quầy">
                           <CheckCircle2 className="h-4 w-4" />
                         </div>
                       )}
                       {item.actionType === "reservation" && (
-                        <div className="h-9 w-9 rounded-xl bg-purple-500/15 text-purple-600 flex items-center justify-center shrink-0 shadow-2xs" title="Nghiệp vụ Nhận đặt trước">
+                        <div className="h-9 w-9 rounded-xl bg-purple-500/15 text-purple-600 flex items-center justify-center shrink-0 shadow-2xs mt-0.5" title="Nghiệp vụ Nhận đặt trước">
                           <Sparkles className="h-4 w-4" />
                         </div>
                       )}
 
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
+                      <div className="min-w-0 flex-1 space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           <p className="font-bold text-xs sm:text-sm text-foreground truncate">{item.bookTitle}</p>
                           <Badge variant="outline" className={`text-[10px] py-0 px-2 shrink-0 font-bold uppercase tracking-wider ${
                             item.actionType === "borrow" ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/40" :
@@ -1684,9 +1939,14 @@ export function SmartCounter() {
                              item.actionType === "draft" ? "⚡ MƯỢN ONLINE" :
                              item.actionType === "return" ? "🔄 TRẢ SÁCH" : "✨ ĐẶT TRƯỚC"}
                           </Badge>
+                          {item.actionType === "return" && (
+                            <Badge variant="outline" className="text-[10px] py-0 px-1.5 bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/30 dark:text-sky-300 dark:border-sky-800/50 font-semibold shrink-0">
+                              Tại quầy
+                            </Badge>
+                          )}
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground font-mono mt-1">
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11px] text-muted-foreground font-mono">
                           <span>Mã bản sao: <strong className="text-foreground">{item.copyQr}</strong></span>
 
                           {/* Thông tin độc giả liên quan đến ấn phẩm */}
@@ -1695,19 +1955,82 @@ export function SmartCounter() {
                               • {item.actionType === "return" ? "Bạn đọc trả:" : "Bạn đọc mượn:"} <strong className="text-primary">{item.borrowerName || currentReader?.full_name}</strong> {item.borrowerCardNumber || currentReader?.card_number ? `(${item.borrowerCardNumber || currentReader?.card_number})` : ""}
                             </span>
                           )}
-
-                          {item.dueDate && (
-                            <span>
-                              • Hạn trả: <strong className="text-foreground">{new Date(item.dueDate).toLocaleDateString("vi-VN")}</strong>
-                            </span>
-                          )}
-
-                          {item.overdueDays && item.overdueDays > 0 ? (
-                            <span className="text-destructive font-semibold">
-                              • Quá hạn {item.overdueDays} ngày (Nhận trả để hoàn tất đối soát & kiểm tra kỷ luật)
-                            </span>
-                          ) : null}
                         </div>
+
+                        {item.actionType === "return" && (
+                          <>
+                            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                              {item.borrowSlipCode && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleVerifyAndOpenBorrowSlip(item.borrowSlipCode!)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[10px] cursor-pointer transition-colors"
+                                  title="Bấm để xem chi tiết Phiếu mượn gốc"
+                                >
+                                  <QrCode className="h-3 w-3" />
+                                  <span>Phiếu mượn: {item.borrowSlipCode}</span>
+                                </button>
+                              )}
+                              {item.dueDate && (
+                                <span className="text-muted-foreground font-mono">
+                                  Hạn: <strong className="text-foreground">{new Date(item.dueDate).toLocaleDateString("vi-VN")}</strong>
+                                </span>
+                              )}
+                              <span className="text-muted-foreground font-mono">
+                                • Ngày trả thực tế: <strong className="text-emerald-700 dark:text-emerald-400">{actualReturnDateStr}</strong>
+                              </span>
+                              {item.overdueDays && item.overdueDays > 0 ? (
+                                <span className="text-destructive font-semibold font-sans">
+                                  • Quá hạn {item.overdueDays} ngày
+                                </span>
+                              ) : null}
+                            </div>
+
+                            {/* Book condition selector required before confirming counter return */}
+                            <div className="pt-1 space-y-1.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mr-0.5">
+                                  Tình trạng sách:
+                                </span>
+                                {[
+                                  { value: "normal" as const, label: "Bình thường", activeClass: "bg-emerald-600 text-white border-emerald-600", idleClass: "border-emerald-300 text-emerald-700 hover:bg-emerald-50" },
+                                  { value: "damaged" as const, label: "Hư hỏng", activeClass: "bg-amber-600 text-white border-amber-600", idleClass: "border-amber-300 text-amber-700 hover:bg-amber-50" },
+                                  { value: "lost" as const, label: "Mất sách", activeClass: "bg-red-600 text-white border-red-600", idleClass: "border-red-300 text-red-700 hover:bg-red-50" },
+                                ].map(opt => (
+                                  <button
+                                    key={opt.value}
+                                    type="button"
+                                    onClick={() => handleUpdateReturnCondition(item.id, opt.value)}
+                                    className={`px-2 py-0.5 rounded-md border text-[10px] font-semibold cursor-pointer transition-colors ${
+                                      resolvedCondition === opt.value ? opt.activeClass : opt.idleClass
+                                    }`}
+                                  >
+                                    {opt.label}
+                                  </button>
+                                ))}
+                              </div>
+
+                              {(resolvedCondition === "damaged" || resolvedCondition === "lost") && (
+                                <Input
+                                  value={item.conditionNote || ""}
+                                  onChange={(e) => handleUpdateConditionNote(item.id, e.target.value)}
+                                  placeholder={
+                                    resolvedCondition === "lost"
+                                      ? "Ghi chú lý do mất sách / hướng khắc phục..."
+                                      : "Mô tả hiện trạng hư hỏng (rách bìa, ướt trang...)..."
+                                  }
+                                  className="h-7 text-[11px] bg-background border-amber-400/60"
+                                />
+                              )}
+                            </div>
+                          </>
+                        )}
+
+                        {item.actionType !== "return" && item.dueDate && (
+                          <div className="text-[11px] text-muted-foreground font-mono">
+                            Hạn trả: <strong className="text-foreground">{new Date(item.dueDate).toLocaleDateString("vi-VN")}</strong>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1721,7 +2044,8 @@ export function SmartCounter() {
                       <Trash2 className="h-4 w-4" />
                     </Button>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </CardContent>
@@ -1748,6 +2072,48 @@ export function SmartCounter() {
                   <span className="text-muted-foreground">Sách nhận trả lại:</span>
                   <span className="font-bold text-foreground text-sm">{returnCount} cuốn</span>
                 </div>
+                {returnCount > 0 && (() => {
+                  const returnItems = basket.filter(i => i.actionType === "return");
+                  const uniqueSlips = Array.from(new Set(returnItems.map(i => i.borrowSlipCode).filter(Boolean))) as string[];
+                  const normalCount = returnItems.filter(i => !i.returnCondition || i.returnCondition === "normal").length;
+                  const damagedCount = returnItems.filter(i => i.returnCondition === "damaged").length;
+                  const lostCount = returnItems.filter(i => i.returnCondition === "lost").length;
+
+                  return (
+                    <div className="p-2.5 rounded-lg bg-muted/40 border border-border/60 space-y-1.5 text-[11px]">
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted-foreground">Phương thức trả:</span>
+                        <span className="font-semibold text-sky-700 dark:text-sky-400">Tại quầy</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-muted-foreground">Ngày trả thực tế:</span>
+                        <span className="font-mono font-semibold text-foreground">{new Date().toLocaleDateString("vi-VN")}</span>
+                      </div>
+                      {uniqueSlips.length > 0 && (
+                        <div className="space-y-1 pt-0.5">
+                          <span className="text-muted-foreground block">
+                            Phiếu mượn liên quan ({uniqueSlips.length} phiếu):
+                          </span>
+                          <div className="flex flex-wrap gap-1">
+                            {uniqueSlips.map(code => (
+                              <code key={code} className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 font-mono text-[10px] font-bold">
+                                {code}
+                              </code>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="flex justify-between items-center pt-0.5">
+                        <span className="text-muted-foreground">Tình trạng kiểm tra:</span>
+                        <span className="font-semibold text-right">
+                          {normalCount > 0 ? `${normalCount} bình thường` : ""}
+                          {damagedCount > 0 ? `${normalCount > 0 ? ", " : ""}${damagedCount} hư hỏng` : ""}
+                          {lostCount > 0 ? `${normalCount + damagedCount > 0 ? ", " : ""}${lostCount} mất` : ""}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
                 <div className="flex justify-between items-center py-1 text-xs font-semibold gap-2">
                   <span className="text-muted-foreground">Kỷ luật thẻ:</span>
                   {currentReader ? (
@@ -1944,6 +2310,17 @@ export function SmartCounter() {
         passData={exitPassData}
       />
 
+      {/* Electronic Return Slip Modal */}
+      <ReturnSlipModal
+        open={returnSlipModalOpen}
+        onOpenChange={setReturnSlipModalOpen}
+        slipData={returnSlipData}
+        onOpenBorrowSlip={(slipCode) => {
+          setReturnSlipModalOpen(false);
+          handleVerifyAndOpenBorrowSlip(slipCode);
+        }}
+      />
+
       {/* DIALOG: XÁC NHẬN PHIẾU MƯỢN NHÁP -> CHUYỂN SANG PHIẾU MƯỢN CHÍNH THỨC */}
       <Dialog open={draftApprovalModalOpen} onOpenChange={setDraftApprovalModalOpen}>
         <DialogContent className="max-w-3xl max-h-[92vh] overflow-y-auto">
@@ -1962,7 +2339,7 @@ export function SmartCounter() {
                   Xác Nhận Cho Mượn & Chuyển Sang Phiếu Mượn Chính Thức ({targetDraftData.items?.length || 0} cuốn)
                 </DialogTitle>
                 <DialogDescription className="text-xs">
-                  Hệ thống đã tự động khóa giữ riêng 1 bản sao cụ thể trong 24h cho từng cuốn. Khi Thủ thư xác nhận cho mượn, Phiếu mượn nháp sẽ chuyển thành <strong>Phiếu mượn chính thức</strong> để đối soát mượn trả và kiểm tra khi ra cổng.
+                  Hệ thống đã tự động khóa giữ riêng 1 bản sao cụ thể trong 24h cho từng cuốn. Khi Thủ thư xác nhận cho mượn, Phiếu mượn nháp sẽ chuyển thành <strong>Phiếu mượn chính thức</strong> để lưu giữ làm minh chứng và đối soát mượn trả khi cần thiết.
                 </DialogDescription>
               </DialogHeader>
 

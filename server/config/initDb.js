@@ -131,7 +131,7 @@ async function initOwnerAndConfigTables() {
 
         try {
             await db.execute("ALTER TABLE fines MODIFY COLUMN amount DECIMAL(10, 2) NOT NULL DEFAULT 0.00");
-        } catch (amtErr) {}
+        } catch (amtErr) { }
 
         try {
             const ensureFineCol = async (colName, alterSql) => {
@@ -208,21 +208,21 @@ async function initOwnerAndConfigTables() {
             await db.execute(
                 "ALTER TABLE borrow_requests MODIFY COLUMN status ENUM('pending', 'borrowed', 'cancelled', 'expired') DEFAULT 'pending'"
             );
-        } catch (err) {}
+        } catch (err) { }
 
         try {
             const [expCol] = await db.execute("SHOW COLUMNS FROM borrow_requests LIKE 'expires_at'");
             if (expCol.length === 0) {
                 await db.execute("ALTER TABLE borrow_requests ADD COLUMN expires_at DATETIME NULL");
             }
-        } catch (err) {}
+        } catch (err) { }
 
         // 10. Ensure reservations table supports waitlist, notification and expiration columns
         try {
             await db.execute(
                 "ALTER TABLE reservations MODIFY COLUMN status ENUM('waiting', 'pending', 'notified', 'ready', 'accepted', 'fulfilled', 'completed', 'cancelled', 'expired') DEFAULT 'waiting'"
             );
-        } catch (err) {}
+        } catch (err) { }
 
         try {
             const [notifiedCol] = await db.execute("SHOW COLUMNS FROM reservations LIKE 'notified_at'");
@@ -233,7 +233,7 @@ async function initOwnerAndConfigTables() {
             if (expiresCol.length === 0) {
                 await db.execute("ALTER TABLE reservations ADD COLUMN expires_at DATETIME NULL");
             }
-        } catch (err) {}
+        } catch (err) { }
 
         // 11. Migrate any existing 'ready' reservations for available books into borrow_requests
         try {
@@ -331,7 +331,7 @@ async function initOwnerAndConfigTables() {
             await db.execute(
                 "ALTER TABLE borrow_records MODIFY COLUMN status ENUM('borrowing', 'returned', 'overdue', 'returned_drop_box') DEFAULT 'borrowing'"
             );
-        } catch (err) {}
+        } catch (err) { }
 
         try {
             const [renewCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'renewal_count'");
@@ -394,6 +394,44 @@ async function initOwnerAndConfigTables() {
             )
         `);
 
+        // 16B. Ensure return_slips table and borrow_records return slip columns exist
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS return_slips (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                return_code VARCHAR(60) UNIQUE NOT NULL,
+                user_id INT NOT NULL,
+                processed_by INT NULL,
+                return_method ENUM('counter', 'drop_box') DEFAULT 'counter',
+                status ENUM('confirmed', 'partial_incident') DEFAULT 'confirmed',
+                book_count INT NOT NULL DEFAULT 1,
+                borrow_slip_codes JSON NULL,
+                items_summary JSON NULL,
+                drop_box_received_at DATETIME NULL,
+                returned_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                notes TEXT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY (processed_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+        `);
+
+        try {
+            const [returnSlipIdCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'return_slip_id'");
+            if (returnSlipIdCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN return_slip_id INT NULL");
+            }
+            const [returnCondCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'return_condition'");
+            if (returnCondCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN return_condition ENUM('normal', 'damaged', 'lost') DEFAULT 'normal'");
+            }
+            const [returnCondNoteCol] = await db.execute("SHOW COLUMNS FROM borrow_records LIKE 'return_condition_note'");
+            if (returnCondNoteCol.length === 0) {
+                await db.execute("ALTER TABLE borrow_records ADD COLUMN return_condition_note TEXT NULL");
+            }
+        } catch (retColErr) {
+            console.error('⚠️ [INIT DB] Error setting up return slip columns:', retColErr.message);
+        }
+
         // 17. Ensure notification_dispatches table exists for Multi-channel Email/SMS tracking
         await db.execute(`
             CREATE TABLE IF NOT EXISTS notification_dispatches (
@@ -411,7 +449,226 @@ async function initOwnerAndConfigTables() {
             )
         `);
 
-        console.log('✅ [INIT DB] Smart Library 4.0 Suite Ready: Maker-Checker, Non-Monetary Discipline, Smart Book Drop 24/7, Exit Passes & Multi-channel Notifications!');
+        // 17B. Ensure email_settings table exists for runtime SMTP configuration (encrypted password)
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS email_settings (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                host VARCHAR(150) NOT NULL,
+                port INT NOT NULL DEFAULT 587,
+                secure TINYINT(1) NOT NULL DEFAULT 0,
+                username VARCHAR(150) NOT NULL,
+                password_encrypted TEXT NOT NULL,
+                from_address VARCHAR(200) NULL,
+                updated_by INT NULL,
+                is_active TINYINT(1) NOT NULL DEFAULT 1,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+            )
+        `);
+
+        // 17C. Ensure cron_job_states table exists to track scheduled execution & missed-run catch-up
+        await db.execute(`
+            CREATE TABLE IF NOT EXISTS cron_job_states (
+                job_name VARCHAR(64) PRIMARY KEY,
+                last_run_date DATE NULL,
+                last_run_at DATETIME NULL,
+                last_status ENUM('success', 'failed') DEFAULT 'success',
+                last_summary TEXT NULL,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+            )
+        `);
+
+        // 17D. Ensure utf8mb4 for notification tables and repair old broken '?' prefix from legacy charset
+        try {
+            await db.execute('ALTER TABLE notifications CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+            await db.execute('ALTER TABLE notification_dispatches CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci');
+            await db.execute("UPDATE notification_dispatches SET title = REPLACE(title, '? [Hòm trả sách 24/7]', '📦 [Hòm trả sách 24/7]') WHERE title LIKE '? [Hòm trả sách 24/7]%'");
+            await db.execute("UPDATE notification_dispatches SET title = REPLACE(title, '? [Phiếu Mượn Sách]', '📋 [Phiếu Mượn Sách]') WHERE title LIKE '? [Phiếu Mượn Sách]%'");
+        } catch (charsetErr) {
+            console.error('⚠️ [INIT DB] Charset utf8mb4 upgrade warning:', charsetErr.message);
+        }
+
+        // 18. Clean up legacy monetary payment logs and old audit wording in activity_logs
+        try {
+            await db.execute(
+                "DELETE FROM activity_logs WHERE action = 'PAY_FINE' OR details LIKE '%Thanh toán phí phạt%' OR details LIKE '%Chuyển khoản VietQR%'"
+            );
+            const [legacyLogs] = await db.execute(
+                "SELECT id, action, details FROM activity_logs WHERE details LIKE '%Phí phạt%' OR details LIKE '%phí phạt%' OR details LIKE '%tiền phạt%' OR details LIKE '%kiểm toán%'"
+            );
+            for (const log of legacyLogs) {
+                let updatedDetails = String(log.details || '');
+                updatedDetails = updatedDetails.replace(
+                    /Phí phạt trễ hạn\s*(\d+\s*ngày)[^]*$/i,
+                    'Trả trễ hạn $1 (áp dụng quy chế kỷ luật mượn)'
+                );
+                updatedDetails = updatedDetails.replace(/kiểm toán hệ thống/gi, 'giám sát hệ thống');
+                updatedDetails = updatedDetails.replace(/kiểm toán/gi, 'giám sát');
+                if (updatedDetails !== log.details) {
+                    await db.execute('UPDATE activity_logs SET details = ? WHERE id = ?', [updatedDetails, log.id]);
+                }
+            }
+        } catch (logCleanupErr) {
+            console.error('⚠️ [INIT DB] Error normalizing legacy activity_logs:', logCleanupErr.message);
+        }
+
+        // 19. Option 4 Risk-Based Warehouse Control: Soft-delete books, audit diff columns & Maker-Checker book_requests tables
+        try {
+            const ensureColumn = async (tableName, columnName, columnDef) => {
+                const [cols] = await db.execute(
+                    `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+                    [tableName, columnName]
+                );
+                if (cols.length === 0) {
+                    await db.execute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDef}`);
+                }
+            };
+
+            await ensureColumn('books', 'status', "ENUM('active', 'inactive', 'disposed') NOT NULL DEFAULT 'active'");
+            await ensureColumn('books', 'deleted_at', 'DATETIME NULL');
+            await ensureColumn('books', 'deleted_by', 'INT NULL');
+
+            await ensureColumn('activity_logs', 'before_data', 'LONGTEXT NULL');
+            await ensureColumn('activity_logs', 'after_data', 'LONGTEXT NULL');
+            await ensureColumn('activity_logs', 'outcome', "VARCHAR(30) DEFAULT 'success'");
+
+            await db.execute(`
+                CREATE TABLE IF NOT EXISTS book_requests (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    request_code VARCHAR(40) UNIQUE NULL,
+                    request_type ENUM('create', 'import', 'restock', 'delete', 'update_sensitive') NOT NULL,
+                    status ENUM('pending', 'approved', 'rejected', 'cancelled', 'completed') DEFAULT 'pending',
+                    title VARCHAR(255) NULL,
+                    reason TEXT NULL,
+                    requested_by INT NOT NULL,
+                    reviewed_by INT NULL,
+                    reviewed_at DATETIME NULL,
+                    review_note TEXT NULL,
+                    completed_at DATETIME NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    FOREIGN KEY (requested_by) REFERENCES users(id) ON DELETE CASCADE,
+                    FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            `);
+
+            await db.execute(`
+                CREATE TABLE IF NOT EXISTS book_request_details (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    request_id INT NOT NULL,
+                    book_id INT NULL,
+                    quantity INT DEFAULT 0,
+                    location VARCHAR(120) NULL,
+                    payload_json LONGTEXT NULL,
+                    before_json LONGTEXT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (request_id) REFERENCES book_requests(id) ON DELETE CASCADE,
+                    FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE SET NULL
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            `);
+
+            await db.execute(`
+                CREATE TABLE IF NOT EXISTS book_request_approvals (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    request_id INT NOT NULL,
+                    reviewer_id INT NOT NULL,
+                    decision ENUM('approved', 'rejected', 'cancelled', 'completed') NOT NULL,
+                    note TEXT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (request_id) REFERENCES book_requests(id) ON DELETE CASCADE,
+                    FOREIGN KEY (reviewer_id) REFERENCES users(id) ON DELETE CASCADE
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            `);
+        } catch (whErr) {
+            console.error('⚠️ [INIT DB] Error initializing Option 4 warehouse governance tables:', whErr.message);
+        }
+
+        // 20. Notification Policy & Deduplication Columns (email_receipts preference + notification_dispatches dedup_key)
+        try {
+            const ensureNotifColumn = async (tableName, columnName, columnDef) => {
+                const [cols] = await db.execute(
+                    `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+                    [tableName, columnName]
+                );
+                if (cols.length === 0) {
+                    await db.execute(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDef}`);
+                }
+            };
+
+            await ensureNotifColumn('user_preferences', 'email_receipts', 'TINYINT(1) NOT NULL DEFAULT 0');
+            await ensureNotifColumn('notification_dispatches', 'dedup_key', 'VARCHAR(191) NULL');
+            await ensureNotifColumn('notification_dispatches', 'event_type', 'VARCHAR(64) NULL');
+
+            const [idxRows] = await db.execute(
+                `SELECT INDEX_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'notification_dispatches' AND INDEX_NAME = 'idx_notification_dispatches_dedup'`
+            );
+            if (idxRows.length === 0) {
+                await db.execute(
+                    'CREATE INDEX idx_notification_dispatches_dedup ON notification_dispatches (dedup_key, status)'
+                );
+            }
+        } catch (notifSchemaErr) {
+            console.error('⚠️ [INIT DB] Error initializing notification policy columns:', notifSchemaErr.message);
+        }
+
+        // 21. Password Reset Tokens Table (Point 1: Forgot Password)
+        try {
+            await db.execute(`
+                CREATE TABLE IF NOT EXISTS password_reset_tokens (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    token VARCHAR(128) NOT NULL,
+                    reset_code VARCHAR(16) NOT NULL,
+                    expires_at DATETIME NOT NULL,
+                    used TINYINT(1) DEFAULT 0,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+                    INDEX idx_password_reset_token (token),
+                    INDEX idx_password_reset_code (user_id, reset_code)
+                ) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci
+            `);
+        } catch (pwErr) {
+            console.error('⚠️ [INIT DB] Error creating password_reset_tokens table:', pwErr.message);
+        }
+
+        // 22. Verified Reader Badge for Reviews (Point 3: Reviews Verification)
+        try {
+            const [revCols] = await db.execute(
+                `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'reviews' AND COLUMN_NAME = 'is_verified_reader'`
+            );
+            if (revCols.length === 0) {
+                await db.execute('ALTER TABLE reviews ADD COLUMN is_verified_reader TINYINT(1) DEFAULT 0');
+                // Backfill for existing reviews if the user has borrowed the book
+                await db.execute(`
+                    UPDATE reviews r
+                    SET r.is_verified_reader = 1
+                    WHERE EXISTS (
+                        SELECT 1 FROM borrow_records br
+                        JOIN book_copies bc ON br.book_copy_id = bc.id
+                        WHERE br.user_id = r.user_id AND bc.book_id = r.book_id
+                    )
+                `);
+            }
+        } catch (revErr) {
+            console.error('⚠️ [INIT DB] Error ensuring reviews is_verified_reader column:', revErr.message);
+        }
+
+        // 23. Ensure Upload Subdirectories Exist (Point 2: Media Storage)
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            const baseUploadDir = path.join(__dirname, '..', 'uploads');
+            ['covers', 'proofs', 'avatars'].forEach((sub) => {
+                const subDir = path.join(baseUploadDir, sub);
+                if (!fs.existsSync(subDir)) {
+                    fs.mkdirSync(subDir, { recursive: true });
+                }
+            });
+        } catch (fsErr) {
+            console.error('⚠️ [INIT DB] Error creating upload directories:', fsErr.message);
+        }
+
+        console.log('✅ [INIT DB] Smart Library 4.0 Suite Ready: Maker-Checker, Non-Monetary Discipline, Smart Book Drop 24/7, Exit Passes, Multi-channel Notifications & Reset Tokens!');
     } catch (error) {
         console.error('⚠️ [INIT DB] Warning initializing owner/config tables:', error.message);
     }

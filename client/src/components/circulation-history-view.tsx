@@ -14,6 +14,7 @@ import api from "@/services/api";
 import { toast } from "sonner";
 import { BookDropAuditModal } from "@/components/book-drop-audit-modal";
 import { ExitPassModal } from "@/components/exit-pass-modal";
+import { ReturnSlipModal, type ReturnSlipData } from "@/components/return-slip-modal";
 
 interface Transaction {
   id: number;
@@ -25,9 +26,16 @@ interface Transaction {
   reader_name: string;
   card_number: string;
   reader_phone?: string;
+  reader_status?: string;
   book_title: string;
   qr_code: string;
   pass_code?: string | null;
+  return_slip_id?: number | null;
+  return_slip_code?: string | null;
+  return_slip_returned_at?: string | null;
+  return_slip_drop_box_received_at?: string | null;
+  return_condition?: "normal" | "damaged" | "lost" | string | null;
+  return_condition_note?: string | null;
   cover_image?: string;
   processed_by_name?: string;
   fine_already_paid?: boolean | number;
@@ -51,6 +59,8 @@ export function CirculationHistoryView() {
   const [previewProofImg, setPreviewProofImg] = useState<{ url: string; title: string; reader: string; time?: string } | null>(null);
   const [selectedSlip, setSelectedSlip] = useState<any>(null);
   const [slipModalOpen, setSlipModalOpen] = useState(false);
+  const [selectedReturnSlip, setSelectedReturnSlip] = useState<ReturnSlipData | null>(null);
+  const [returnSlipModalOpen, setReturnSlipModalOpen] = useState(false);
 
   const formatViDate = (val?: string | null) => {
     if (!val) return "—";
@@ -128,6 +138,8 @@ export function CirculationHistoryView() {
             pass_code: synthCode,
             reader_name: r.reader_name,
             card_number: r.card_number,
+            reader_phone: r.reader_phone,
+            reader_status: r.reader_status,
             created_at: r.borrow_date,
             borrowDate: formatViDate(r.borrow_date),
             dueDate: formatViDate(r.due_date),
@@ -200,6 +212,8 @@ export function CirculationHistoryView() {
         pass_code: passCode,
         reader_name: fallbackItem.reader_name,
         card_number: fallbackItem.card_number,
+        reader_phone: fallbackItem.reader_phone,
+        reader_status: fallbackItem.reader_status,
         created_at: fallbackItem.borrow_date,
         borrowDate: formatViDate(fallbackItem.borrow_date),
         dueDate: formatViDate(fallbackItem.due_date),
@@ -220,6 +234,18 @@ export function CirculationHistoryView() {
       }
     } catch (err: any) {
       toast.error(err.response?.data?.message || `Không tìm thấy Phiếu mượn [${passCode}]`);
+    }
+  };
+
+  const handleOpenReturnSlipByCode = async (returnCode: string) => {
+    try {
+      const res = await api.get(`/borrow/return-slips/${encodeURIComponent(returnCode.trim())}`);
+      if (res.data) {
+        setSelectedReturnSlip(res.data);
+        setReturnSlipModalOpen(true);
+      }
+    } catch (err: any) {
+      toast.error(err.response?.data?.message || `Không tìm thấy Phiếu trả [${returnCode}]`);
     }
   };
 
@@ -279,7 +305,8 @@ export function CirculationHistoryView() {
         item.reader_name?.toLowerCase().includes(q) ||
         item.card_number?.toLowerCase().includes(q) ||
         item.qr_code?.toLowerCase().includes(q) ||
-        item.pass_code?.toLowerCase().includes(q);
+        item.pass_code?.toLowerCase().includes(q) ||
+        item.return_slip_code?.toLowerCase().includes(q);
 
       if (!matchSearch) return false;
 
@@ -579,8 +606,8 @@ export function CirculationHistoryView() {
               <Table key={`table-${statusFilter}`}>
                 <TableHeader>
                   <TableRow className="bg-muted/30">
-                    <TableHead className="text-xs">Ấn phẩm & Bản sao</TableHead>
-                    <TableHead className="text-xs">Phiếu mượn đối soát</TableHead>
+                    <TableHead className="text-xs">Ấn phẩm &amp; Bản sao</TableHead>
+                    <TableHead className="text-xs">Phiếu mượn / Phiếu trả</TableHead>
                     <TableHead className="text-xs">Độc giả</TableHead>
                     <TableHead className="text-xs">Ngày mượn</TableHead>
                     <TableHead className="text-xs">Hạn trả</TableHead>
@@ -607,19 +634,32 @@ export function CirculationHistoryView() {
                             <p className="text-[11px] font-mono text-muted-foreground">{item.qr_code}</p>
                           </TableCell>
                           <TableCell className="py-2.5">
-                            {item.pass_code ? (
-                              <button
-                                type="button"
-                                onClick={() => handleOpenSlipByCode(item.pass_code!, item)}
-                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[10px] cursor-pointer transition-colors"
-                                title="Bấm để mở Phiếu mượn chính thức & đối soát"
-                              >
-                                <QrCode className="h-3 w-3" />
-                                {item.pass_code}
-                              </button>
-                            ) : (
-                              <span className="text-xs text-muted-foreground">—</span>
-                            )}
+                            <div className="flex flex-col items-start gap-1">
+                              {item.pass_code ? (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenSlipByCode(item.pass_code!, item)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-mono font-bold text-[10px] cursor-pointer transition-colors"
+                                  title="Bấm để mở Phiếu mượn chính thức & đối soát"
+                                >
+                                  <QrCode className="h-3 w-3" />
+                                  PM: {item.pass_code}
+                                </button>
+                              ) : (
+                                <span className="text-xs text-muted-foreground">—</span>
+                              )}
+                              {item.return_slip_code && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenReturnSlipByCode(item.return_slip_code!)}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-sky-500/10 hover:bg-sky-500/20 text-sky-700 dark:text-sky-300 border border-sky-500/30 font-mono font-bold text-[10px] cursor-pointer transition-colors"
+                                  title="Bấm để mở Phiếu trả sách điện tử & đối chiếu"
+                                >
+                                  <QrCode className="h-3 w-3" />
+                                  PT: {item.return_slip_code}
+                                </button>
+                              )}
+                            </div>
                           </TableCell>
                           <TableCell className="py-2.5">
                             <p className="font-medium text-xs text-foreground">{item.reader_name}</p>
@@ -657,12 +697,12 @@ export function CirculationHistoryView() {
                                 </div>
                                 {item.drop_box_at && (
                                   <p className="text-[10px] text-muted-foreground font-mono">
-                                    Thả: {new Date(item.drop_box_at).toLocaleString("vi-VN")}
+                                    Tiếp nhận: {new Date(item.drop_box_at).toLocaleString("vi-VN")}
                                   </p>
                                 )}
                                 {item.drop_box_audited_by_name && (
                                   <p className="text-[10px] text-emerald-700 dark:text-emerald-400 font-medium">
-                                    ĐS bởi: {item.drop_box_audited_by_name}
+                                    Xác nhận: {item.drop_box_audited_by_name}
                                     {item.drop_box_audited_at ? ` (${new Date(item.drop_box_audited_at).toLocaleString("vi-VN")})` : ""}
                                   </p>
                                 )}
@@ -706,11 +746,22 @@ export function CirculationHistoryView() {
         </CardContent>
       </Card>
 
-      {/* Official Borrow Slip (Phiếu Mượn & Đối Soát Ra Cổng) Modal */}
+      {/* Official Borrow Slip (Phiếu Mượn & Chứng Từ Đối Soát) Modal */}
       <ExitPassModal
         open={slipModalOpen}
         onOpenChange={setSlipModalOpen}
         passData={selectedSlip}
+      />
+
+      {/* Electronic Return Slip (Phiếu Trả Sách Điện Tử) Modal */}
+      <ReturnSlipModal
+        open={returnSlipModalOpen}
+        onOpenChange={setReturnSlipModalOpen}
+        slipData={selectedReturnSlip}
+        onOpenBorrowSlip={(slipCode) => {
+          setReturnSlipModalOpen(false);
+          handleOpenSlipByCode(slipCode);
+        }}
       />
 
       {/* Book Drop Audit Modal for Librarians */}

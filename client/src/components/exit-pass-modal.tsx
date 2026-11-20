@@ -3,8 +3,46 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription, DialogFooter } f
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { QRCodeCanvas } from "qrcode.react";
-import { FileCheck, BookOpen, Copy, Check, Printer, CheckCircle2, Calendar, UserCheck } from "lucide-react";
+import { FileCheck, BookOpen, Copy, Check, Printer, CheckCircle2, Calendar, UserCheck, User, Phone, CreditCard } from "lucide-react";
 import { toast } from "sonner";
+
+export function maskPhoneNumber(raw?: string | null): string {
+  const cleaned = (raw || "").trim();
+  if (!cleaned) return "Chưa cập nhật";
+  if (cleaned.includes("*")) return cleaned;
+  if (cleaned.length >= 8) {
+    return `${cleaned.slice(0, 7)}${"*".repeat(cleaned.length - 7)}`;
+  }
+  if (cleaned.length > 4) {
+    return `${cleaned.slice(0, 4)}${"*".repeat(cleaned.length - 4)}`;
+  }
+  return cleaned;
+}
+
+export function getReaderStatusMeta(status?: string | null) {
+  switch ((status || "active").toLowerCase()) {
+    case "locked":
+      return {
+        label: "Thẻ đang tạm khóa",
+        className: "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-800/50",
+      };
+    case "pending":
+      return {
+        label: "Chờ duyệt thẻ",
+        className: "bg-amber-50 text-amber-700 border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/50",
+      };
+    case "rejected":
+      return {
+        label: "Thẻ không hợp lệ",
+        className: "bg-red-50 text-red-700 border-red-200 dark:bg-red-950/40 dark:text-red-300 dark:border-red-800/50",
+      };
+    default:
+      return {
+        label: "Thẻ đang hoạt động",
+        className: "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800/50",
+      };
+  }
+}
 
 interface ExitPassModalProps {
   open: boolean;
@@ -25,6 +63,9 @@ interface ExitPassModalProps {
     readerName?: string;
     card_number?: string;
     cardNumber?: string;
+    reader_phone?: string;
+    phone?: string;
+    reader_status?: string;
   } | null;
   borrowRecords?: any[];
 }
@@ -97,25 +138,73 @@ export function ExitPassModal({ open, onOpenChange, passData, borrowRecords = []
   const dueDateStr = firstItem.dueDate || (rawCreatedStr ? defaultDueDateStr : ((passData as any)?.dueDate || defaultDueDateStr));
   const isUsed = passData.status === "used" || (passData as any)?.displayStatus === "used";
 
+  const readerName = passData.reader_name || passData.readerName || "Độc giả thư viện";
+  const readerCardNumber = passData.card_number || passData.cardNumber || "Đang cập nhật";
+  const readerPhoneMasked = maskPhoneNumber(passData.reader_phone || passData.phone);
+  const readerStatusMeta = getReaderStatusMeta(passData.reader_status);
+  const readerInitials = readerName
+    .split(" ")
+    .filter(Boolean)
+    .slice(-2)
+    .map((w) => w[0]?.toUpperCase() || "")
+    .join("") || "DG";
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-[520px] w-[95vw] p-0 overflow-hidden border border-emerald-500/30 shadow-2xl rounded-2xl bg-card">
+      <DialogContent className="sm:max-w-[540px] w-[95vw] p-0 overflow-hidden border border-emerald-500/30 shadow-2xl rounded-2xl bg-card max-h-[92vh] flex flex-col">
         {/* Header - Official Borrow Slip */}
-        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 px-6 py-4 text-white text-center relative overflow-hidden">
+        <div className="bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 px-6 py-4 text-white text-center relative overflow-hidden shrink-0">
           <div className="absolute top-0 right-0 -mr-8 -mt-8 w-24 h-24 bg-white/10 rounded-full blur-xl pointer-events-none" />
           <div className="inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full bg-white/20 backdrop-blur-md text-[11px] font-bold tracking-wider uppercase mb-1.5 border border-white/25">
             <FileCheck className="w-3.5 h-3.5" />
             Phiếu Mượn Sách Chính Thức
           </div>
           <DialogTitle className="text-lg sm:text-xl font-extrabold tracking-tight text-white">
-            Phiếu Mượn & Đối Soát Ra Cổng
+            Phiếu Mượn Sách Điện Tử
           </DialogTitle>
           <DialogDescription className="text-emerald-100 text-xs mt-0.5">
-            Chứng từ xác nhận mượn sách tại quầy — dùng để đối soát mượn trả và xuất trình khi ra cổng
+            Chứng từ xác nhận mượn sách tại quầy — dùng làm minh chứng và đối soát mượn trả khi cần thiết
           </DialogDescription>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+          {/* 2. Verified Reader Information Card */}
+          <div className="rounded-2xl bg-slate-50/90 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 p-3.5 shadow-2xs space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="inline-flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
+                <User className="w-3.5 h-3.5 text-emerald-600" />
+                Thông tin độc giả
+              </span>
+              <Badge variant="outline" className={`text-[10px] font-semibold px-2 py-0.5 ${readerStatusMeta.className}`}>
+                {readerStatusMeta.label}
+              </Badge>
+            </div>
+
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className="h-10 w-10 rounded-full bg-gradient-to-br from-emerald-600 to-teal-600 text-white font-bold text-xs flex items-center justify-center shrink-0 shadow-xs">
+                  {readerInitials}
+                </div>
+                <div className="min-w-0">
+                  <p className="font-bold text-sm text-foreground truncate">{readerName}</p>
+                  <p className="text-xs font-mono font-semibold text-emerald-700 dark:text-emerald-400 flex items-center gap-1 mt-0.5">
+                    <CreditCard className="w-3 h-3 shrink-0" />
+                    <span>Mã thẻ: {readerCardNumber}</span>
+                  </p>
+                </div>
+              </div>
+
+              <div className="sm:text-right pl-[52px] sm:pl-0 shrink-0">
+                <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground flex sm:justify-end items-center gap-1">
+                  <Phone className="w-3 h-3 text-slate-500" /> Số điện thoại
+                </p>
+                <p className="text-xs font-mono font-semibold text-foreground mt-0.5">
+                  {readerPhoneMasked}
+                </p>
+              </div>
+            </div>
+          </div>
+
           {/* Unified QR & Slip Info Card */}
           <div className="flex flex-col sm:flex-row items-center gap-4 p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
             {/* Left: QR Code */}
@@ -131,7 +220,7 @@ export function ExitPassModal({ open, onOpenChange, passData, borrowRecords = []
               {isUsed ? (
                 <span className="mt-2 inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] font-bold">
                   <CheckCircle2 className="w-3 h-3 text-blue-600" />
-                  Đã đối soát qua cổng
+                  Đã kiểm tra đối soát
                 </span>
               ) : (
                 <span className="mt-2 inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 text-[10px] font-bold">
@@ -242,11 +331,11 @@ export function ExitPassModal({ open, onOpenChange, passData, borrowRecords = []
 
           {/* Concise Guidelines Note */}
           <div className="px-3.5 py-2.5 rounded-xl bg-emerald-500/8 border border-emerald-500/20 text-[11px] text-emerald-900 dark:text-emerald-200 leading-relaxed">
-            <strong>📌 Lưu ý:</strong> Phiếu mượn chính thức được chuyển đổi từ <strong>Phiếu mượn nháp</strong> khi Thủ thư xác nhận cho mượn tại quầy (thời hạn mượn tiêu chuẩn <strong>14 ngày</strong> kể từ ngày mượn), dùng để đối soát mượn trả và xuất trình khi ra cổng nếu được hỏi.
+            <strong>📌 Lưu ý:</strong> Phiếu mượn chính thức được chuyển đổi từ <strong>Phiếu mượn nháp</strong> khi Thủ thư xác nhận cho mượn tại quầy (thời hạn mượn tiêu chuẩn <strong>14 ngày</strong> kể từ ngày mượn). Vui lòng lưu giữ hoặc in phiếu để làm minh chứng đối chiếu khi cần thiết.
           </div>
         </div>
 
-        <DialogFooter className="px-5 py-3.5 bg-muted/30 border-t flex flex-row items-center justify-between gap-3">
+        <DialogFooter className="px-5 py-3.5 bg-muted/30 border-t flex flex-row items-center justify-between gap-3 shrink-0">
           <Button
             type="button"
             variant="outline"

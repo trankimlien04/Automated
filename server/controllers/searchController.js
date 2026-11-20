@@ -47,6 +47,7 @@ exports.globalSearch = async (req, res) => {
             LEFT JOIN authors a ON b.author_id = a.id
             LEFT JOIN categories c ON b.category_id = c.id
             LEFT JOIN publishers p ON b.publisher_id = p.id
+            WHERE COALESCE(b.status, 'active') = 'active'
         `);
         const smartRank = rankBooksSmart(allBooks, query, 8);
         results.books = smartRank.books;
@@ -199,7 +200,7 @@ exports.globalSearch = async (req, res) => {
             `, [searchTerm, searchTerm, searchTerm]);
             results.configs = [...configs.map(c => ({ ...c, type: 'config' })), ...proposals.map(p => ({ ...p, type: 'proposal' }))];
 
-            // Tra cứu Nhật ký hoạt động kiểm toán (Audit Logs)
+            // Tra cứu Nhật ký hoạt động hệ thống
             const [logs] = await db.execute(`
                 SELECT al.id, al.action, al.details, al.created_at, u.full_name as actor_name
                 FROM activity_logs al
@@ -246,7 +247,7 @@ exports.globalSearch = async (req, res) => {
             `, [searchTerm, searchTerm, searchTerm, searchTerm]);
             results.users = users;
 
-            // Tra cứu Nhật ký kiểm toán trọng yếu (Audit Trail)
+            // Tra cứu Nhật ký hoạt động trọng yếu của hệ thống
             const [logs] = await db.execute(`
                 SELECT al.id, al.action, al.details, al.created_at, u.full_name as actor_name
                 FROM activity_logs al
