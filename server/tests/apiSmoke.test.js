@@ -26,6 +26,15 @@ require.cache[dbModulePath] = {
 
 const { app } = require('../index');
 
+// Silence console.log during test execution to prevent raw multi-byte emoji logs from corrupting Node.js Test Runner's internal IPC buffer
+const originalConsoleLog = console.log;
+test.beforeEach(() => {
+    console.log = () => {};
+});
+test.afterEach(() => {
+    console.log = originalConsoleLog;
+});
+
 // Note: Express app is invoked in-memory (no TCP bind) so tests pass inside locked-down sandboxes and CI alike.
 function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
     return new Promise((resolve, reject) => {
@@ -53,14 +62,20 @@ function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
         const rawChunks = [];
         const outSocket = new PassThrough();
         outSocket.writable = true;
-        outSocket.cork = () => {};
-        outSocket.uncork = () => {};
-        outSocket.destroy = () => {};
         outSocket._write = (chunk, _enc, cb) => {
             rawChunks.push(Buffer.from(chunk));
             cb();
         };
         res.assignSocket(outSocket);
+
+        const cleanup = () => {
+            try {
+                if (!socket.destroyed) socket.destroy();
+                if (!outSocket.destroyed) outSocket.destroy();
+            } catch {
+                // ignore
+            }
+        };
 
         res.on('finish', () => {
             const raw = Buffer.concat(rawChunks).toString('utf8');
@@ -72,6 +87,7 @@ function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
             } catch {
                 json = null;
             }
+            cleanup();
             resolve({
                 status: res.statusCode,
                 bodyText,
@@ -79,7 +95,17 @@ function invokeApp({ method = 'GET', url, headers = {}, body = null }) {
             });
         });
 
-        app.handle(req, res, reject);
+        res.on('error', (err) => {
+            cleanup();
+            reject(err);
+        });
+
+        app.handle(req, res, (err) => {
+            if (err) {
+                cleanup();
+                reject(err);
+            }
+        });
     });
 }
 
